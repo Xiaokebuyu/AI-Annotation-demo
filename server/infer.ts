@@ -175,3 +175,14 @@ export async function runReflow(payload: any): Promise<any[]> {
     text: String(r.text || '').trim(),
   }));
 }
+
+/** 翻页总结：把一页的标注 + AI 回应压成一句备忘，供跨页综合。 */
+export async function runSummarize(payload: any): Promise<{ summary: string }> {
+  const marks: any[] = payload?.marks || [];
+  if (!marks.length) return { summary: '' };
+  const list = marks.map((m, i) => `${i + 1}. "${String(m.text || '').slice(0, 50)}"${m.note ? ` → ${m.note}` : ''}`).join('\n');
+  const system = '你在为一页阅读做一句话备忘：读者在这页关注/追问了什么、形成了什么想法。';
+  const user = `这页的标注与 AI 回应：\n${list}\n\n用一句中文概括读者在这页的关注线索（≤40 字），只输出这句话，别的不要。`;
+  const raw = await gateway(system, user, 120);
+  return { summary: raw.trim() };
+}

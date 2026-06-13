@@ -7,6 +7,7 @@ import { trace } from './trace';
 import { bus, state, type Stroke } from '../app/state';
 import { ocrProviders } from '../providers/ocr';
 import { inferProviders } from '../providers/inference';
+import { crossPageContext, pageMarks, recordMark, setSummary } from './memory';
 
 /** 单笔封装为契约 shape。会话内多笔共享一个 trace_id（决策：停笔会话）。 */
 export function makeEvent(stroke: Stroke, traceId: string): AnnotationEvent | null {
@@ -140,10 +141,13 @@ export async function commitDiscussion(
   });
   const structured = parts.map((p) => `〔${SYM_LABEL[p.type]}〕"${(p.text || '此处').slice(0, 40)}"`).join('  ');
   const allBlocks = ocrs.flatMap((o) => o?.text_blocks ?? []);
+  // 跨页：把前文脉络（其它页摘要）一并喂推理，让 AI 联系前面读过/标过的内容
+  const ctx = crossPageContext(evt.page_id);
+  const nearby = (ctx ? `${ctx}【本段标注】` : '') + structured;
 
   let result: InferenceResult;
   try {
-    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, modes);
+    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: nearby || null }, modes);
     trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>);
     result = await inferProviders[state.inferProvider](req);
     trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
@@ -164,5 +168,28 @@ export async function commitDiscussion(
   trace('ScreenOverlay(disc)', overlay as unknown as Record<string, unknown>);
   state.overlays.push(overlay);
   bus.emit('overlay:add', overlay);
+  // 记入逐页记忆（按 discId upsert），供翻页总结与跨页综合
+  recordMark(evt.page_id, state.pageIndex, {
+    discId,
+    gesture: evt.event_type,
+    text: parts.map((p) => p.text).filter(Boolean).join(' '),
+    note: result.content,
+  });
   mark('total', performance.now() - penUpAt);
+}
+
+/** 翻页时把上一页的标注记忆压成一句摘要，存进记忆供后续跨页综合。 */
+export async function summarizePage(pageId: string): Promise<void> {
+  const marks = pageMarks(pageId);
+  if (!marks.length) return;
+  try {
+    const resp = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ marks }),
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data?.summary) setSummary(pageId, String(data.summary).trim());
+  } catch { /* 总结失败不影响主流程 */ }
 }

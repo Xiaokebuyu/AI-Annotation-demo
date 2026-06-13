@@ -1,5 +1,5 @@
 import './styles.css';
-import { recordEvent, commitDiscussion } from './core/pipeline';
+import { recordEvent, commitDiscussion, summarizePage } from './core/pipeline';
 import { resolveGesture, isDeliberate, type Gesture } from './core/gesture';
 import { shortId } from './core/ids';
 import { bus, state, settings } from './app/state';
@@ -182,8 +182,13 @@ let lastPageId: string | null = null;
 bus.on('page:rendered', () => {
   $('page-ind').textContent = `第 ${state.pageIndex + 1} / ${state.pageCount} 页`;
   $('zoom-ind').textContent = `${Math.round(state.zoom * 100)}%`;
-  // 翻页（非缩放重渲）时取消在途计时：别让旧页的停顿综合在新页触发
-  if (state.pageId !== lastPageId) { lastPageId = state.pageId; cancelTimers(); }
+  // 翻页（非缩放重渲）：取消在途计时 + 总结上一页（喂跨页综合）
+  if (state.pageId !== lastPageId) {
+    const prev = lastPageId;
+    lastPageId = state.pageId;
+    cancelTimers();
+    if (prev) void summarizePage(prev);
+  }
 });
 
 $('prev').addEventListener('click', () => gotoPage(-1));
