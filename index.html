@@ -1,612 +1,87 @@
 <!DOCTYPE html>
 <html lang="zh">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Annotation Loop Demo — A组竖切（渲染→采集→event→mock推理→回屏）</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<style>
-  :root {
-    --paper:#fbfaf6; --desk:#eceae3; --ink:#1f1d1a; --mut:#6f6a61;
-    --line:#d8d4ca; --line-strong:#b9b3a6; --card-bg:#f3f0e8; --accent:#2a2620;
-    --ok:#2e7d4f; --bad:#b3382f;
-    --serif:"Noto Serif SC","Songti SC",Georgia,serif;
-    --sans:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;
-    --mono:ui-monospace,"SF Mono",Menlo,monospace;
-  }
-  * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.6 var(--sans); color:var(--ink); background:var(--desk); }
-
-  /* ───── 顶栏 ───── */
-  header {
-    display:flex; gap:14px; align-items:center; flex-wrap:wrap;
-    padding:10px 18px; background:var(--paper);
-    border-bottom:1px solid var(--line-strong);
-    box-shadow:0 1px 0 rgba(255,255,255,.6) inset;
-    position:sticky; top:0; z-index:10;
-  }
-  .brand { font:600 17px/1 var(--serif); letter-spacing:.5px; margin-right:4px; }
-  .brand span { border-bottom:3px double var(--ink); }
-  .brand em { display:block; font:400 10px/1.4 var(--sans); font-style:normal; color:var(--mut); letter-spacing:1px; margin-top:6px; }
-  .btn {
-    font:13px var(--sans); padding:5px 12px; cursor:pointer;
-    color:var(--ink); background:var(--paper);
-    border:1px solid var(--line-strong); border-radius:6px;
-    transition:background .15s, transform .05s;
-  }
-  .btn:hover { background:#f1eee6; }
-  .btn:active { transform:translateY(1px); }
-  .btn.primary { background:var(--accent); color:var(--paper); border-color:var(--accent); }
-  .btn.primary:hover { background:#403a31; }
-  .ctl-group {
-    display:inline-flex; align-items:center; gap:2px;
-    border:1px solid var(--line); border-radius:8px; padding:2px;
-    background:#f5f3ec;
-  }
-  .ctl-group .btn { border:none; background:transparent; border-radius:6px; }
-  .ctl-group .btn:hover { background:#e9e5da; }
-  .ctl-group .ind { font:12px var(--mono); color:var(--mut); padding:0 8px; min-width:52px; text-align:center; }
-  .ctl-group.sel { padding:2px 6px; gap:6px; }
-  .ctl-group.sel label { font-size:11px; color:var(--mut); letter-spacing:1px; }
-  select {
-    font:12px var(--sans); color:var(--ink);
-    border:none; background:transparent; cursor:pointer; outline:none; max-width:170px;
-  }
-  .pill {
-    margin-left:auto; font:11px var(--mono); padding:4px 10px;
-    border:1px solid var(--line); border-radius:99px; background:#f5f3ec; color:var(--mut);
-  }
-  .pill.ok { color:var(--ok); border-color:var(--ok); }
-  .pill.fail { color:var(--bad); border-color:var(--bad); font-weight:700; }
-
-  /* ───── 主区 ───── */
-  main { display:flex; gap:16px; padding:16px 18px; align-items:flex-start; }
-  #stage-wrap { flex:1; overflow:auto; max-height:calc(100vh - 86px); padding-bottom:8px; }
-  #stage {
-    position:relative; margin:0 auto; background:var(--paper); touch-action:none;
-    box-shadow:0 1px 2px rgba(60,50,30,.12), 0 8px 28px rgba(60,50,30,.18);
-    border-radius:2px;
-  }
-  #page-layer, #ink-layer { position:absolute; left:0; top:0; }
-  #ink-layer { touch-action:none; cursor:crosshair; }
-  #overlay-layer { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
-  .anchor {
-    position:absolute; border:1.5px dashed var(--line-strong); border-radius:5px;
-    pointer-events:auto; cursor:pointer; transition:all .2s;
-    box-shadow:0 0 0 3px rgba(185,179,166,.0);
-  }
-  .anchor.hot { background:rgba(185,179,166,.22); box-shadow:0 0 0 3px rgba(185,179,166,.35); }
-  #drop-hint { padding:110px 30px 130px; text-align:center; color:var(--mut); font-family:var(--serif); }
-  #drop-hint::before { content:"✎"; display:block; font-size:44px; margin-bottom:14px; opacity:.4; }
-
-  /* ───── 侧栏 ───── */
-  #side { width:350px; max-height:calc(100vh - 86px); overflow:auto; display:flex; flex-direction:column; gap:12px; }
-  .panel {
-    background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:12px 14px;
-    box-shadow:0 1px 3px rgba(60,50,30,.06);
-  }
-  .panel h3 {
-    margin:0 0 10px; font:600 12px var(--sans); color:var(--mut);
-    letter-spacing:1.5px; text-transform:uppercase;
-    padding-bottom:6px; border-bottom:1px solid var(--line);
-  }
-  .panel h3 a { color:var(--mut); }
-  .empty { color:var(--mut); font-size:12px; font-style:italic; }
-
-  /* AI 卡片：电子纸式 margin card */
-  .card {
-    background:var(--card-bg); border:1px dashed var(--line-strong); border-radius:8px;
-    padding:10px 12px; margin-bottom:10px; cursor:default;
-    transition:box-shadow .15s;
-  }
-  .card:hover { box-shadow:0 2px 8px rgba(60,50,30,.12); }
-  .card .ttl { font:600 11px var(--sans); color:var(--mut); letter-spacing:1.5px; text-transform:uppercase; margin-bottom:5px; }
-  .card > div:nth-child(2) { font-family:var(--serif); font-size:13.5px; }
-  .card .refs { font:10px var(--mono); color:var(--mut); margin-top:8px; opacity:.85; }
-  .card .acts { margin-top:8px; display:flex; gap:8px; }
-  .card .acts button {
-    font:12px var(--sans); padding:3px 14px; cursor:pointer; border-radius:5px;
-    border:1px solid var(--line-strong); background:var(--paper);
-  }
-  .card .acts button[data-act="accept"] { background:var(--accent); color:var(--paper); border-color:var(--accent); }
-  .card .acts button:active { transform:translateY(1px); }
-  .card.accepted { border-style:solid; border-color:var(--ok); }
-  .card.accepted .ttl::after { content:" · 已入沉淀"; color:var(--ok); }
-  .card.dismissed { opacity:.4; }
-  .card.error { border-color:var(--bad); }
-  .card.error .ttl { color:var(--bad); }
-
-  /* 统计 / trace */
-  table#stat-tbl { width:100%; border-collapse:collapse; font:12px var(--mono); }
-  #stat-tbl th { font-family:var(--sans); font-weight:500; color:var(--mut); }
-  #stat-tbl td, #stat-tbl th { border-bottom:1px solid #eee9de; padding:4px 5px; text-align:right; }
-  #stat-tbl th:first-child, #stat-tbl td:first-child { text-align:left; font-family:var(--sans); }
-  #north-star { font-size:12px; color:var(--mut); margin-top:8px; }
-  #trace-log {
-    font:10.5px/1.7 var(--mono); white-space:pre; overflow:auto; max-height:190px;
-    background:#262320; color:#cfc9bc; padding:8px 10px; border-radius:6px;
-  }
-  ::-webkit-scrollbar { width:8px; height:8px; }
-  ::-webkit-scrollbar-thumb { background:var(--line-strong); border-radius:4px; }
-  ::-webkit-scrollbar-track { background:transparent; }
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InkLoop · AI 标注阅读</title>
 </head>
 <body>
-<header>
-  <div class="brand">Ink<span>Loop</span><em>A组竖切 · 闭环验证</em></div>
-  <label for="file-in" class="btn primary">✎ 导入 PDF</label>
-  <input type="file" id="file-in" accept="application/pdf" hidden>
-  <div class="ctl-group">
-    <button id="prev" class="btn" title="上一页">←</button><span id="page-ind" class="ind">– / –</span><button id="next" class="btn" title="下一页">→</button>
-  </div>
-  <div class="ctl-group">
-    <button id="zoom-out" class="btn" title="缩小">−</button><span id="zoom-ind" class="ind">100%</span><button id="zoom-in" class="btn" title="放大">＋</button>
-  </div>
-  <div class="ctl-group sel"><label>OCR</label><select id="ocr-provider"><option value="textlayer">PDF text layer（真实文本）</option><option value="mock">deterministic mock</option><option value="vlm">VLM cloud_fallback（stub）</option><option value="local">本地 OCR（B组接入）</option></select></div>
-  <div class="ctl-group sel"><label>推理</label><select id="infer-provider"><option value="mock">deterministic mock</option><option value="fail">模拟失败（测 A11）</option><option value="cloud">真实云端（stub）</option></select></div>
-  <span id="selftest" class="pill">坐标自测：未运行</span>
-</header>
-<main>
-  <div id="stage-wrap">
-    <div id="stage">
-      <canvas id="page-layer"></canvas>
-      <canvas id="ink-layer"></canvas>
-      <div id="overlay-layer"></div>
-      <div id="drop-hint">点击顶栏「导入 PDF」打开一份文档<br>然后直接用鼠标 / Apple Pencil / 手指在页面上圈、划、写</div>
+  <header id="topbar">
+    <div class="brand">InkLoop</div>
+    <div class="doc-meta">
+      <span id="doc-name">未打开文档</span>
+      <span id="page-ind"></span>
     </div>
-  </div>
-  <aside id="side">
-    <div class="panel"><h3>💡 AI Insight 队列（点击卡片定位锚点）</h3><div id="cards"><span class="empty">尚无标注 —— 在页面上画一笔试试</span></div></div>
-    <div class="panel"><h3>⏱ 分段延迟（喂 I2 scorecard）</h3>
-      <table id="stat-tbl"><thead><tr><th>段</th><th>最近</th><th>P50</th></tr></thead><tbody id="stat-body"></tbody></table>
-      <div id="north-star" style="font-size:12px;color:var(--mut);margin-top:6px">接受 0 / 忽略 0 / 共 0 条</div>
+    <div class="top-ctl">
+      <button id="prev" class="ghost" title="上一页 ←">‹</button>
+      <button id="next" class="ghost" title="下一页 →">›</button>
+      <span class="vsep"></span>
+      <button id="zoom-out" class="ghost" title="缩小">−</button>
+      <span id="zoom-ind" class="zoom-ind">100%</span>
+      <button id="zoom-in" class="ghost" title="放大">＋</button>
+      <span class="vsep"></span>
+      <label for="file-in" class="ghost import-label">导入 PDF</label>
+      <input type="file" id="file-in" accept="application/pdf" hidden />
+      <button id="insight-toggle" class="ghost" title="本页洞察">洞察</button>
+      <button id="dev-toggle" class="ghost" title="开发面板（d）">⋯</button>
     </div>
-    <div class="panel"><h3>🧾 Trace（JSONL，<a href="#" id="dl-trace">下载</a>）</h3><div id="trace-log"></div></div>
+  </header>
+
+  <main>
+    <section id="reading">
+      <div id="stage-wrap">
+        <div id="stage">
+          <canvas id="page-layer"></canvas>
+          <canvas id="ink-layer"></canvas>
+          <div id="whisper-layer"></div>
+          <div id="empty-state">
+            <div class="es-mark">✎</div>
+            <p class="es-title">把 PDF 拖到这里，或点击导入</p>
+            <p class="es-sub">在原文上圈、划、写 —— 每一次标注，都是一次思考的起点</p>
+            <label for="file-in" class="primary-btn">导入 PDF</label>
+          </div>
+        </div>
+      </div>
+      <nav id="toolbar" aria-label="标注工具"></nav>
+    </section>
+
+    <aside id="insight">
+      <div class="panel-head">
+        <span class="panel-title">本页洞察</span>
+        <span id="insight-count" class="panel-count"></span>
+      </div>
+      <div id="cards"><p class="empty-hint">标注后，洞察会先在原文旁低语，并在此留存回看</p></div>
+      <div id="panel-foot"></div>
+    </aside>
+  </main>
+
+  <aside id="dev-drawer" hidden>
+    <div class="drawer-head">
+      <span>开发面板</span>
+      <button id="drawer-close" class="ghost">✕</button>
+    </div>
+    <div class="drawer-section">
+      <label>OCR provider</label>
+      <select id="ocr-provider"></select>
+      <label>推理 provider</label>
+      <select id="infer-provider"></select>
+    </div>
+    <div class="drawer-section">
+      <div id="selftest">坐标自测：未运行</div>
+    </div>
+    <div class="drawer-section">
+      <label>分段延迟（喂 I2 scorecard）</label>
+      <table id="metrics-tbl">
+        <thead><tr><th>段</th><th>最近</th><th>P50</th></tr></thead>
+        <tbody id="metrics-body"></tbody>
+      </table>
+    </div>
+    <div class="drawer-section grow">
+      <label>Trace <button id="dl-trace" class="ghost mini">下载 JSONL</button></label>
+      <div id="trace-log"></div>
+    </div>
   </aside>
-</main>
 
-<script>
-'use strict';
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-/* ========================================================================
- * 0. 基础工具与会话身份
- * ====================================================================== */
-const uuid = () => crypto.randomUUID();
-const $ = id => document.getElementById(id);
-async function sha256Hex(buf) {
-  const d = await crypto.subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
-}
-const DEVICE_ID = localStorage.dev_id || (localStorage.dev_id = 'dev_' + uuid().slice(0, 8));
-const SESSION_ID = 'ses_' + uuid().slice(0, 8);
-
-const state = {
-  pdf: null, documentId: null, fileHash: null, pageCount: 0,
-  pageIndex: 0, pageId: null, pageRecord: null,
-  zoom: 1.0, baseScale: 1.0,
-  strokes: [],           // 当前页已画 stroke（页面归一化坐标），重渲染时重放
-  textBlocks: [],        // 当前页 text layer（归一化 bbox + 真实文本），数字版 PDF 免 OCR
-  overlays: [],          // 当前页 overlay（归一化锚点），缩放时重定位
-  lat: { pen_event: [], event_ocr: [], ocr_result: [], result_screen: [], total: [] },
-  accepted: 0, dismissed: 0, totalCards: 0,
-  traceLines: [],
-};
-
-/* ========================================================================
- * 1. Transform 栈 —— 坐标换算只发生在这两个函数里（D1 的代码化身）
- *    页面归一化坐标 [0,1]² ⇄ stage 内 CSS 像素。
- *    缩放只改变 pageCss 尺寸，归一化坐标永远不变。
- * ====================================================================== */
-let pageCss = { w: 0, h: 0 };                    // 当前渲染出的页面 CSS 尺寸
-const normToPx = (nx, ny) => ({ x: nx * pageCss.w, y: ny * pageCss.h });
-const pxToNorm = (px, py) => ({ x: px / pageCss.w, y: py / pageCss.h });
-
-function selfTestCoords() {
-  let maxErr = 0;
-  for (let i = 0; i < 1000; i++) {
-    const nx = Math.random(), ny = Math.random();
-    const p = normToPx(nx, ny), back = pxToNorm(p.x, p.y);
-    maxErr = Math.max(maxErr, Math.abs(back.x - nx), Math.abs(back.y - ny));
-  }
-  const el = $('selftest'), ok = maxErr < 1e-9;
-  el.textContent = `坐标自测：${ok ? '✓' : '✗'} 1000pts maxErr=${maxErr.toExponential(1)} @zoom ${(state.zoom*100)|0}%`;
-  el.className = 'pill ' + (ok ? 'ok' : 'fail');
-  return ok;
-}
-
-/* ========================================================================
- * 2. 渲染层 —— PDF.js 页面 → canvas（devicePixelRatio 防糊）
- * ====================================================================== */
-const pageCv = $('page-layer'), inkCv = $('ink-layer');
-async function renderPage() {
-  const page = await state.pdf.getPage(state.pageIndex + 1);
-  const dpr = window.devicePixelRatio || 1;
-  const vp1 = page.getViewport({ scale: 1 });
-  state.baseScale = 760 / vp1.width;                       // 适配 ~760px 宽
-  const vp = page.getViewport({ scale: state.baseScale * state.zoom });
-  pageCss = { w: vp.width, h: vp.height };
-
-  for (const cv of [pageCv, inkCv]) {
-    cv.width = vp.width * dpr; cv.height = vp.height * dpr;
-    cv.style.width = vp.width + 'px'; cv.style.height = vp.height + 'px';
-  }
-  $('stage').style.width = vp.width + 'px';
-  $('stage').style.height = vp.height + 'px';
-
-  // 同一 canvas 不允许并发 render（快速连点缩放/翻页会触发）：先取消未完成的任务
-  if (state.renderTask) { try { state.renderTask.cancel(); } catch (_) {} }
-  const ctx = pageCv.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  state.renderTask = page.render({ canvasContext: ctx, viewport: vp });
-  try {
-    await state.renderTask.promise;
-  } catch (e) {
-    if (e && e.name === 'RenderingCancelledException') return;  // 被更新的渲染取代，正常退出
-    throw e;
-  } finally {
-    state.renderTask = null;
-  }
-
-  // text layer：数字版 PDF 的真实文本 + 精确位置（归一化存储，zoom/rotation 无关）
-  try {
-    const tc = await page.getTextContent();
-    state.textBlocks = tc.items.filter(it => it.str && it.str.trim()).map((it, i) => {
-      const [a, b, , d, e, f] = it.transform;
-      const fontH = Math.hypot(b, d) || Math.abs(d) || 10;          // 字高（PDF 单位）
-      const [vx1, vy1] = vp.convertToViewportPoint(e, f);            // 基线起点
-      const [vx2, vy2] = vp.convertToViewportPoint(e + it.width, f + fontH);
-      const x0 = Math.min(vx1, vx2) / vp.width, x1 = Math.max(vx1, vx2) / vp.width;
-      const y0 = Math.min(vy1, vy2) / vp.height, y1 = Math.max(vy1, vy2) / vp.height;
-      return { id: 'tl_' + i, text: it.str, bbox: [x0, y0, x1 - x0, y1 - y0] };
-    });
-  } catch (_) { state.textBlocks = []; }
-
-  // PDFPage v0 记录（width/height 为 PDF 单位，是归一化坐标的换算基准）
-  state.pageId = `pg_${state.documentId.slice(4, 12)}_${state.pageIndex}`;
-  state.pageRecord = {
-    page_id: state.pageId, document_id: state.documentId, page_index: state.pageIndex,
-    width: vp1.width, height: vp1.height, unit: 'pt', rotation: page.rotate,
-    render_dpi: Math.round(96 * state.baseScale * state.zoom), version: '0',
-  };
-  $('page-ind').textContent = `${state.pageIndex + 1} / ${state.pageCount}`;
-  $('zoom-ind').textContent = `${Math.round(state.zoom * 100)}%`;
-
-  redrawInk(); repositionAnchors(); selfTestCoords();
-}
-
-/* ========================================================================
- * 3. 墨迹采集层 —— Pointer Events + coalesced events，无损（D3 的代码化身）
- *    存储一律页面归一化坐标；缩放后重放笔迹位置不变。
- * ====================================================================== */
-const ink = inkCv.getContext('2d');
-let live = null;   // 进行中的 stroke
-
-function drawSeg(a, b, w) {  // a,b 归一化点
-  const dpr = window.devicePixelRatio || 1;
-  const p1 = normToPx(a.x, a.y), p2 = normToPx(b.x, b.y);
-  ink.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ink.strokeStyle = '#1a1a1a'; ink.lineCap = 'round'; ink.lineWidth = w;
-  ink.beginPath(); ink.moveTo(p1.x, p1.y); ink.lineTo(p2.x, p2.y); ink.stroke();
-}
-function redrawInk() {
-  const dpr = window.devicePixelRatio || 1;
-  ink.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ink.clearRect(0, 0, pageCss.w, pageCss.h);
-  for (const s of state.strokes)
-    for (let i = 1; i < s.points.length; i++)
-      drawSeg(s.points[i-1], s.points[i], 1.2 + 2.2 * (s.points[i].pressure || 0.45));
-}
-function evtNorm(e) {
-  const r = inkCv.getBoundingClientRect();
-  return pxToNorm(e.clientX - r.left, e.clientY - r.top);
-}
-
-inkCv.addEventListener('pointerdown', e => {
-  if (!state.pdf) return;
-  e.preventDefault();
-  inkCv.setPointerCapture(e.pointerId);
-  const p = evtNorm(e);
-  live = { t0: performance.now(), pointerType: e.pointerType,
-           points: [{ x: p.x, y: p.y, t: 0, pressure: e.pressure || 0 }] };
-});
-inkCv.addEventListener('pointermove', e => {
-  if (!live) return;
-  e.preventDefault();
-  // 无损：优先取全部合并点；部分环境（合成事件/旧内核）返回空数组，必须回退到事件本身
-  let raw = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
-  if (!raw.length) raw = [e];
-  for (const ce of raw) {
-    const p = evtNorm(ce);
-    const pt = { x: p.x, y: p.y, t: Math.round(performance.now() - live.t0), pressure: ce.pressure || 0 };
-    drawSeg(live.points[live.points.length - 1], pt, 1.2 + 2.2 * (pt.pressure || 0.45));   // 压感笔宽
-    live.points.push(pt);
-  }
-});
-inkCv.addEventListener('pointerup', e => {
-  if (!live) return;
-  const penUpAt = performance.now();
-  const stroke = live; live = null;
-  state.strokes.push(stroke);
-  const evt = buildAnnotationEvent(stroke);              // ← 抬笔 = 与队友 listener 的交接点
-  markLat('pen_event', penUpAt, performance.now());
-  pipeline(evt, penUpAt);
-});
-inkCv.addEventListener('pointercancel', () => { live = null; });
-
-/* ========================================================================
- * 4. AnnotationEvent v0 组装 —— event_type 简易分类器 + 契约 shape
- * ====================================================================== */
-function bboxOf(points) {
-  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
-  for (const p of points) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
-  return [x0, y0, x1 - x0, y1 - y0];   // 归一化 [x, y, w, h]
-}
-function classify(points, bb) {
-  const diagPx = Math.hypot(bb[2] * pageCss.w, bb[3] * pageCss.h);
-  if (points.length <= 3 || diagPx < 8) return 'tap_region';
-  const first = points[0], last = points[points.length - 1];
-  const closure = Math.hypot((last.x - first.x) * pageCss.w, (last.y - first.y) * pageCss.h);
-  let len = 0;
-  for (let i = 1; i < points.length; i++)
-    len += Math.hypot((points[i].x - points[i-1].x) * pageCss.w, (points[i].y - points[i-1].y) * pageCss.h);
-  if (closure < 0.25 * diagPx && len > 1.5 * diagPx) return 'circle';
-  if (bb[3] * pageCss.h < 14 && bb[2] * pageCss.w > 4 * bb[3] * pageCss.h) return 'underline';
-  return 'stroke';
-}
-function buildAnnotationEvent(stroke) {
-  const bb = bboxOf(stroke.points);
-  const evt = {
-    event_id: 'evt_' + uuid().slice(0, 8), trace_id: 'trc_' + uuid().slice(0, 8),
-    document_id: state.documentId, page_id: state.pageId,
-    event_type: classify(stroke.points, bb),
-    geometry: { bbox: bb },                          // 全部归一化（D1）
-    stroke_points: stroke.points,                    // 无损原样保留（D3）
-    text_note: null, created_at: new Date().toISOString(),
-    device_id: DEVICE_ID, session_id: SESSION_ID, version: '0',
-    pointer_type: stroke.pointerType,
-  };
-  trace('AnnotationEvent', evt);
-  return evt;
-}
-
-/* ========================================================================
- * 5. OCR / 推理 provider —— 三档可切换，契约即接缝（D4）
- *    B 组只需要替换这里的实现，shape 不变，链路其余部分零修改。
- * ====================================================================== */
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const ocrProviders = {
-  async mock(evt) {
-    await sleep(120);
-    const [x, y, w, h] = evt.geometry.bbox, pad = 0.04;
-    return {
-      ocr_result_id: 'ocr_' + uuid().slice(0, 8), trace_id: evt.trace_id, event_id: evt.event_id,
-      page_id: evt.page_id, scope: 'region',
-      text_blocks: [{ id: 'ocrb_1', text: `（mock）第 ${state.pageIndex + 1} 页标注区域的文本内容`, bbox: [Math.max(0, x - pad), Math.max(0, y - pad), w + 2 * pad, h + 2 * pad], confidence: 0.91, language: 'zh' }],
-      model_name: 'deterministic-mock', model_version: '0', runtime: 'mock', latency_ms: 120,
-    };
-  },
-  async textlayer(evt) {
-    // 真实数据路径：标注 bbox 与 PDF.js text layer 几何相交（即「内容长出来的单元格」）
-    const t0 = performance.now();
-    const [x, y, w, h] = evt.geometry.bbox, pad = 0.012;
-    const core = [x - pad, y - pad, w + 2 * pad, h + 2 * pad];
-    const near = [x - 0.06, y - 0.04, w + 0.12, h + 0.08];
-    const hit = (r, b) => b[0] < r[0] + r[2] && b[0] + b[2] > r[0] && b[1] < r[1] + r[3] && b[1] + b[3] > r[1];
-    const coreBlocks = state.textBlocks.filter(tb => hit(core, tb.bbox));
-    const nearText = state.textBlocks.filter(tb => hit(near, tb.bbox)).map(tb => tb.text).join(' ');
-    if (!coreBlocks.length) {
-      // 扫描版 PDF / 空白区域：text layer 拿不到内容，这正是 B 组真 OCR 的领地
-      return {
-        ocr_result_id: 'ocr_' + uuid().slice(0, 8), trace_id: evt.trace_id, event_id: evt.event_id,
-        page_id: evt.page_id, scope: 'region', text_blocks: [],
-        nearby_text: nearText || null, note: 'text layer 无命中（扫描版或空白区域），需真实 OCR',
-        model_name: 'pdfjs-textlayer', model_version: '3.11', runtime: 'pdf_text_layer',
-        latency_ms: Math.round(performance.now() - t0),
-      };
-    }
-    return {
-      ocr_result_id: 'ocr_' + uuid().slice(0, 8), trace_id: evt.trace_id, event_id: evt.event_id,
-      page_id: evt.page_id, scope: 'region',
-      text_blocks: coreBlocks.map(tb => ({ id: tb.id, text: tb.text, bbox: tb.bbox, confidence: 1.0, language: 'auto' })),
-      nearby_text: nearText,
-      model_name: 'pdfjs-textlayer', model_version: '3.11', runtime: 'pdf_text_layer',
-      latency_ms: Math.round(performance.now() - t0),
-    };
-  },
-  async vlm(evt) {
-    // TODO（本周解锁真闭环）：裁剪 bbox 区域截图 → 调多模态模型 → 组装成同样的 OCRResult shape。
-    // 注意：bbox 直接用标注几何派生的裁剪框（粗但诚实），runtime 必须如实写 'cloud_fallback'。
-    throw new Error('VLM provider 未接入：在 ocrProviders.vlm 中填入 API 调用');
-  },
-  async local(evt) { throw new Error('本地 OCR 由 B 组接入（B3）'); },
-};
-let inferCounter = 0;
-const inferProviders = {
-  async mock(req) {
-    await sleep(600);
-    const types = ['question', 'inspiration', 'connection'];
-    const t = types[inferCounter++ % types.length];
-    const snippet = (req.ocr_blocks[0]?.text || req.nearby_text || '该区域').slice(0, 24);
-    const content = {
-      question: `这里值得追问：「${snippet}…」背后的假设是否成立？`,
-      inspiration: `「${snippet}」可以和你之前标注过的概念建立联系，形成一个新的假设方向。`,
-      connection: `「${snippet}」与本文档其他章节可能存在呼应，建议对照阅读。`,
-    }[t];
-    return {
-      result_id: 'res_' + uuid().slice(0, 8), trace_id: req.trace_id, request_id: req.request_id, result_type: t, content,
-      source_refs: [{ page_id: req.annotation_event.page_id, bbox: req.ocr_blocks[0]?.bbox || req.annotation_event.geometry.bbox, ocr_block_ids: req.ocr_blocks.map(b => b.id), event_id: req.event_id }],
-      confidence: 0.82, created_at: new Date().toISOString(), model_name: 'deterministic-mock', model_version: '0',
-    };
-  },
-  async fail() { await sleep(400); throw new Error('模拟云端超时（A11 演练）'); },
-  async cloud(req) { throw new Error('真实云端推理待 AB1 定稿后接入（A8）'); },
-};
-
-function buildInferenceRequest(evt, ocr) {
-  const req = {
-    request_id: 'req_' + uuid().slice(0, 8), trace_id: evt.trace_id, event_id: evt.event_id,
-    document_context: { document_id: evt.document_id }, page_context: { page_id: evt.page_id, page_index: state.pageIndex },
-    annotation_event: { event_type: evt.event_type, page_id: evt.page_id, geometry: evt.geometry },
-    ocr_blocks: ocr.text_blocks, nearby_text: ocr.nearby_text || null, user_profile_stub: null,
-    output_modes: ['inspiration', 'question', 'connection'], version: '0',
-  };
-  trace('InferenceRequest', req);
-  return req;
-}
-
-/* ========================================================================
- * 6. 闭环管线 —— event → OCR → request → result → overlay，含 A11 降级
- * ====================================================================== */
-async function pipeline(evt, penUpAt) {
-  const tEvent = performance.now();
-  let result, ocr;
-  try {
-    ocr = await ocrProviders[$('ocr-provider').value](evt);
-    trace('OCRResult', ocr);
-    markLat('event_ocr', tEvent, performance.now());
-    const tOcr = performance.now();
-    const req = buildInferenceRequest(evt, ocr);
-    result = await inferProviders[$('infer-provider').value](req);
-    trace('InferenceResult', result);
-    markLat('ocr_result', tOcr, performance.now());
-  } catch (err) {
-    result = { result_id: 'res_' + uuid().slice(0, 8), trace_id: evt.trace_id, result_type: 'error', content: '稍后生成：' + err.message,
-               source_refs: [{ page_id: evt.page_id, bbox: evt.geometry.bbox, event_id: evt.event_id }],
-               created_at: new Date().toISOString(), model_name: 'n/a', model_version: '0' };
-    trace('InferenceResult(error)', result);
-  }
-  const tResult = performance.now();
-  renderOverlay(buildOverlay(result, evt));
-  markLat('result_screen', tResult, performance.now());
-  markLat('total', penUpAt, performance.now());
-  updateStats();
-}
-
-/* ========================================================================
- * 7. Overlay 回屏 —— 锚点贴在页面正确区域（canvas 外的 DOM），卡片进侧边队列
- * ====================================================================== */
-function buildOverlay(result, evt) {
-  const o = {
-    overlay_id: 'ovl_' + uuid().slice(0, 8), trace_id: evt.trace_id, page_id: evt.page_id,
-    result_id: result.result_id,
-    overlay_type: { question: 'question', inspiration: 'note', connection: 'link', error: 'suggestion_card' }[result.result_type] || 'note',
-    geometry: { anchor_bbox: result.source_refs[0].bbox },   // 归一化锚点
-    display_text: result.content, dismissible: true, created_at: new Date().toISOString(),
-    state: 'shown', _result_type: result.result_type,
-  };
-  trace('ScreenOverlay', o);
-  return o;
-}
-function repositionAnchors() {
-  for (const o of state.overlays) positionAnchor(o);
-}
-function positionAnchor(o) {
-  if (!o._anchorEl || o.page_id !== state.pageId) { if (o._anchorEl) o._anchorEl.style.display = 'none'; return; }
-  const [x, y, w, h] = o.geometry.anchor_bbox;
-  const p = normToPx(x, y), s = normToPx(x + w, y + h);
-  Object.assign(o._anchorEl.style, { display: 'block', left: p.x + 'px', top: p.y + 'px', width: (s.x - p.x) + 'px', height: (s.y - p.y) + 'px' });
-}
-function renderOverlay(o) {
-  // 锚点：页面上的虚线框（证明坐标正确，缩放/翻页后位置不变）
-  const a = document.createElement('div');
-  a.className = 'anchor'; o._anchorEl = a;
-  $('overlay-layer').appendChild(a);
-  state.overlays.push(o);
-  positionAnchor(o);
-
-  // 卡片：侧边队列（低打扰，整卡出现，不流式）
-  const icons = { question: '❓', note: '💡', link: '🔗', suggestion_card: '⚠️' };
-  const card = document.createElement('div');
-  card.className = 'card' + (o._result_type === 'error' ? ' error' : '');
-  card.innerHTML = `<div class="ttl">${icons[o.overlay_type] || '💡'} ${o.overlay_type}</div>
-    <div>${o.display_text}</div>
-    <div class="refs">p${state.pageIndex + 1} · bbox[${o.geometry.anchor_bbox.map(v => v.toFixed(2)).join(',')}] · ${o.result_id}</div>
-    <div class="acts"><button data-act="accept">接受</button><button data-act="dismiss">忽略</button></div>`;
-  card.addEventListener('mouseenter', () => a.classList.add('hot'));
-  card.addEventListener('mouseleave', () => a.classList.remove('hot'));
-  card.addEventListener('click', e => {
-    const act = e.target.dataset?.act;
-    if (act && o.state !== 'shown') return;   // 已接受/已忽略的卡片不重复计数
-    if (act === 'accept') { card.classList.add('accepted'); o.state = 'accepted'; state.accepted++; trace('OverlayAccepted', { overlay_id: o.overlay_id, trace_id: o.trace_id }); }
-    if (act === 'dismiss') { card.classList.add('dismissed'); o.state = 'dismissed'; state.dismissed++; trace('OverlayDismissed', { overlay_id: o.overlay_id, trace_id: o.trace_id }); }
-    if (act) updateStats();
-    a.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    a.classList.add('hot'); setTimeout(() => a.classList.remove('hot'), 800);
-  });
-  a.addEventListener('click', () => card.scrollIntoView({ block: 'center', behavior: 'smooth' }));
-  const wrap = $('cards');
-  if (wrap.firstChild?.tagName === 'SPAN') wrap.innerHTML = '';
-  wrap.prepend(card);
-  state.totalCards++;
-}
-
-/* ========================================================================
- * 8. 打点与 trace —— 直接喂 I2 scorecard 和 trace viewer
- * ====================================================================== */
-function markLat(stage, t0, t1) { state.lat[stage].push(Math.round(t1 - t0)); }
-const p50 = arr => arr.length ? [...arr].sort((a, b) => a - b)[arr.length >> 1] : '-';
-function updateStats() {
-  const names = { pen_event: 'pen-up→event', event_ocr: 'event→OCR', ocr_result: 'OCR→result', result_screen: 'result→上屏', total: '全链路' };
-  $('stat-body').innerHTML = Object.entries(names).map(([k, n]) => {
-    const a = state.lat[k];
-    return `<tr><td>${n}</td><td>${a.length ? a[a.length-1] + 'ms' : '-'}</td><td>${p50(a)}${a.length ? 'ms' : ''}</td></tr>`;
-  }).join('');
-  $('north-star').textContent = `接受 ${state.accepted} / 忽略 ${state.dismissed} / 共 ${state.totalCards} 条（北极星预演）`;
-}
-function trace(kind, obj) {
-  const line = JSON.stringify({ ts: new Date().toISOString(), kind, ...obj });
-  state.traceLines.push(line);
-  const log = $('trace-log');
-  log.textContent += (kind.padEnd(22) + (obj.trace_id || obj.event_id || '')) + '\n';
-  log.scrollTop = log.scrollHeight;
-}
-$('dl-trace').addEventListener('click', e => {
-  e.preventDefault();
-  const blob = new Blob([state.traceLines.join('\n')], { type: 'application/x-ndjson' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = `trace_${SESSION_ID}.jsonl`; a.click();
-});
-
-/* ========================================================================
- * 9. 文档导入（PDFDocument v0）与翻页/缩放
- * ====================================================================== */
-$('file-in').addEventListener('change', async e => {
-  const file = e.target.files[0]; if (!file) return;
-  const buf = await file.arrayBuffer();
-  state.fileHash = await sha256Hex(buf);
-  state.documentId = 'doc_' + state.fileHash.slice(0, 12);   // hash 派生，重复导入 id 稳定
-  state.pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-  state.pageCount = state.pdf.numPages; state.pageIndex = 0;
-  state.strokes = []; clearOverlays();
-  trace('PDFDocument', {
-    document_id: state.documentId, file_hash: state.fileHash, filename: file.name,
-    page_count: state.pageCount, uploaded_at: new Date().toISOString(),
-    source_type: 'upload', local_original_path: '(browser memory ref)', version: '0',
-  });
-  $('drop-hint').style.display = 'none';
-  await renderPage();
-  trace('PDFPage', state.pageRecord);
-});
-function clearOverlays() { $('overlay-layer').innerHTML = ''; state.overlays = []; }
-function gotoPage(d) {
-  if (!state.pdf) return;
-  const n = state.pageIndex + d;
-  if (n < 0 || n >= state.pageCount) return;
-  state.pageIndex = n; state.strokes = [];           // demo 简化：笔迹按页暂存，翻页清空（event 已入 trace）
-  renderPage().then(() => { repositionAnchors(); trace('PDFPage', state.pageRecord); });
-}
-$('prev').addEventListener('click', () => gotoPage(-1));
-$('next').addEventListener('click', () => gotoPage(1));
-document.addEventListener('keydown', e => { if (e.key === 'ArrowLeft') gotoPage(-1); if (e.key === 'ArrowRight') gotoPage(1); });
-function setZoom(z) {
-  state.zoom = Math.min(3, Math.max(0.5, z));
-  if (state.pdf) renderPage();                        // 缩放后笔迹/锚点经归一化坐标重放，位置必须不变
-}
-$('zoom-in').addEventListener('click', () => setZoom(state.zoom + 0.25));
-$('zoom-out').addEventListener('click', () => setZoom(state.zoom - 0.25));
-
-updateStats();
-</script>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

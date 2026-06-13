@@ -1,0 +1,139 @@
+import type { StrokePoint } from '../core/contracts';
+import { normToPx, pxToNorm, pageCss } from '../core/transform';
+import { trace } from '../core/trace';
+import { bus, currentStrokes, state, type Stroke, type Tool } from '../app/state';
+
+let cv: HTMLCanvasElement;
+let ctx: CanvasRenderingContext2D;
+let live: { tool: Tool; points: StrokePoint[]; t0: number; pointerType: string } | null = null;
+let onStrokeComplete: ((stroke: Stroke, pointerType: string, penUpAt: number) => void) | null = null;
+
+interface SegStyle {
+  stroke: string;
+  width: number;
+  cap: CanvasLineCap;
+  composite: GlobalCompositeOperation;
+}
+
+function styleFor(tool: Tool, pressure: number): SegStyle {
+  if (tool === 'highlighter') {
+    // 规范色 #D4CFCA（E-ink 友好浅灰高亮），multiply 让文字透出
+    return { stroke: 'rgba(212,207,202,0.85)', width: 16, cap: 'butt', composite: 'multiply' };
+  }
+  return { stroke: '#1A1A1A', width: 1.2 + 2.2 * (pressure || 0.45), cap: 'round', composite: 'source-over' };
+}
+
+function drawSeg(a: StrokePoint, b: StrokePoint, tool: Tool): void {
+  const dpr = window.devicePixelRatio || 1;
+  const s = styleFor(tool, b.pressure);
+  const p1 = normToPx(a.x, a.y);
+  const p2 = normToPx(b.x, b.y);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalCompositeOperation = s.composite;
+  ctx.strokeStyle = s.stroke;
+  ctx.lineCap = s.cap;
+  ctx.lineWidth = s.width;
+  ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y);
+  ctx.lineTo(p2.x, p2.y);
+  ctx.stroke();
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+export function redrawInk(): void {
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, pageCss.w, pageCss.h);
+  for (const s of currentStrokes()) {
+    for (let i = 1; i < s.points.length; i++) drawSeg(s.points[i - 1], s.points[i], s.tool);
+  }
+}
+
+function evtNorm(e: { clientX: number; clientY: number }): { x: number; y: number } {
+  const r = cv.getBoundingClientRect();
+  return pxToNorm(e.clientX - r.left, e.clientY - r.top);
+}
+
+function eraseAt(e: PointerEvent): void {
+  const p = evtNorm(e);
+  const strokes = currentStrokes();
+  const hitRadius = 10 / Math.max(pageCss.w, 1); // ~10px
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    const hit = strokes[i].points.some((pt) => Math.hypot(pt.x - p.x, (pt.y - p.y) * (pageCss.h / pageCss.w)) < hitRadius);
+    if (hit) {
+      const [removed] = strokes.splice(i, 1);
+      trace('StrokeErased', { page_id: state.pageId ?? '', points: removed.points.length });
+      redrawInk();
+      return;
+    }
+  }
+}
+
+export function undoStroke(): void {
+  const strokes = currentStrokes();
+  if (!strokes.length) return;
+  strokes.pop();
+  trace('StrokeUndone', { page_id: state.pageId ?? '' });
+  redrawInk();
+}
+
+export function initInk(
+  canvas: HTMLCanvasElement,
+  complete: (stroke: Stroke, pointerType: string, penUpAt: number) => void,
+): void {
+  cv = canvas;
+  ctx = canvas.getContext('2d')!;
+  onStrokeComplete = complete;
+
+  cv.addEventListener('pointerdown', (e) => {
+    if (!state.documentId) return;
+    e.preventDefault();
+    if (state.tool === 'eraser') { eraseAt(e); return; }
+    try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    const p = evtNorm(e);
+    live = {
+      tool: state.tool,
+      t0: performance.now(),
+      pointerType: e.pointerType,
+      points: [{ x: p.x, y: p.y, t: 0, pressure: e.pressure || 0 }],
+    };
+  });
+
+  cv.addEventListener('pointermove', (e) => {
+    if (state.tool === 'eraser' && e.buttons) { eraseAt(e); return; }
+    if (!live) return;
+    e.preventDefault();
+    // 无损：优先取全部合并点；合成事件/旧内核返回空数组时回退到事件本身
+    let raw: PointerEvent[] = e.getCoalescedEvents ? (e.getCoalescedEvents() as PointerEvent[]) : [];
+    if (!raw.length) raw = [e];
+    for (const ce of raw) {
+      const p = evtNorm(ce);
+      const pt: StrokePoint = {
+        x: p.x, y: p.y,
+        t: Math.round(performance.now() - live.t0),
+        pressure: ce.pressure || 0,
+      };
+      drawSeg(live.points[live.points.length - 1], pt, live.tool);
+      live.points.push(pt);
+    }
+  });
+
+  const finish = () => {
+    if (!live) return;
+    const penUpAt = performance.now();
+    const stroke: Stroke = { tool: live.tool, points: live.points };
+    const pointerType = live.pointerType;
+    live = null;
+    currentStrokes().push(stroke);
+    onStrokeComplete?.(stroke, pointerType, penUpAt);
+  };
+
+  cv.addEventListener('pointerup', finish);
+  cv.addEventListener('pointercancel', () => { live = null; });
+
+  bus.on('page:rendered', () => redrawInk());
+  bus.on('tool', () => {
+    cv.style.cursor = state.tool === 'eraser' ? 'cell' : 'crosshair';
+  });
+}
