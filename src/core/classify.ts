@@ -20,22 +20,25 @@ export interface ScoredGesture {
 /**
  * 几何启发式分类 + 置信度。score 表示笔迹与模板的接近度：
  * 干净的圈/直线/点 → 高分；随手涂、半截笔画 → 低分（自由笔 stroke 基本判不出模板）。
+ * dimW/dimH = 归一化坐标的换算基准（默认页面 pageCss；重排面传 reader 画布尺寸）。
  */
-export function classifyScored(points: StrokePoint[], bb: NormBBox): ScoredGesture {
-  const wPx = bb[2] * pageCss.w;
-  const hPx = bb[3] * pageCss.h;
+export function classifyScored(
+  points: StrokePoint[],
+  bb: NormBBox,
+  dimW: number = pageCss.w,
+  dimH: number = pageCss.h,
+): ScoredGesture {
+  const wPx = bb[2] * dimW;
+  const hPx = bb[3] * dimH;
   const diagPx = Math.hypot(wPx, hPx);
   if (points.length <= 3 || diagPx < 8) return { type: 'tap_region', score: diagPx < 8 ? 0.7 : 0.5 };
 
   const first = points[0];
   const last = points[points.length - 1];
-  const closure = Math.hypot((last.x - first.x) * pageCss.w, (last.y - first.y) * pageCss.h);
+  const closure = Math.hypot((last.x - first.x) * dimW, (last.y - first.y) * dimH);
   let len = 0;
   for (let i = 1; i < points.length; i++) {
-    len += Math.hypot(
-      (points[i].x - points[i - 1].x) * pageCss.w,
-      (points[i].y - points[i - 1].y) * pageCss.h,
-    );
+    len += Math.hypot((points[i].x - points[i - 1].x) * dimW, (points[i].y - points[i - 1].y) * dimH);
   }
   // 圈：起止接近（闭合）+ 路径绕得够长
   const circleScore = clamp01((0.4 - closure / diagPx) / 0.4) * clamp01((len / diagPx - 1.2) / 1.3);
