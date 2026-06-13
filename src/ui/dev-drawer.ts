@@ -101,15 +101,16 @@ export function initDevDrawer(els: {
   bus.on('trace', (kind, obj) => {
     const o = obj as {
       trace_id?: string; event_id?: string; nearby_text?: string | null; content?: string;
-      result_type?: string; source_refs?: Array<{ page_id?: string; ocr_block_ids?: string[] }>;
+      result_type?: string; source_refs?: Array<{ page_id?: string; ocr_block_ids?: string[] }>; recalled?: number[];
     };
     let txt = `${String(kind).padEnd(22)}${o.trace_id ?? o.event_id ?? ''}`;
-    // 请求：AI 看到/引用了哪些内容（含跨页前文脉络 + 圈住的原文）
+    // 请求：AI 看到/引用了哪些内容（圈住的原文）
     if (o.nearby_text) txt += `\n   ⟵引用上下文: ${String(o.nearby_text).replace(/\n/g, ' ').slice(0, 90)}`;
-    // 结果：AI 回复 + 指回的来源（页 · 命中块数）
+    // 结果：AI 回复 + 指回的来源（页 · 命中块数）+ 跨页回看了哪些页
     if (o.content && o.source_refs) {
       const refs = o.source_refs.map((r) => `${r.page_id ?? '?'}${r.ocr_block_ids?.length ? `·${r.ocr_block_ids.length}块` : ''}`).join(' ');
-      txt += `\n   ↳[${o.result_type ?? ''}] "${String(o.content).slice(0, 36)}" ⟵ ${refs}`;
+      const rc = o.recalled?.length ? `  ·回看[${o.recalled.join(',')}页]` : '';
+      txt += `\n   ↳[${o.result_type ?? ''}] "${String(o.content).slice(0, 36)}" ⟵ ${refs}${rc}`;
     }
     const line = document.createElement('div');
     line.textContent = txt;

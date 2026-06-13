@@ -7,7 +7,7 @@ import { trace } from './trace';
 import { bus, state, type Stroke } from '../app/state';
 import { ocrProviders } from '../providers/ocr';
 import { inferProviders } from '../providers/inference';
-import { crossPageContext, pageMarks, recordMark, setSummary } from './memory';
+import { memorySnapshot, pageMarks, recordMark, setSummary } from './memory';
 
 /** 单笔封装为契约 shape。会话内多笔共享一个 trace_id（决策：停笔会话）。 */
 export function makeEvent(stroke: Stroke, traceId: string): AnnotationEvent | null {
@@ -141,13 +141,12 @@ export async function commitDiscussion(
   });
   const structured = parts.map((p) => `〔${SYM_LABEL[p.type]}〕"${(p.text || '此处').slice(0, 40)}"`).join('  ');
   const allBlocks = ocrs.flatMap((o) => o?.text_blocks ?? []);
-  // 跨页：把前文脉络（其它页摘要）一并喂推理，让 AI 联系前面读过/标过的内容
-  const ctx = crossPageContext(evt.page_id);
-  const nearby = (ctx ? `${ctx}【本段标注】` : '') + structured;
 
   let result: InferenceResult;
   try {
-    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: nearby || null }, modes);
+    // Tier2：附带前页记忆快照，让模型按需 recall（见 server/infer agentLoop）；契约不变，memory 是 proxy 级附加
+    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, modes) as InferenceRequest & { memory?: unknown };
+    req.memory = memorySnapshot(evt.page_id);
     trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>);
     result = await inferProviders[state.inferProvider](req);
     trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);

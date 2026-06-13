@@ -30,41 +30,72 @@ function route(model: string): { channel: string; channel_url: string } {
   return { channel: 'DMX', channel_url: 'https://www.dmxapi.cn/v1/messages' };
 }
 
-async function gateway(system: string, user: string, maxTokens: number, imageB64?: string): Promise<string> {
+/** 低层网关调用：传完整 messages（可带 tools），返回完整响应 data。 */
+async function callGateway(opts: { system: string; messages: any[]; maxTokens: number; tools?: any[] }): Promise<any> {
   const { url, key, model } = cfg();
   if (!key) throw new Error('LLM_GATEWAY_KEY 未配置（在 annotation-loop-demo/.env 填网关 Key）');
   const { channel, channel_url } = route(model);
-  const content = imageB64
-    ? [
-        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageB64 } },
-        { type: 'text', text: user },
-      ]
-    : user;
+  const body: any = { model, max_tokens: opts.maxTokens, system: opts.system, messages: opts.messages, channel, channel_url };
+  if (opts.tools) body.tools = opts.tools;
   const resp = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'content-type': 'application/json',
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: 'user', content }],
-      channel,
-      channel_url,
-    }),
+    headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify(body),
   });
   const data: any = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(data?.error?.message || `网关返回 ${resp.status}`);
+  if (!resp.ok) throw new Error(data?.error?.message || `网关返回 ${resp.status}`);
+  return data;
+}
+
+const textOf = (data: any): string =>
+  (data?.content || []).filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('').trim();
+
+async function gateway(system: string, user: string, maxTokens: number, imageB64?: string): Promise<string> {
+  const content = imageB64
+    ? [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageB64 } }, { type: 'text', text: user }]
+    : user;
+  return textOf(await callGateway({ system, messages: [{ role: 'user', content }], maxTokens }));
+}
+
+type MemSnap = Array<{ index: number; summary: string | null; marks: Array<{ text: string; note: string }> }>;
+
+/**
+ * Tier2 按需 recall：给模型 recall_page 工具 + 前页索引，让它自己决定回看哪页综合作答。
+ * 返回 { text, recalled }（recalled 供开发面板监控"AI 回看了哪些页"）。
+ */
+async function agentLoop(system: string, task: string, jsonRule: string, memory: MemSnap): Promise<{ text: string; recalled: number[] }> {
+  const tools = [{
+    name: 'recall_page',
+    description: '回看某一页的标注与摘要，用于跨页综合',
+    input_schema: { type: 'object', properties: { page: { type: 'integer', description: '页码，从 1 起' } }, required: ['page'] },
+  }];
+  const idx = memory.map((m) => `第${m.index + 1}页${m.summary ? '：' + m.summary : `（${m.marks.length}处标注）`}`).join('；');
+  const messages: any[] = [{
+    role: 'user',
+    content: `${task}\n\n可回看的前页：${idx}。若与当前内容相关，用 recall_page(页码) 取该页详情来综合；不需要就直接给最终答案。\n\n${jsonRule}`,
+  }];
+  const recalled: number[] = [];
+  for (let turn = 0; turn < 3; turn++) {
+    const data = await callGateway({ system, messages, maxTokens: 1024, tools });
+    const blocks = data.content || [];
+    const toolUses = blocks.filter((b: any) => b.type === 'tool_use');
+    if (!toolUses.length) return { text: textOf(data), recalled };
+    messages.push({ role: 'assistant', content: blocks });
+    messages.push({
+      role: 'user',
+      content: toolUses.map((tu: any) => {
+        const page = Number(tu.input?.page);
+        recalled.push(page);
+        const m = memory.find((x) => x.index === page - 1);
+        const body = m
+          ? `第${page}页：${m.summary || '(无摘要)'}\n${(m.marks || []).map((k) => `- "${k.text}" → ${k.note}`).join('\n')}`
+          : `第${page}页没有标注记录。`;
+        return { type: 'tool_result', tool_use_id: tu.id, content: body };
+      }),
+    });
   }
-  return (data.content || [])
-    .filter((b: any) => b?.type === 'text')
-    .map((b: any) => b.text)
-    .join('')
-    .trim();
+  const data = await callGateway({ system, messages: [...messages, { role: 'user', content: `直接给最终 JSON，不要再调用工具。${jsonRule}` }], maxTokens: 600 });
+  return { text: textOf(data), recalled };
 }
 
 const SYM: Record<string, string> = {
@@ -111,9 +142,19 @@ export async function runInference(req: any): Promise<any> {
     // 圈 = 解释
     task = `用户圈出了一处："${enclosed || nearby || '（未提取到文字）'}"。请解释它是什么、关键在哪——像同读者在页边轻声点一句。`;
   }
-  const user = `${task}\n\n只输出一个 JSON 对象：{"result_type":"…","content":"…","confidence":0.x}。result_type 从这些里选最贴切的一个：${modes.join(' / ')}；content 是要显示的旁注文字；confidence 是 0–1 把握度。除该 JSON 外不要输出任何文字。`;
+  const jsonRule = `最终只输出一个 JSON 对象：{"result_type":"…","content":"…","confidence":0.x}。result_type 从这些里选最贴切的一个：${modes.join(' / ')}；content 是要显示的旁注文字；confidence 是 0–1 把握度。除该 JSON 外不要输出任何文字。`;
 
-  const raw = await gateway(system, user, isDigest ? 600 : 400);
+  // Tier2：附带前页记忆快照时，走 recall 工具循环；否则单发
+  const memory: MemSnap = Array.isArray(req.memory) ? req.memory : [];
+  let raw: string;
+  let recalled: number[] = [];
+  if (memory.length) {
+    const r = await agentLoop(system, task, jsonRule, memory);
+    raw = r.text;
+    recalled = r.recalled;
+  } else {
+    raw = await gateway(system, `${task}\n\n${jsonRule}`, isDigest ? 600 : 400);
+  }
   const parsed = extractJson(raw);
   const result_type = modes.includes(parsed.result_type) ? parsed.result_type : modes[0];
   const content = String(parsed.content || raw || '此刻没能想清楚，稍后再为你低语。').trim();
@@ -136,6 +177,7 @@ export async function runInference(req: any): Promise<any> {
     created_at: new Date().toISOString(),
     model_name: cfg().model,
     model_version: 'nodesk-gateway',
+    recalled, // 服务端额外字段：本次回看了哪些页（开发面板监控用）
   };
 }
 

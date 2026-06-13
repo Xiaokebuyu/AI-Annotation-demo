@@ -50,7 +50,15 @@ export function getMemory(pageId: string): PageMemory | undefined {
   return mem.get(pageId);
 }
 
-/** 前文脉络：除当前页外，按页序列出各页摘要（无摘要则用标注速览）。供跨页综合注入。 */
+/** Tier2：前页记忆快照（除当前页），随请求带给服务端，供模型按需 recall_page。 */
+export function memorySnapshot(currentPageId: string): Array<{ index: number; summary: string | null; marks: Array<{ text: string; note: string }> }> {
+  return [...mem.entries()]
+    .filter(([pid, m]) => pid !== currentPageId && (m.summary || m.marks.length))
+    .sort((a, b) => a[1].index - b[1].index)
+    .map(([, m]) => ({ index: m.index, summary: m.summary, marks: m.marks.map((k) => ({ text: k.text, note: k.note })) }));
+}
+
+/** 前文脉络（Tier1 备用）：除当前页外，按页序列出各页摘要。供非工具型 provider 注入。 */
 export function crossPageContext(currentPageId: string): string {
   const others = [...mem.entries()].filter(([pid, m]) => pid !== currentPageId && (m.summary || m.marks.length));
   others.sort((a, b) => a[1].index - b[1].index);
