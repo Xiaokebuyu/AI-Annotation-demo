@@ -9,7 +9,13 @@
  * 处理不好（留给模型版/B 组 VLM 文档解析）：多栏、表格、图片、公式。
  */
 import type { NormBBox, OcrTextBlock } from './contracts';
-import { shortId } from './ids';
+
+/** 确定性块 id：同页同引擎重排出同样的 id → 缩放/重渲后行内注不丢锚。 */
+function blockId(text: string, index: number): string {
+  let h = 0;
+  for (let k = 0; k < text.length; k++) h = (h * 31 + text.charCodeAt(k)) | 0;
+  return `rfl_${index}_${(h >>> 0).toString(36)}`;
+}
 
 export type ReflowBlockType = 'heading' | 'para';
 
@@ -103,7 +109,7 @@ export function reflowLocal(blocks: OcrTextBlock[]): ReflowBlock[] {
   const flush = () => {
     if (!para.length) return;
     const text = joinRuns(para.map((l) => joinRuns(l.runs.map((r) => r.text))));
-    out.push({ id: shortId('rfl'), type: 'para', level: 0, text, source: unionBBox(para.flatMap((l) => l.runs)) });
+    out.push({ id: blockId(text, out.length), type: 'para', level: 0, text, source: unionBBox(para.flatMap((l) => l.runs)) });
     para = [];
   };
   for (let i = 0; i < lines.length; i++) {
@@ -113,11 +119,8 @@ export function reflowLocal(blocks: OcrTextBlock[]): ReflowBlock[] {
     if (isHeading) {
       flush();
       const level = ratio >= 1.7 ? 1 : ratio >= 1.4 ? 2 : 3;
-      out.push({
-        id: shortId('rfl'), type: 'heading', level,
-        text: joinRuns(ln.runs.map((r) => r.text)),
-        source: unionBBox(ln.runs),
-      });
+      const htext = joinRuns(ln.runs.map((r) => r.text));
+      out.push({ id: blockId(htext, out.length), type: 'heading', level, text: htext, source: unionBBox(ln.runs) });
       continue;
     }
     const prev = lines[i - 1];

@@ -78,16 +78,29 @@ async function rebuild(): Promise<void> {
 // ── 行内 AI 注 ──
 function renderNote(o: ScreenOverlay): void {
   const blockId = o.overlay_id.slice(DISC.length);
-  const ref = blockRefs.find((b) => b.id === blockId);
-  if (!ref) return;
   el.querySelector(`.reader-note[data-for="${o.overlay_id}"]`)?.remove();
-  if (o.state === 'dismissed') return;
+  const ref = blockRefs.find((b) => b.id === blockId);
+  if (!ref || o.state === 'dismissed') { layoutNotes(); return; }
   const note = document.createElement('div');
   note.className = 'reader-note';
   note.dataset.for = o.overlay_id;
+  note.dataset.block = blockId;
   note.textContent = o.display_text;
-  ref.el.insertAdjacentElement('afterend', note);
-  resizeInk();
+  el.appendChild(note); // 绝对定位进右侧留白，不进文档流 → 不扰乱正文排版
+  layoutNotes();
+}
+
+/** 把右侧 AI 注按所属段的纵向位置摆好，重叠则下推。绝对定位，不影响正文。 */
+function layoutNotes(): void {
+  const items = ([...el.querySelectorAll('.reader-note')] as HTMLElement[])
+    .map((n) => ({ n, top: blockRefs.find((b) => b.id === n.dataset.block)?.el.offsetTop ?? 0 }))
+    .sort((a, b) => a.top - b.top);
+  let cursor = 0;
+  for (const { n, top } of items) {
+    const y = Math.max(top, cursor);
+    n.style.top = `${y}px`;
+    cursor = y + n.offsetHeight + 12;
+  }
 }
 
 // ── 圈画采集 ──
@@ -211,5 +224,5 @@ export function initReader(readerEl: HTMLElement): void {
   bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; if (ov.overlay_id.startsWith(DISC)) renderNote(ov); });
   bus.on('overlay:remove', (id) => el.querySelector(`.reader-note[data-for="${id as string}"]`)?.remove());
   bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; if (ov.overlay_id.startsWith(DISC)) renderNote(ov); });
-  window.addEventListener('resize', () => { if (settings.viewMode === 'reader') resizeInk(); });
+  window.addEventListener('resize', () => { if (settings.viewMode === 'reader') { resizeInk(); layoutNotes(); } });
 }

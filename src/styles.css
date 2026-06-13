@@ -420,18 +420,21 @@ body.doc-loaded #stage::after {
 }
 #reader[hidden] { display: none; }
 .reader-ink { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 2; }
-/* 行内 AI 注：贴在被讨论段落正下方，随正文流动，不占边栏 */
+/* AI 注：绝对定位进右侧留白、与所属段同行对齐；斜体 + 半透明、无强调符；不进文档流（不扰排版）*/
 .reader-note {
-  margin: 0.3em 0 1.3em;
-  padding: 6px 0 6px 14px;
-  border-left: 2px solid var(--ai-line);
-  font: italic 14px/1.7 var(--serif);
-  color: var(--mut);
+  position: absolute;
+  right: 24px;
+  width: 224px;
+  font: italic 13.5px/1.6 var(--serif);
+  color: var(--ink);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 3;
 }
 #reading.reader #toolbar { display: none; }
 .reader-col {
-  max-width: 680px;
-  margin: 0 auto;
+  max-width: min(620px, calc(100% - 280px)); /* 左对齐，右侧留出给 AI 注的空位 */
+  margin: 0;
   font: 16px/1.85 var(--serif);
   color: var(--ink);
 }
