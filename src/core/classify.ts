@@ -89,7 +89,7 @@ export function classify(points: StrokePoint[], bb: NormBBox): EventType {
  */
 export function detectQueryIntent(types: EventType[]): boolean {
   if (types.length < 2) return false;
-  const hasCircle = types.includes('circle');                               // 必须真的圈了东西
-  const hasMark = types.some((t) => t === 'tap_region' || t === 'stroke');   // 旁边再加个记号（问号）
-  return hasCircle && hasMark;
+  const hasCircle = types.includes('circle');                  // 必须真的圈了东西
+  const hasMark = types.some((t) => t === 'stroke');           // 旁边再加个潦草记号（问号/感叹号）
+  return hasCircle && hasMark;                                 // tap 不再当问号—— tap 不进手势路径
 }

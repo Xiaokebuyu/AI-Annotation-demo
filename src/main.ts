@@ -1,7 +1,8 @@
 import './styles.css';
 import { recordEvent, commitDiscussion, summarizePage } from './core/pipeline';
-import { resolveGesture, isDeliberate, GESTURE_MIN_SCORE, type Gesture } from './core/gesture';
+import { resolveGesture, isDeliberate, GESTURE_MIN_SCORE, GESTURES, INTENT_MODES, type Gesture } from './core/gesture';
 import { classifyScored } from './core/classify';
+import { grabRegion } from './providers/ocr';
 import { trace } from './core/trace';
 import { shortId } from './core/ids';
 import { bus, state, settings } from './app/state';
@@ -33,8 +34,8 @@ let pending: AnnotationEvent[] = [];
 let sessionTimer: number | undefined; // 组装一次手势（多笔合一）
 let pauseTimer: number | undefined;   // 停顿到点 → 聚类已识别手势、每簇一条讨论
 
-// 本页"已识别手势会话"（过了形状门槛才进来）
-interface RecGesture { events: AnnotationEvent[]; gesture: Gesture; bbox: NormBBox; }
+// 本页"已识别手势会话"（过了形状门槛 或 VLM 视觉判定通过才进来）
+interface RecGesture { events: AnnotationEvent[]; gesture: Gesture; bbox: NormBBox; reading?: string; }
 const recByPage = new Map<string, RecGesture[]>();
 const recBucket = (pid: string): RecGesture[] => {
   if (!recByPage.has(pid)) recByPage.set(pid, []);
@@ -73,11 +74,80 @@ function clusterByProximity(recs: RecGesture[]): RecGesture[][] {
   return clusters;
 }
 
-/** 一簇手势 → 生成参数：单手势按其意图，多手势走综合，含提问则作答。 */
-function clusterIntent(cluster: RecGesture[]): { modes: OutputMode[]; eventType?: EventType; intent: string } {
-  if (cluster.some((c) => c.gesture.kind === 'ask')) return { modes: ['question'], eventType: 'circle', intent: 'question' };
-  if (cluster.length === 1) return { modes: cluster[0].gesture.output_modes, eventType: cluster[0].gesture.eventType, intent: cluster[0].gesture.intent };
-  return { modes: ['summary'], intent: 'summary' };
+/** VLM 视觉路径：截批次的 union bbox 局部图 → /api/interpret-gesture → 同构成 Gesture。 */
+async function resolveByVlm(batch: AnnotationEvent[]): Promise<{ gesture: Gesture; reading?: string } | null> {
+  const bb = unionBBox(batch);
+  const image = grabRegion(bb, 0.03);
+  if (!image) return null;
+  try {
+    const resp = await fetch('/api/interpret-gesture', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image }),
+    });
+    if (!resp.ok) return null;
+    const r = await resp.json() as { kind: string; intent: string; reading: string; confidence: number };
+    if (r.kind === 'nothing') return null;
+    // kind → 现有 GestureKind 的最贴映射（GestureKind 为 explain/emphasize/ask/note/relate）
+    const kindMap: Record<string, keyof typeof GESTURES> = {
+      circle: 'explain', underline: 'emphasize', arrow: 'relate', handwriting: 'note', abstract: 'note',
+    };
+    const baseKey = kindMap[r.kind] ?? 'note';
+    const base = GESTURES[baseKey];
+    // intent → output_modes：覆盖 baseKey 的默认（让 VLM 的 intent 起主导）
+    const im = (INTENT_MODES as Record<string, OutputMode[]>)[r.intent];
+    const gesture: Gesture = {
+      ...base,
+      label: `VLM·${r.kind}·${r.intent}`,
+      intent: (INTENTS_SET.has(r.intent) ? r.intent : base.intent) as Gesture['intent'],
+      output_modes: im ?? base.output_modes,
+    };
+    return { gesture, reading: r.reading || undefined };
+  } catch { return null; }
+}
+const INTENTS_SET = new Set(['what_is_this', 'key_point', 'question', 'relation', 'free_note', 'command']);
+
+/** 组装窗结束：按 settings.gesture.routing 走 VLM 视觉判定 / 几何阈值。 */
+async function resolveAssemblyWindow(): Promise<void> {
+  const batch = pending;
+  pending = [];
+  sessionTrace = null;
+  if (!batch.length) return;
+  const bbox = unionBBox(batch);
+
+  if (settings.gesture.routing === 'vlm') {
+    const r = await resolveByVlm(batch);
+    trace('GestureSession', {
+      page_id: batch[0].page_id,
+      routing: 'vlm',
+      resolved: r ? `${r.gesture.label} (→ ${r.gesture.eventType} · ${r.gesture.intent})${r.reading ? ' · 读到「' + r.reading.slice(0, 24) + '」' : ''}` : '— VLM 判 nothing，不触发',
+    });
+    if (r) recBucket(batch[0].page_id).push({ events: batch, gesture: r.gesture, bbox, reading: r.reading });
+    return;
+  }
+
+  // 几何路径：原有逻辑 + 诊断分数
+  const scored = batch.map((e) => {
+    const s = classifyScored(e.stroke_points, e.geometry.bbox);
+    return { type: s.type, score: Number(s.score.toFixed(2)), raw: s.raw };
+  });
+  const deliberate = isDeliberate(batch);
+  const gesture = deliberate ? resolveGesture(batch) : null;
+  trace('GestureSession', {
+    page_id: batch[0].page_id,
+    routing: 'geometric',
+    strokes: scored,
+    threshold: GESTURE_MIN_SCORE,
+    deliberate,
+    resolved: gesture ? `${gesture.label} (→ ${gesture.eventType} · ${gesture.intent})` : '— 未过形状门槛 或 tap-only，不触发',
+  });
+  if (deliberate && gesture) recBucket(batch[0].page_id).push({ events: batch, gesture, bbox });
+}
+
+/** 一簇手势 → 生成参数：单手势按其意图，多手势走综合，含提问则作答。VLM 路径的 reading 一并向下传。 */
+function clusterIntent(cluster: RecGesture[]): { modes: OutputMode[]; eventType?: EventType; intent: string; reading?: string } {
+  const reading = cluster.map((c) => c.reading).filter(Boolean).join(' ').trim() || undefined;
+  if (cluster.some((c) => c.gesture.kind === 'ask')) return { modes: ['question'], eventType: 'circle', intent: 'question', reading };
+  if (cluster.length === 1) return { modes: cluster[0].gesture.output_modes, eventType: cluster[0].gesture.eventType, intent: cluster[0].gesture.intent, reading };
+  return { modes: ['summary'], intent: 'summary', reading };
 }
 
 /** 停顿到点：聚类本页已识别手势，每簇一条讨论；成员没变则跳过（不重复生成）。 */
@@ -91,8 +161,8 @@ function runDiscussions(pid: string): void {
     const sig = ids.join(',');
     if (lastSig.get(discId) === sig) continue;
     lastSig.set(discId, sig);
-    const { modes, eventType, intent } = clusterIntent(cluster);
-    void commitDiscussion(events, performance.now(), discId, modes, eventType, intent);
+    const { modes, eventType, intent, reading } = clusterIntent(cluster);
+    void commitDiscussion(events, performance.now(), discId, modes, eventType, intent, reading);
   }
 }
 
@@ -105,29 +175,7 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
 
   // 1.2s：一次手势组装完 → 过形状门槛(画得像范例)才记为"已识别手势"，随手涂忽略
   window.clearTimeout(sessionTimer);
-  sessionTimer = window.setTimeout(() => {
-    const batch = pending;
-    pending = [];
-    sessionTrace = null;
-    if (!batch.length) return;
-    // 诊断：每会话记录各笔的原始分类 + 分数 + 是否过门槛 + 解析出的手势
-    const scored = batch.map((e) => {
-      const s = classifyScored(e.stroke_points, e.geometry.bbox);
-      return { type: s.type, score: Number(s.score.toFixed(2)), raw: s.raw };
-    });
-    const deliberate = isDeliberate(batch);
-    const gesture = deliberate ? resolveGesture(batch) : null;
-    trace('GestureSession', {
-      page_id: batch[0].page_id,
-      strokes: scored,
-      threshold: GESTURE_MIN_SCORE,
-      deliberate,
-      resolved: gesture ? `${gesture.label} (→ ${gesture.eventType} · ${gesture.intent})` : '— 未过形状门槛，不触发',
-    });
-    if (deliberate && gesture) {
-      recBucket(batch[0].page_id).push({ events: batch, gesture, bbox: unionBBox(batch) });
-    }
-  }, SESSION_WINDOW);
+  sessionTimer = window.setTimeout(() => { void resolveAssemblyWindow(); }, SESSION_WINDOW);
 
   // 停顿窗：每次落笔重置；停笔 pauseSeconds 后才生成（避免打扰）
   if (settings.gesture.enabled) {

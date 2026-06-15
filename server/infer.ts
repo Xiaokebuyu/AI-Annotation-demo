@@ -204,6 +204,35 @@ export async function runInference(req: any): Promise<any> {
 }
 
 /**
+ * 视觉手势判定（VLM 路径）：替代几何阈值，让模型看用户笔迹截图一气判定
+ *   kind:   circle / underline / arrow / handwriting / abstract / nothing
+ *   intent: what_is_this / key_point / question / relation / free_note / command
+ *   reading: 若是写字，转写出来
+ * 用于 settings.gesture.routing='vlm' 时——给"任意符号语言"和"抽象绘画"以可识别性。
+ */
+export async function runInterpretGesture(payload: any): Promise<{ kind: string; intent: string; reading: string; confidence: number }> {
+  const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
+  if (!image) return { kind: 'nothing', intent: 'free_note', reading: '', confidence: 0 };
+  const system =
+    '这是用户在 PDF 页面上的笔迹截图（黑色墨水线条）。一次性判定三件事：' +
+    '①kind（笔迹形状）：circle（圈选）/ underline（划线/高亮）/ arrow（箭头·关联指向）/ handwriting（手写文字）/ abstract（其它符号，如星号、波浪线、问号、感叹号、自定义符号）/ nothing（潦草无意图、单点）。' +
+    '②intent（为什么画）：what_is_this（圈一处问含义）/ key_point（标重点）/ question（在提问）/ relation（指出关联）/ free_note（自由批注）/ command（在下指令，如"总结"/"翻译"）。' +
+    '③reading：若 kind=handwriting，原样转写其中文字；否则空字符串。' +
+    '只输出一个 JSON：{"kind":"...","intent":"...","reading":"...","confidence":0.x}。除该 JSON 外不要任何文字。' +
+    '如果看不出明确意图（很可能只是用户走神涂了一笔），kind="nothing"，让系统不打扰用户。';
+  const raw = await gateway(system, '判定这笔笔迹：', 400, image);
+  const j = extractJson(raw);
+  const KINDS = ['circle', 'underline', 'arrow', 'handwriting', 'abstract', 'nothing'];
+  const INTENTS = ['what_is_this', 'key_point', 'question', 'relation', 'free_note', 'command'];
+  return {
+    kind: KINDS.includes(j.kind) ? j.kind : 'nothing',
+    intent: INTENTS.includes(j.intent) ? j.intent : 'free_note',
+    reading: String(j.reading || '').trim(),
+    confidence: typeof j.confidence === 'number' ? j.confidence : 0.6,
+  };
+}
+
+/**
  * 意图理解：读用户在页边的手写批注截图 —— ①转写手写文字 ②判断「为什么写」。
  * 几何手势（圈/划/箭头）的意图已知；手写靠这条 VLM 解读补上（Phase C）。
  */

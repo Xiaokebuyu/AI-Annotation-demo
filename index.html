@@ -86,6 +86,17 @@
         <input type="checkbox" id="set-gesture" />
         <span>手势响应（段落讨论：圈=解释·划=重点·圈+问号=提问·写字=批注）</span>
       </label>
+      <div class="set-row">
+        <span>手势判定</span>
+        <select id="set-gesture-routing">
+          <option value="geometric">几何阈值（本地·0 token）</option>
+          <option value="vlm">VLM 视觉判定（任意符号 / 抽象绘画 · 烧 token）</option>
+        </select>
+      </div>
+      <label class="set-check">
+        <span>批注上下文</span>
+        <input type="number" id="set-ctx-lines" class="sec-in" min="0" max="10" step="1" /><span class="sec-u">行（按 y 距离最近）</span>
+      </label>
       <label class="set-check">
         <span>停笔</span>
         <input type="number" id="set-pause-sec" class="sec-in" min="1" max="30" step="1" /><span class="sec-u">秒后生成（同段原地更新）</span>

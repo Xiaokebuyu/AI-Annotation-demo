@@ -104,6 +104,8 @@ function initSettings(): void {
   const ppDigestOn = $id<HTMLInputElement>('set-pp-digest-on');
   const ppDigest = $id<HTMLInputElement>('set-pp-digest');
   const gesture = $id<HTMLInputElement>('set-gesture');
+  const gestureRouting = $id<HTMLSelectElement>('set-gesture-routing');
+  const ctxLines = $id<HTMLInputElement>('set-ctx-lines');
   const pauseSec = $id<HTMLInputElement>('set-pause-sec');
 
   // 从 settings 初始化控件
@@ -116,6 +118,8 @@ function initSettings(): void {
   ppDigestOn.checked = settings.preprocess.digestEnabled;
   ppDigest.value = String(settings.preprocess.digestPages);
   gesture.checked = settings.gesture.enabled;
+  gestureRouting.value = settings.gesture.routing;
+  ctxLines.value = String(settings.gesture.contextLines);
   pauseSec.value = String(settings.gesture.pauseSeconds);
 
   const changed = () => bus.emit('settings:changed');
@@ -129,6 +133,13 @@ function initSettings(): void {
   ppReflow.addEventListener('change', () => { settings.preprocess.reflowPages = clampPp(ppReflow, settings.preprocess.reflowPages); ppReflow.value = String(settings.preprocess.reflowPages); });
   ppDigest.addEventListener('change', () => { settings.preprocess.digestPages = clampPp(ppDigest, settings.preprocess.digestPages); ppDigest.value = String(settings.preprocess.digestPages); });
   gesture.addEventListener('change', () => { settings.gesture.enabled = gesture.checked; changed(); });
+  gestureRouting.addEventListener('change', () => { settings.gesture.routing = (gestureRouting.value === 'vlm' ? 'vlm' : 'geometric'); changed(); });
+  ctxLines.addEventListener('change', () => {
+    const n = Math.min(10, Math.max(0, Number(ctxLines.value) || settings.gesture.contextLines));
+    settings.gesture.contextLines = n;
+    ctxLines.value = String(n);
+    changed();
+  });
   pauseSec.addEventListener('change', () => {
     const n = Math.min(30, Math.max(1, Number(pauseSec.value) || settings.gesture.pauseSeconds));
     settings.gesture.pauseSeconds = n;

@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import type { Plugin } from 'vite';
-import { runInference, runReflow, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runReflowVlm } from './server/infer';
+import { runInference, runReflow, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runReflowVlm } from './server/infer';
 
 /** dev-only 推理代理：浏览器 POST /api/infer → 网关 → InferenceResult。Key 留服务端。 */
 function inferenceProxy(env: Record<string, string>): Plugin {
@@ -32,6 +32,7 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       post('/api/explain-image', runExplainImage);
       post('/api/digest', runDigest);
       post('/api/interpret', runInterpret);
+      post('/api/interpret-gesture', runInterpretGesture);
       post('/api/reflow-vlm', runReflowVlm);
     },
   };

@@ -9,10 +9,54 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const intersects = (r: NormBBox, b: NormBBox): boolean =>
   b[0] < r[0] + r[2] && b[0] + b[2] > r[0] && b[1] < r[1] + r[3] && b[1] + b[3] > r[1];
 
-/** 真实数据路径：标注 bbox 与 PDF.js text layer 几何相交（数字版 PDF 免 OCR） */
+/** 用 textBlocks 聚行：把 y 中心相近的 run 合成一行的纯文本。供"最近 N 行"用。 */
+function pageLines(): Array<{ y: number; text: string }> {
+  if (!state.textBlocks.length) return [];
+  const runs = state.textBlocks
+    .filter((tb) => tb.text.trim())
+    .map((tb) => ({ y: tb.bbox[1] + tb.bbox[3] / 2, h: tb.bbox[3], x: tb.bbox[0], text: tb.text }))
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines: Array<{ y: number; runs: typeof runs }> = [];
+  for (const r of runs) {
+    const cur = lines[lines.length - 1];
+    if (cur && Math.abs(r.y - cur.y) < r.h * 0.6) cur.runs.push(r);
+    else lines.push({ y: r.y, runs: [r] });
+  }
+  return lines.map((ln) => {
+    ln.runs.sort((a, b) => a.x - b.x);
+    return { y: ln.y, text: ln.runs.map((r) => r.text).join(' ') };
+  });
+}
+
+/** 真实数据路径：标注 bbox 与 PDF.js text layer 几何相交（数字版 PDF 免 OCR）。
+ *  手写批注例外：按笔迹 y 距离取最近 N 行（dev 可设），不靠 bbox 扩张相交。 */
 const textlayer: OcrProvider = async (evt) => {
   const t0 = performance.now();
   const [x, y, w, h] = evt.geometry.bbox;
+
+  // 手写批注：按"最近 N 行"取附近正文（笔迹通常在 margin，bbox 相交扫到的多半是空白）
+  if (evt.event_type === 'margin_note') {
+    const yc = y + h / 2;
+    const lines = pageLines();
+    const n = Math.max(1, settings.gesture.contextLines | 0);
+    const nearest = [...lines].sort((a, b) => Math.abs(a.y - yc) - Math.abs(b.y - yc)).slice(0, n);
+    nearest.sort((a, b) => a.y - b.y); // 还原阅读顺序
+    return {
+      ocr_result_id: shortId('ocr'),
+      trace_id: evt.trace_id,
+      event_id: evt.event_id,
+      page_id: evt.page_id,
+      scope: 'stroke_neighborhood' as const,
+      text_blocks: [],
+      nearby_text: nearest.map((l) => l.text).join('\n') || null,
+      note: `手写批注：取笔迹 y 最近 ${n} 行作为附近正文`,
+      model_name: 'pdfjs-textlayer',
+      model_version: '4.x',
+      runtime: 'pdf_text_layer' as const,
+      latency_ms: Math.round(performance.now() - t0),
+    };
+  }
+
   const pad = 0.012;
   const core: NormBBox = [x - pad, y - pad, w + 2 * pad, h + 2 * pad];
   const near: NormBBox = [x - 0.06, y - 0.04, w + 0.12, h + 0.08];

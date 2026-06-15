@@ -131,6 +131,8 @@ export async function commitDiscussion(
   modes: OutputMode[],
   eventType?: EventType,
   intent?: string,
+  /** VLM 路径已读到的手写文字（margin_note 时优先用它，跳过 /api/interpret 二次调用）。 */
+  preReading?: string,
 ): Promise<void> {
   if (!events.length) return;
   const evt = representative(events);
@@ -146,23 +148,28 @@ export async function commitDiscussion(
   let structured = parts.map((p) => `〔${SYM_LABEL[p.type]}〕"${(p.text || '此处').slice(0, 40)}"`).join('  ');
   const allBlocks = ocrs.flatMap((o) => o?.text_blocks ?? []);
 
-  // Phase C 意图理解：手写批注 → VLM 读手写 + 判「为什么写」（疑问/命令/关联/记想法），据此路由推理
+  // Phase C 意图理解：手写批注 → 读手写文字 + 判意图，据此路由推理。
+  // 优先用 VLM 路径已读到的 preReading（避免二次 VLM 调用）；否则现场调 /api/interpret。
   let finalModes = modes;
   let finalIntent = intent ?? '';
   if (evt.event_type === 'margin_note') {
-    const crop = grabRegion(evt.geometry.bbox, 0.02);
-    if (crop) {
-      try {
-        const resp = await fetch('/api/interpret', {
-          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: crop }),
-        });
-        if (resp.ok) {
-          const r = await resp.json();
-          if (r?.reading) structured = `〔批注〕"${String(r.reading).slice(0, 80)}"${structured ? '  ' + structured : ''}`;
-          const im = (INTENT_MODES as Record<string, OutputMode[]>)[r?.intent];
-          if (im) { finalModes = im; finalIntent = String(r.intent); }
-        }
-      } catch { /* 解读失败 → 退回几何意图 */ }
+    if (preReading) {
+      structured = `〔批注〕"${preReading.slice(0, 80)}"${structured ? '  ' + structured : ''}`;
+    } else {
+      const crop = grabRegion(evt.geometry.bbox, 0.02);
+      if (crop) {
+        try {
+          const resp = await fetch('/api/interpret', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: crop }),
+          });
+          if (resp.ok) {
+            const r = await resp.json();
+            if (r?.reading) structured = `〔批注〕"${String(r.reading).slice(0, 80)}"${structured ? '  ' + structured : ''}`;
+            const im = (INTENT_MODES as Record<string, OutputMode[]>)[r?.intent];
+            if (im) { finalModes = im; finalIntent = String(r.intent); }
+          }
+        } catch { /* 解读失败 → 退回几何意图 */ }
+      }
     }
   }
 

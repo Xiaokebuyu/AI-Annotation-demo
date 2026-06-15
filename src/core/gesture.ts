@@ -14,14 +14,20 @@ import { classifyScored, detectQueryIntent } from './classify';
 export const GESTURE_MIN_SCORE = 0.3;
 
 /**
- * 这次停笔到底算不算"刻意的手势"——决定生成与否（看是否画得像范例，而非有没有动作）。
- * 刻意 = ① 多笔自由书写（手写批注），或 ② 有一笔画得够像模板（圈/划/点）。
+ * 这次停笔到底算不算"刻意的手势"——决定生成与否（"不抢笔"原则：宁漏不滥）。
+ * 刻意 = 有一笔画得够像范例（圈/划/箭头分数 ≥ 门槛）。
+ *
+ * tap_region 不算手势 —— v1 词表里没有"点选触发"；它是 contract 里的合法 event，
+ * 但只进 trace、不进推理路径（未来若做"轻触卡片/段落"再走单独通道）。
+ * 单笔/多笔潦草 stroke 也不算 —— 改由 VLM 视觉路径（settings.gesture.routing='vlm'）兜底，
+ * 不再用"≥2 笔自由"这种粗暴规则把任何涂鸦都当批注。
  */
 export function isDeliberate(events: AnnotationEvent[]): boolean {
   if (!events.length) return false;
-  const freeform = events.filter((e) => e.event_type === 'stroke').length;
-  if (events.length >= 2 && freeform >= 2) return true; // 手写批注
-  return events.some((e) => classifyScored(e.stroke_points, e.geometry.bbox).score >= GESTURE_MIN_SCORE);
+  return events.some((e) => {
+    if (e.event_type === 'tap_region') return false; // tap 永远不算手势
+    return classifyScored(e.stroke_points, e.geometry.bbox).score >= GESTURE_MIN_SCORE;
+  });
 }
 
 export type GestureKind = 'explain' | 'emphasize' | 'ask' | 'note' | 'relate';
@@ -55,17 +61,15 @@ export const INTENT_MODES: Record<Intent, OutputMode[]> = {
   command: ['action'],
 };
 
-/** 把一次停笔会话解析成手势意图（纯几何）。 */
+/** 把一次停笔会话解析成手势意图（纯几何）。tap_region 已被 isDeliberate 过滤，不会到这。 */
 export function resolveGesture(events: AnnotationEvent[]): Gesture {
   const types = events.map((e) => e.event_type);
-  // 圈/点 + 额外记号 → 提问
+  // 圈 + 额外记号（停笔会话内多了一笔小记号，像问号）→ 提问
   if (detectQueryIntent(types)) return GESTURES.ask;
   if (types.includes('arrow')) return GESTURES.relate; // 箭头 → 关联
-  // 多笔自由书写（既非单圈也非划线）→ 批注
-  const freeform = types.filter((t) => t === 'stroke').length;
-  if (events.length >= 2 && freeform >= 2 && !types.includes('circle')) return GESTURES.note;
   if (types.includes('underline')) return GESTURES.emphasize;
-  if (types.includes('circle') || types.includes('tap_region')) return GESTURES.explain;
-  // 单笔自由 → 当批注
+  if (types.includes('circle')) return GESTURES.explain;
+  // 全是 stroke（潦草笔但有一笔过门槛）：由 VLM 视觉路径承担"是写字还是抽象符号"的判定；
+  // 几何路径下，保守地当批注。如果想要更精准识别，切 routing='vlm'。
   return GESTURES.note;
 }

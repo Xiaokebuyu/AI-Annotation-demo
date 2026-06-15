@@ -54,7 +54,9 @@ export interface Settings {
   //  reflowEnabled / digestEnabled：默认关，需 dev 面板手动开
   preprocess: { reflowEnabled: boolean; digestEnabled: boolean; reflowPages: number; digestPages: number };
   // 段落讨论：同段上的手势聚成一次讨论，停笔 pauseSeconds 后生成、按 discId 原地更新
-  gesture: { enabled: boolean; pauseSeconds: number };
+  //   routing: geometric=几何阈值（本地·0 token）；vlm=每次抬笔后截图给 VLM 判定（任意符号语言、抽象绘画）
+  //   contextLines: 手写批注的"最近正文"行数（按笔迹 y 距离取最近 N 行）
+  gesture: { enabled: boolean; pauseSeconds: number; routing: 'geometric' | 'vlm'; contextLines: number };
 }
 
 export const settings: Settings = {
@@ -63,7 +65,7 @@ export const settings: Settings = {
   reflowProvider: 'local',
   ocr: { textlayer: true, image: 'off' },
   preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
-  gesture: { enabled: true, pauseSeconds: 5 },
+  gesture: { enabled: true, pauseSeconds: 5, routing: 'geometric', contextLines: 3 },
 };
 
 export interface Stroke {
