@@ -2,11 +2,11 @@ import type { AnnotationEvent, EventType, InferenceRequest, InferenceResult, Nor
 import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
 import { DEVICE_ID, SESSION_ID, shortId } from './ids';
 import { bboxOf, classify } from './classify';
-import { INTENT_MODES } from './gesture';
 import { mark } from './metrics';
 import { trace } from './trace';
-import { bus, settings, state, type Stroke } from '../app/state';
-import { grabPage, grabRegion, runOcr } from '../providers/ocr';
+import { bus, state, type Stroke } from '../app/state';
+import { grabComposite } from '../providers/ocr';
+import { pageText, focusHint } from './focus';
 import { inferProviders } from '../providers/inference';
 import { getMemory, memorySnapshot, pageMarks, recordMark, setSummary } from './memory';
 import { putMemory } from '../app/store';
@@ -112,12 +112,6 @@ function buildOverlay(result: InferenceResult, evt: AnnotationEvent): ScreenOver
   };
 }
 
-/** 符号类型 → 中文标签（喂给推理的结构化上下文，也方便人读 trace）。 */
-const SYM_LABEL: Record<EventType, string> = {
-  circle: '圈选', underline: '划线', highlight: '高亮', arrow: '箭头',
-  margin_note: '批注', tap_region: '点选', stroke: '标记', eraser: '擦除', unknown: '标记',
-};
-
 /**
  * 段落讨论提交：把同一段上的一簇手势（1 个或多个）合成一条回应，落在该段旁的留白。
  * 每个标注各取「符号类型 + 圈住的上下文」结构化进 nearby_text（守 D4：不改契约形状，
@@ -139,55 +133,30 @@ export async function commitDiscussion(
   evt.trace_id = shortId('disc');
   if (eventType) evt.event_type = eventType; // 单手势时写 canonical 类型，服务端据此框定语气
 
-  // 逐标注取圈住的上下文（单条 OCR 失败跳过，不连累整体）。runOcr 由设置决定 textlayer / 图像 OCR
-  const ocrs = await Promise.all(events.map((e) => runOcr(e).catch(() => null)));
-  const parts = events.map((e, i) => {
-    const blocks = ocrs[i]?.text_blocks ?? [];
-    return { type: e.event_type, text: (blocks.map((b) => b.text).join('') || ocrs[i]?.nearby_text || '').trim() };
-  });
-  let structured = parts.map((p) => `〔${SYM_LABEL[p.type]}〕"${(p.text || '此处').slice(0, 40)}"`).join('  ');
-  const allBlocks = ocrs.flatMap((o) => o?.text_blocks ?? []);
-
-  // Phase C 意图理解：手写批注 → 读手写文字 + 判意图，据此路由推理。
-  // 优先用 VLM 路径已读到的 preReading（避免二次 VLM 调用）；否则现场调 /api/interpret。
-  let finalModes = modes;
-  let finalIntent = intent ?? '';
-  if (evt.event_type === 'margin_note') {
-    if (preReading) {
-      structured = `〔批注〕"${preReading.slice(0, 80)}"${structured ? '  ' + structured : ''}`;
-    } else {
-      const crop = grabRegion(evt.geometry.bbox, 0.02);
-      if (crop) {
-        try {
-          const resp = await fetch('/api/interpret', {
-            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: crop }),
-          });
-          if (resp.ok) {
-            const r = await resp.json();
-            if (r?.reading) structured = `〔批注〕"${String(r.reading).slice(0, 80)}"${structured ? '  ' + structured : ''}`;
-            const im = (INTENT_MODES as Record<string, OutputMode[]>)[r?.intent];
-            if (im) { finalModes = im; finalIntent = String(r.intent); }
-          }
-        } catch { /* 解读失败 → 退回几何意图 */ }
-      }
-    }
-  }
+  // P1：bbox 只定位 + 截"合成图(墨迹叠原文)"，语义全交 LLM。
+  //  · 整页文字 pageText 作恒定上下文（不再只给被圈那几个字，避免抓错/抓多）
+  //  · focusHint 用点在多边形内算"圈住了什么"，仅作提示——真正判定由 LLM 看合成图
+  //  · 手写不再单独调 /api/interpret：合成图里 LLM 直接读手写并判意图
+  const composite = grabComposite(evt.geometry.bbox, 0.04);
+  const pgText = pageText();
+  const focus = focusHint(events);
+  const finalModes = modes;
+  const finalIntent = intent ?? '';
+  // VLM 路径已读到的手写(preReading) 作为补充提示带上
+  const focusStr = preReading ? `${focus}${focus ? ' · ' : ''}手写读出「${preReading}」` : focus;
 
   let result: InferenceResult;
   let memoryPages = 0;
   let hasImage = false;
   try {
-    // Tier2：附带前页记忆快照，让模型按需 recall（见 server/infer agentLoop）；契约不变，memory 是 proxy 级附加
-    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, finalModes) as InferenceRequest & { memory?: unknown; image?: string };
+    // page_text/focus/image 为 proxy 级 wire 附加（不动冻结契约 D4，同 memory）；nearby_text 放焦点提示
+    const req = buildRequest(evt, { text_blocks: [], nearby_text: focusStr || null }, finalModes) as InferenceRequest & { memory?: unknown; image?: string; page_text?: string; focus?: string };
+    req.page_text = pgText;
+    req.focus = focusStr;
     req.memory = memorySnapshot(evt.page_id);
     memoryPages = Array.isArray(req.memory) ? req.memory.length : 0;
     trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>); // 此时尚未挂 image，trace 不被 base64 撑大
-    // 转写+图：当这簇手势的 OCR 实际走了 VLM（runtime=cloud_fallback）才把截图带给推理做底图——
-    // 图像模式是整页图就给整页、局部图就给那一块；数字版命中 textlayer 则不带图，省 token。
-    if (ocrs.some((o) => o?.runtime === 'cloud_fallback')) {
-      const img = settings.ocr.image === 'page' ? grabPage() : grabRegion(evt.geometry.bbox, 0.03);
-      if (img) { req.image = img; hasImage = true; }
-    }
+    if (composite) { req.image = composite; hasImage = true; }
     result = await inferProviders[state.inferProvider](req);
     trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
   } catch (err) {
@@ -203,8 +172,8 @@ export async function commitDiscussion(
     gesture: evt.event_type,
     intent: finalIntent,
     modes: finalModes,
-    nearby: structured,
-    ocrTexts: allBlocks.map((b) => b.text),
+    nearby: focusStr,
+    ocrTexts: [],
     memoryPages,
     hasImage,
     debug: dbg._debug ?? null,
@@ -231,7 +200,7 @@ export async function commitDiscussion(
   recordMark(evt.page_id, state.pageIndex, {
     discId,
     gesture: evt.event_type,
-    text: parts.map((p) => p.text).filter(Boolean).join(' '),
+    text: focusStr,
     note: result.content,
   });
   const pm = getMemory(evt.page_id); // 写穿持久化（记忆B 更新即落盘）

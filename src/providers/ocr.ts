@@ -133,6 +133,34 @@ export function grabRegion(bbox: NormBBox, pad = 0.02, max = 768): string | unde
   }
 }
 
+/**
+ * 合成裁剪（P1 核心）：把标注 bbox 那块从 **page 层 + ink 层叠加** 裁出 → PNG dataURL。
+ * 与 grabRegion 的唯一区别是把用户笔迹(#ink-layer)也画上去，让 LLM "看见" 圈/线/箭头/手写
+ * 叠在原文上的样子——语义交 LLM 的命门。两层画布同尺寸（renderer 同 vp.width*dpr）。
+ */
+export function grabComposite(bbox: NormBBox, pad = 0.03, max = 900): string | undefined {
+  const page = document.getElementById('page-layer') as HTMLCanvasElement | null;
+  const ink = document.getElementById('ink-layer') as HTMLCanvasElement | null;
+  if (!page || !page.width || !page.height) return undefined;
+  const [bx, by, bw, bh] = bbox;
+  const x0 = Math.max(0, bx - pad), y0 = Math.max(0, by - pad);
+  const x1 = Math.min(1, bx + bw + pad), y1 = Math.min(1, by + bh + pad);
+  const sx = x0 * page.width, sy = y0 * page.height;
+  const sw = Math.max(1, (x1 - x0) * page.width), sh = Math.max(1, (y1 - y0) * page.height);
+  try {
+    const scale = Math.min(1, max / Math.max(sw, sh));
+    const w = Math.max(1, Math.round(sw * scale)), h = Math.max(1, Math.round(sh * scale));
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const ctx = tmp.getContext('2d')!;
+    ctx.drawImage(page, sx, sy, sw, sh, 0, 0, w, h);
+    if (ink && ink.width === page.width && ink.height === page.height) ctx.drawImage(ink, sx, sy, sw, sh, 0, 0, w, h);
+    return tmp.toDataURL('image/png');
+  } catch {
+    return undefined;
+  }
+}
+
 /** 把整页 #page-layer canvas 缩到长边 ≤max 转 PNG（整页图 OCR / 推理底图用）。失败返回 undefined。 */
 export function grabPage(max = 1280): string | undefined {
   const cv = document.getElementById('page-layer') as HTMLCanvasElement | null;

@@ -130,8 +130,29 @@ export async function runInference(req: any): Promise<any> {
     '你是 InkLoop —— 嵌在 PDF 阅读器里的旁注式 AI 同读者。用户在原文上用符号（圈/划线/批注/点选）标注，' +
     '你依据符号含义与它圈住的上下文，轻声给一条简短中文旁注。不寒暄、不复述原文、不用 markdown 或列表、不超过 2 句，像页边批注点到为止。';
 
+  // 推理底图：合成图(墨迹叠原文) / 局部截图随请求带来时，让模型看着现场作答
+  const img = req.image ? String(req.image).replace(/^data:image\/[a-z]+;base64,/, '') : undefined;
+  const pageTextIn = String(req.page_text || '').slice(0, 4000); // P1：整页文字作恒定上下文
+  const focus = String(req.focus || nearby || '').trim();        // P1：几何焦点提示
+
   let task: string;
-  if (isDigest) {
+  if (img && pageTextIn) {
+    // P1 统一视觉路径：整页文字作上下文 + 合成图(墨迹叠原文) + 焦点提示，一次看图判完。
+    // 形状 / 圈中什么 / 手写读出 / 意图 全交模型，不再靠前端 bbox-文本匹配（治"答非所问"）。
+    const toneMap: Record<string, string> = {
+      underline: '这是划线/重点：提炼要点、点出它为何重要。',
+      arrow: '这是箭头/关联：点出它指向什么、和什么相关。',
+      margin_note: '这是手写批注：先读出 ta 写了什么，再就 ta 写的内容与所标段落给呼应。',
+      circle: '这是圈选：解释被圈的是什么、关键在哪。',
+    };
+    const tone = isAsk ? '用户像在发问：针对所标处直接作答，不要反问。' : (toneMap[et] || '就用户标注处给一条旁注。');
+    task =
+      `这一页的全文（供你理解语境）：\n${pageTextIn}\n\n` +
+      `附图是用户在这一页原文上画的标注截图——墨迹（圈/线/箭头/手写）已叠在原文上。` +
+      `几何粗判焦点约在：「${focus || '（未定位）'}」（仅供参考，以图为准）。\n` +
+      `请：① 看图确认 ta 标注的形状、以及圈/划/指向/写了哪些字（手写就读出来）落在全文哪一处；` +
+      `② ${tone} 一句中文旁注，点到为止。`;
+  } else if (isDigest) {
     task = `用户停笔了。下面是 ta 在这一页留下的所有标注（每条含符号类型与圈住的文字）：\n${nearby || '（无可提取文字）'}\n请综合这些标注给一条整体性的洞察或提示——帮 ta 想深一层、点出背后的关键、或建议下一步。`;
   } else if (isAsk) {
     // 圈+问号 = 提问
@@ -150,9 +171,6 @@ export async function runInference(req: any): Promise<any> {
     task = `用户圈出了一处："${enclosed || nearby || '（未提取到文字）'}"。请解释它是什么、关键在哪——像同读者在页边轻声点一句。`;
   }
   const jsonRule = `最终只输出一个 JSON 对象：{"result_type":"…","content":"…","confidence":0.x}。result_type 从这些里选最贴切的一个：${modes.join(' / ')}；content 是要显示的旁注文字；confidence 是 0–1 把握度。除该 JSON 外不要输出任何文字。`;
-
-  // 局部截图（vlm/full 模式）随请求带来时，作为底图让模型看着原文现场作答（转写+图）
-  const img = req.image ? String(req.image).replace(/^data:image\/[a-z]+;base64,/, '') : undefined;
 
   // Tier2：附带前页记忆快照时，走 recall 工具循环；否则单发
   const memory: MemSnap = Array.isArray(req.memory) ? req.memory : [];
@@ -195,8 +213,11 @@ export async function runInference(req: any): Promise<any> {
       task,
       enclosed,
       nearby,
+      focus,
+      page_text_len: pageTextIn.length,
       ocr_block_count: (req.ocr_blocks || []).length,
       has_image: !!img,
+      mode: (img && pageTextIn) ? 'p1-vision' : 'legacy',
       tier: memory.length ? 'tier2-recall' : 'single',
       memory_pages: memory.map((m) => ({ index: m.index, content: m.content ?? null, summary: m.summary, marks: m.marks.length })),
     },
