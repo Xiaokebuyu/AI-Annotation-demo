@@ -198,6 +198,8 @@ export async function commitDiscussion(
     ocrTexts: [],
     memoryPages,
     hasImage,
+    composite,
+    bbox: evt.geometry.bbox,
     debug: dbg._debug ?? null,
     resultType: result.result_type,
     content: result.content,

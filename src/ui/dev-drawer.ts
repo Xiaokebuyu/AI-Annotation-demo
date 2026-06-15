@@ -43,16 +43,26 @@ function renderInspect(): void {
     const mem = (d.memory_pages as Array<{ index: number; content: string | null; summary: string | null }> | undefined) ?? [];
     const memLine = mem.length ? mem.map((m) => `第${m.index + 1}页：${m.content || m.summary || '—'}`).join('；') : '无';
     const tag = `${SYM[r.gesture] ?? r.gesture}${r.intent ? '·' + r.intent : ''} → ${r.resultType}`;
-    const flags = [r.hasImage ? '含图' : '', r.recalled.length ? `回看[${r.recalled.join(',')}]` : '', String(d.tier ?? '')].filter(Boolean).join(' · ');
-    return `<details class="ins-card"><summary><span class="ins-tag">${esc(tag)}</span><span class="ins-meta">第${r.pageIndex + 1}页 · ${esc(r.model)}${flags ? ' · ' + esc(flags) : ''}</span></summary>`
-      + `<div class="ins-body">`
+    const ms = typeof d.ms === 'number' ? `${Math.round(d.ms as number)}ms · ` : '';
+    const mode = d.mode ? `${esc(String(d.mode))} · ` : '';
+    const flags = [r.recalled.length ? `回看[${r.recalled.join(',')}]` : '', String(d.tier ?? '')].filter(Boolean).join(' · ');
+    const bb = r.bbox ? r.bbox.map((n) => n.toFixed(2)).join(',') : '';
+    // 合成图(模型实际看到的图)直接显示在卡片里——核对"是模型问题还是没截到"
+    const shot = r.composite
+      ? `<a class="ins-shotwrap" href="${r.composite}" target="_blank" title="模型看到的合成图 · bbox[${bb}] · 点击放大"><img class="ins-shot" src="${r.composite}" alt="composite" /></a>`
+      : `<div class="ins-noshot">无合成图</div>`;
+    return `<div class="ins-card">`
+      + `<div class="ins-head"><span class="ins-tag">${esc(tag)}</span><span class="ins-meta">第${r.pageIndex + 1}页 · ${mode}${ms}${esc(r.model)}${flags ? ' · ' + esc(flags) : ''}</span></div>`
+      + `<div class="ins-main">${shot}<div class="ins-cols">`
+      + `<div class="ins-line"><span class="ins-k">焦点</span><span class="ins-v">${esc(r.nearby || '—')}</span></div>`
+      + `<div class="ins-line"><span class="ins-k">回复</span><span class="ins-v ins-reply">${esc(r.content)} <em class="ins-conf">信心 ${r.confidence}</em></span></div>`
+      + `</div></div>`
+      + `<details class="ins-more"><summary>系统 / 任务 / OCR / 记忆</summary><div class="ins-body">`
       + `<div class="ins-k">系统提示</div><div class="ins-v">${esc(String(d.system ?? '—'))}</div>`
-      + `<div class="ins-k">任务（模型实际被问）</div><div class="ins-v">${esc(String(d.task ?? '—'))}</div>`
-      + `<div class="ins-k">圈住 / 附近</div><div class="ins-v">${esc(r.nearby || '—')}</div>`
+      + `<div class="ins-k">任务</div><div class="ins-v">${esc(String(d.task ?? '—'))}</div>`
       + `<div class="ins-k">OCR 块（${r.ocrTexts.length}）</div><div class="ins-v">${esc(r.ocrTexts.join(' / ') || '—')}</div>`
       + `<div class="ins-k">前页记忆（${r.memoryPages}）</div><div class="ins-v">${esc(memLine)}</div>`
-      + `<div class="ins-k">回复（信心 ${r.confidence}）</div><div class="ins-v">${esc(r.content)}</div>`
-      + `</div></details>`;
+      + `</div></details></div>`;
   }).join('');
 }
 
