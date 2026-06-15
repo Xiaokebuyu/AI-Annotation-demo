@@ -24,20 +24,35 @@ export function isDeliberate(events: AnnotationEvent[]): boolean {
   return events.some((e) => classifyScored(e.stroke_points, e.geometry.bbox).score >= GESTURE_MIN_SCORE);
 }
 
-export type GestureKind = 'explain' | 'emphasize' | 'ask' | 'note';
+export type GestureKind = 'explain' | 'emphasize' | 'ask' | 'note' | 'relate';
+
+/** 用户意图（「为什么写」）—— 决定下游推理怎么响应。 */
+export type Intent = 'what_is_this' | 'key_point' | 'question' | 'relation' | 'free_note' | 'command';
 
 export interface Gesture {
   kind: GestureKind;
   label: string;          // 调试/trace 用
   eventType: EventType;   // 写进 representative event；服务端按它框定语气
+  intent: Intent;         // 用户意图（为什么写）
   output_modes: OutputMode[];
 }
 
 export const GESTURES: Record<GestureKind, Gesture> = {
-  explain:   { kind: 'explain',   label: '圈·解释',      eventType: 'circle',      output_modes: ['inspiration'] },
-  emphasize: { kind: 'emphasize', label: '划线·重点',    eventType: 'underline',   output_modes: ['inspiration'] },
-  ask:       { kind: 'ask',       label: '圈+问号·提问', eventType: 'circle',      output_modes: ['question'] },
-  note:      { kind: 'note',      label: '写字·批注',    eventType: 'margin_note', output_modes: ['inspiration'] },
+  explain:   { kind: 'explain',   label: '圈·解释',      eventType: 'circle',      intent: 'what_is_this', output_modes: ['inspiration'] },
+  emphasize: { kind: 'emphasize', label: '划线·重点',    eventType: 'underline',   intent: 'key_point',    output_modes: ['inspiration'] },
+  ask:       { kind: 'ask',       label: '圈+问号·提问', eventType: 'circle',      intent: 'question',     output_modes: ['question'] },
+  relate:    { kind: 'relate',    label: '箭头·关联',    eventType: 'arrow',       intent: 'relation',     output_modes: ['connection'] },
+  note:      { kind: 'note',      label: '写字·批注',    eventType: 'margin_note', intent: 'free_note',    output_modes: ['inspiration'] },
+};
+
+/** intent → output_modes（VLM 解读手写意图后用它改写推理语气）。 */
+export const INTENT_MODES: Record<Intent, OutputMode[]> = {
+  what_is_this: ['inspiration'],
+  key_point: ['inspiration'],
+  question: ['question'],
+  relation: ['connection'],
+  free_note: ['inspiration'],
+  command: ['action'],
 };
 
 /** 把一次停笔会话解析成手势意图（纯几何）。 */
@@ -45,6 +60,7 @@ export function resolveGesture(events: AnnotationEvent[]): Gesture {
   const types = events.map((e) => e.event_type);
   // 圈/点 + 额外记号 → 提问
   if (detectQueryIntent(types)) return GESTURES.ask;
+  if (types.includes('arrow')) return GESTURES.relate; // 箭头 → 关联
   // 多笔自由书写（既非单圈也非划线）→ 批注
   const freeform = types.filter((t) => t === 'stroke').length;
   if (events.length >= 2 && freeform >= 2 && !types.includes('circle')) return GESTURES.note;

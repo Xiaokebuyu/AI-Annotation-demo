@@ -47,9 +47,28 @@ export function classifyScored(
   const straight = wPx / Math.max(len, 1);
   const underlineScore = clamp01((aspect - 3) / 4) * clamp01((straight - 0.7) / 0.3);
 
-  if (circleScore >= underlineScore && circleScore > 0.35) return { type: 'circle', score: circleScore };
+  // 箭头：开口（非闭合）+ 主干够直 + 末端有个 >~100° 急转（箭头钩）。
+  let arrowScore = 0;
+  if (closure > 0.5 * diagPx && points.length >= 6) {
+    let sharpest = 0, atFrac = 0, acc = 0;
+    for (let i = 1; i < points.length - 1; i++) {
+      const v1x = points[i].x - points[i - 1].x, v1y = points[i].y - points[i - 1].y;
+      const v2x = points[i + 1].x - points[i].x, v2y = points[i + 1].y - points[i].y;
+      let dA = Math.abs(Math.atan2(v2y, v2x) - Math.atan2(v1y, v1x));
+      if (dA > Math.PI) dA = 2 * Math.PI - dA;                         // 0..PI
+      acc += Math.hypot((points[i].x - points[i - 1].x) * dimW, (points[i].y - points[i - 1].y) * dimH);
+      if (dA > sharpest) { sharpest = dA; atFrac = acc / len; }
+    }
+    const sharp = clamp01((sharpest - 1.75) / (Math.PI - 1.75)); // 转角 >~100°
+    const nearEnd = atFrac > 0.68 || atFrac < 0.32 ? 1 : 0;      // 急转靠近某一端
+    const shaft = clamp01((closure / len - 0.45) / 0.4);         // 主干直度
+    arrowScore = sharp * nearEnd * shaft;
+  }
+
+  if (circleScore >= Math.max(underlineScore, arrowScore) && circleScore > 0.35) return { type: 'circle', score: circleScore };
+  if (arrowScore > 0.4 && arrowScore >= underlineScore) return { type: 'arrow', score: arrowScore };
   if (underlineScore > 0.35) return { type: 'underline', score: underlineScore };
-  return { type: 'stroke', score: 0.15 + Math.max(circleScore, underlineScore) * 0.3 }; // 自由笔：低分
+  return { type: 'stroke', score: 0.15 + Math.max(circleScore, underlineScore, arrowScore) * 0.3 }; // 自由笔：低分
 }
 
 /** 几何启发式分类：tap_region / circle / underline / stroke */

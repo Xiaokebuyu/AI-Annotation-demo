@@ -139,6 +139,9 @@ export async function runInference(req: any): Promise<any> {
   } else if (et === 'underline') {
     // 划线 = 重点
     task = `用户用划线标了重点："${enclosed || nearby || '（未提取到文字）'}"。请提炼这处的要点、点出它为什么重要——一句话。`;
+  } else if (et === 'arrow') {
+    // 箭头 = 关联/导向
+    task = `用户画了个箭头，像在标"导向/因果/关联"。箭头附近或指向的内容："${enclosed || nearby || '（未提取到文字）'}"。请点出它和什么相关、指向什么结论或下一步——一句话。`;
   } else if (et === 'margin_note') {
     // 写字 = 批注（手写内容暂不可读，先用附近正文）
     task = `用户在页边写了一条批注（手写内容暂不可读）。批注落在这段正文附近："${nearby || enclosed || '（未提取到文字）'}"。请就这段正文给一条呼应 ta 思路的旁注。`;
