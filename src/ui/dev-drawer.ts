@@ -73,8 +73,23 @@ function runSelfTest(): void {
   selftestEl.dataset.ok = String(r.ok);
 }
 
+/**
+ * 开发面板：从右侧抽屉改造为独立全屏页（hash 路由 #dev）。
+ *  toggleDrawer 改写 location.hash 而非直接 hide/show —— 走浏览器路由，前进/后退也能切。
+ *  hashchange 监听里再统一更新 drawer.hidden 和 body.dev-on。
+ */
 export function toggleDrawer(force?: boolean): void {
-  drawer.hidden = force === undefined ? !drawer.hidden : !force;
+  const wantOn = force === undefined ? location.hash !== '#dev' : force;
+  if (wantOn && location.hash !== '#dev') location.hash = 'dev';
+  else if (!wantOn && location.hash === '#dev') history.replaceState(null, '', location.pathname + location.search);
+  syncDevRoute();
+}
+
+function syncDevRoute(): void {
+  if (!drawer) return;
+  const on = location.hash === '#dev';
+  drawer.hidden = !on;
+  document.body.classList.toggle('dev-on', on);
 }
 
 /** AI 行为设置：各项独立绑定，改动即写回 settings 并广播 settings:changed。 */
@@ -185,7 +200,12 @@ export function initDevDrawer(els: {
     }
   });
 
-  if (new URLSearchParams(location.search).get('dev') === '1') toggleDrawer(true);
+  // 路由：?dev=1 兼容（导到 #dev）；hashchange 同步显示
+  if (new URLSearchParams(location.search).get('dev') === '1' && location.hash !== '#dev') {
+    history.replaceState(null, '', location.pathname + '#dev');
+  }
+  window.addEventListener('hashchange', syncDevRoute);
+  syncDevRoute();
   renderMetrics();
   renderInspect();
   runSelfTest();

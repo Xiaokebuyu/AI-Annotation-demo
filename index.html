@@ -60,8 +60,10 @@
   <aside id="dev-drawer" hidden>
     <div class="drawer-head">
       <span>开发面板</span>
-      <button id="drawer-close" class="ghost">✕</button>
+      <button id="drawer-close" class="ghost" title="返回阅读（按 d 切换）">← 返回阅读</button>
     </div>
+    <div class="drawer-body">
+    <div class="drawer-col settings-col">
     <div class="drawer-section">
       <label>AI 行为（可独立开关、可组合）</label>
       <div class="set-row">
@@ -121,10 +123,6 @@
       <div id="pp-progress" class="pp-progress">未开始</div>
     </div>
     <div class="drawer-section">
-      <label>上下文监控 · 最近推理（喂了什么 / 回了什么）</label>
-      <div id="inspect-log"></div>
-    </div>
-    <div class="drawer-section">
       <div id="selftest">坐标自测：未运行</div>
     </div>
     <div class="drawer-section">
@@ -134,10 +132,19 @@
         <tbody id="metrics-body"></tbody>
       </table>
     </div>
+    </div><!-- /.settings-col -->
+
+    <div class="drawer-col monitor-col">
+    <div class="drawer-section">
+      <label>上下文监控 · 最近推理（喂了什么 / 回了什么）</label>
+      <div id="inspect-log"></div>
+    </div>
     <div class="drawer-section grow">
       <label>Trace <button id="dl-trace" class="ghost mini">下载 JSONL</button></label>
       <div id="trace-log"></div>
     </div>
+    </div><!-- /.monitor-col -->
+    </div><!-- /.drawer-body -->
   </aside>
 
   <script type="module" src="/src/main.ts"></script>
