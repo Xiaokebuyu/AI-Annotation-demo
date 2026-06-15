@@ -51,7 +51,8 @@ export interface Settings {
   // 文字识别：textlayer 数字版文本层（开关）+ 图像 OCR（关闭/局部图/整页图，给扫描·手写·图表）
   ocr: { textlayer: boolean; image: OcrImageMode };
   // 预处理：导入后台预排版前 reflowPages 页 + 预解读（记忆A）前 digestPages 页（封顶，喂推理更准）
-  preprocess: { reflowPages: number; digestPages: number };
+  //  reflowEnabled / digestEnabled：默认关，需 dev 面板手动开
+  preprocess: { reflowEnabled: boolean; digestEnabled: boolean; reflowPages: number; digestPages: number };
   // 段落讨论：同段上的手势聚成一次讨论，停笔 pauseSeconds 后生成、按 discId 原地更新
   gesture: { enabled: boolean; pauseSeconds: number };
 }
@@ -61,7 +62,7 @@ export const settings: Settings = {
   viewMode: 'page',
   reflowProvider: 'local',
   ocr: { textlayer: true, image: 'off' },
-  preprocess: { reflowPages: 5, digestPages: 10 },
+  preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
   gesture: { enabled: true, pauseSeconds: 5 },
 };
 

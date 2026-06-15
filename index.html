@@ -107,12 +107,16 @@
       <select id="infer-provider"></select>
     </div>
     <div class="drawer-section">
-      <label>预处理（导入后台跑 · 封顶页数）</label>
+      <label>预处理（导入后台跑 · 默认关）</label>
       <label class="set-check">
-        <span>预排版</span>
+        <input type="checkbox" id="set-pp-reflow-on" />
+        <span>预排版 前</span>
         <input type="number" id="set-pp-reflow" class="sec-in" min="0" max="100" step="1" /><span class="sec-u">页</span>
-        <span class="pp-gap">预解读</span>
-        <input type="number" id="set-pp-digest" class="sec-in" min="0" max="100" step="1" /><span class="sec-u">页（记忆A）</span>
+      </label>
+      <label class="set-check">
+        <input type="checkbox" id="set-pp-digest-on" />
+        <span>预解读 前</span>
+        <input type="number" id="set-pp-digest" class="sec-in" min="0" max="100" step="1" /><span class="sec-u">页（记忆A · 烧 token）</span>
       </label>
       <div id="pp-progress" class="pp-progress">未开始</div>
     </div>

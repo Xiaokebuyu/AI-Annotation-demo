@@ -1,6 +1,8 @@
 import './styles.css';
 import { recordEvent, commitDiscussion, summarizePage } from './core/pipeline';
-import { resolveGesture, isDeliberate, type Gesture } from './core/gesture';
+import { resolveGesture, isDeliberate, GESTURE_MIN_SCORE, type Gesture } from './core/gesture';
+import { classifyScored } from './core/classify';
+import { trace } from './core/trace';
 import { shortId } from './core/ids';
 import { bus, state, settings } from './app/state';
 import { getOverlays, getStrokes, removeOverlay, storedDoc, upsertOverlay } from './app/store';
@@ -107,8 +109,23 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
     const batch = pending;
     pending = [];
     sessionTrace = null;
-    if (batch.length && isDeliberate(batch)) {
-      recBucket(batch[0].page_id).push({ events: batch, gesture: resolveGesture(batch), bbox: unionBBox(batch) });
+    if (!batch.length) return;
+    // 诊断：每会话记录各笔的原始分类 + 分数 + 是否过门槛 + 解析出的手势
+    const scored = batch.map((e) => {
+      const s = classifyScored(e.stroke_points, e.geometry.bbox);
+      return { type: s.type, score: Number(s.score.toFixed(2)), raw: s.raw };
+    });
+    const deliberate = isDeliberate(batch);
+    const gesture = deliberate ? resolveGesture(batch) : null;
+    trace('GestureSession', {
+      page_id: batch[0].page_id,
+      strokes: scored,
+      threshold: GESTURE_MIN_SCORE,
+      deliberate,
+      resolved: gesture ? `${gesture.label} (→ ${gesture.eventType} · ${gesture.intent})` : '— 未过形状门槛，不触发',
+    });
+    if (deliberate && gesture) {
+      recBucket(batch[0].page_id).push({ events: batch, gesture, bbox: unionBBox(batch) });
     }
   }, SESSION_WINDOW);
 

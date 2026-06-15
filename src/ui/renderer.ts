@@ -106,8 +106,11 @@ export async function loadFile(file: File): Promise<void> {
   });
   bus.emit('document:loaded');
   await renderPage();
-  // 后台预处理（封顶页数 dev 可设）：预排版 + 内容解读，不阻塞首屏
-  void preprocess(settings.preprocess.reflowPages, settings.preprocess.digestPages);
+  // 后台预处理（默认关，dev 面板开关）：预排版 + 内容解读，不阻塞首屏
+  const pp = settings.preprocess;
+  const reflowCap = pp.reflowEnabled ? pp.reflowPages : 0;
+  const digestCap = pp.digestEnabled ? pp.digestPages : 0;
+  if (reflowCap > 0 || digestCap > 0) void preprocess(reflowCap, digestCap);
 }
 
 /** 抽取一页的文本块（归一化 bbox，zoom/rotation 无关）。渲染与预处理共用。 */

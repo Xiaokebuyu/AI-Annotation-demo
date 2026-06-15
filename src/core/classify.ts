@@ -15,6 +15,8 @@ const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
 export interface ScoredGesture {
   type: EventType;
   score: number; // 0–1：这笔画得有多像该模板（用于"画得像范例才算数"的门槛）
+  /** 各模板的原始分数（用于诊断"为啥没识别成圈"）。 */
+  raw?: { circle: number; underline: number; arrow: number };
 }
 
 /**
@@ -41,11 +43,11 @@ export function classifyScored(
     len += Math.hypot((points[i].x - points[i - 1].x) * dimW, (points[i].y - points[i - 1].y) * dimH);
   }
   // 圈：起止接近（闭合）+ 路径绕得够长
-  const circleScore = clamp01((0.4 - closure / diagPx) / 0.4) * clamp01((len / diagPx - 1.2) / 1.3);
-  // 直划线：扁 + 直（路径≈宽度）
+  const circleScore = clamp01((0.5 - closure / diagPx) / 0.5) * clamp01((len / diagPx - 1.0) / 1.3);
+  // 直划线：扁 + 直（路径≈宽度）—— 阈值放宽，宽松接受"差不多线"
   const aspect = wPx / Math.max(hPx, 1);
   const straight = wPx / Math.max(len, 1);
-  const underlineScore = clamp01((aspect - 3) / 4) * clamp01((straight - 0.7) / 0.3);
+  const underlineScore = clamp01((aspect - 2.2) / 4) * clamp01((straight - 0.55) / 0.35);
 
   // 箭头：开口（非闭合）+ 主干够直 + 末端有个 >~100° 急转（箭头钩）。
   let arrowScore = 0;
@@ -65,10 +67,11 @@ export function classifyScored(
     arrowScore = sharp * nearEnd * shaft;
   }
 
-  if (circleScore >= Math.max(underlineScore, arrowScore) && circleScore > 0.35) return { type: 'circle', score: circleScore };
-  if (arrowScore > 0.4 && arrowScore >= underlineScore) return { type: 'arrow', score: arrowScore };
-  if (underlineScore > 0.35) return { type: 'underline', score: underlineScore };
-  return { type: 'stroke', score: 0.15 + Math.max(circleScore, underlineScore, arrowScore) * 0.3 }; // 自由笔：低分
+  const raw = { circle: circleScore, underline: underlineScore, arrow: arrowScore };
+  if (circleScore >= Math.max(underlineScore, arrowScore) && circleScore > 0.22) return { type: 'circle', score: circleScore, raw };
+  if (arrowScore > 0.45 && arrowScore >= underlineScore) return { type: 'arrow', score: arrowScore, raw };
+  if (underlineScore > 0.22) return { type: 'underline', score: underlineScore, raw };
+  return { type: 'stroke', score: 0.15 + Math.max(circleScore, underlineScore, arrowScore) * 0.3, raw }; // 自由笔：低分
 }
 
 /** 几何启发式分类：tap_region / circle / underline / stroke */

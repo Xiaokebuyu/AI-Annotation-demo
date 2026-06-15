@@ -84,7 +84,9 @@ function initSettings(): void {
   const reflow = $id<HTMLSelectElement>('set-reflow');
   const textlayer = $id<HTMLInputElement>('set-textlayer');
   const ocrImage = $id<HTMLSelectElement>('set-ocr-image');
+  const ppReflowOn = $id<HTMLInputElement>('set-pp-reflow-on');
   const ppReflow = $id<HTMLInputElement>('set-pp-reflow');
+  const ppDigestOn = $id<HTMLInputElement>('set-pp-digest-on');
   const ppDigest = $id<HTMLInputElement>('set-pp-digest');
   const gesture = $id<HTMLInputElement>('set-gesture');
   const pauseSec = $id<HTMLInputElement>('set-pause-sec');
@@ -94,7 +96,9 @@ function initSettings(): void {
   reflow.value = settings.reflowProvider;
   textlayer.checked = settings.ocr.textlayer;
   ocrImage.value = settings.ocr.image;
+  ppReflowOn.checked = settings.preprocess.reflowEnabled;
   ppReflow.value = String(settings.preprocess.reflowPages);
+  ppDigestOn.checked = settings.preprocess.digestEnabled;
   ppDigest.value = String(settings.preprocess.digestPages);
   gesture.checked = settings.gesture.enabled;
   pauseSec.value = String(settings.gesture.pauseSeconds);
@@ -105,6 +109,8 @@ function initSettings(): void {
   reflow.addEventListener('change', () => { settings.reflowProvider = reflow.value; changed(); });
   textlayer.addEventListener('change', () => { settings.ocr.textlayer = textlayer.checked; changed(); });
   ocrImage.addEventListener('change', () => { settings.ocr.image = ocrImage.value as OcrImageMode; changed(); });
+  ppReflowOn.addEventListener('change', () => { settings.preprocess.reflowEnabled = ppReflowOn.checked; });
+  ppDigestOn.addEventListener('change', () => { settings.preprocess.digestEnabled = ppDigestOn.checked; });
   ppReflow.addEventListener('change', () => { settings.preprocess.reflowPages = clampPp(ppReflow, settings.preprocess.reflowPages); ppReflow.value = String(settings.preprocess.reflowPages); });
   ppDigest.addEventListener('change', () => { settings.preprocess.digestPages = clampPp(ppDigest, settings.preprocess.digestPages); ppDigest.value = String(settings.preprocess.digestPages); });
   gesture.addEventListener('change', () => { settings.gesture.enabled = gesture.checked; changed(); });
@@ -145,8 +151,19 @@ export function initDevDrawer(els: {
     const o = obj as {
       trace_id?: string; event_id?: string; nearby_text?: string | null; content?: string;
       result_type?: string; source_refs?: Array<{ page_id?: string; ocr_block_ids?: string[] }>; recalled?: number[];
+      strokes?: Array<{ type: string; score: number; raw?: { circle: number; underline: number; arrow: number } }>;
+      threshold?: number; deliberate?: boolean; resolved?: string;
     };
     let txt = `${String(kind).padEnd(22)}${o.trace_id ?? o.event_id ?? ''}`;
+    // 手势诊断：每会话原始分类 + 是否过门槛 + 解析出的手势
+    if (kind === 'GestureSession' && o.strokes) {
+      const lines = o.strokes.map((s, i) => {
+        const r = s.raw;
+        const detail = r ? ` (circle=${r.circle.toFixed(2)} underline=${r.underline.toFixed(2)} arrow=${r.arrow.toFixed(2)})` : '';
+        return `   笔${i + 1}: ${s.type} · 分${s.score}${detail}`;
+      }).join('\n');
+      txt += `\n${lines}\n   门槛=${o.threshold} · 过=${o.deliberate ? '是' : '否'} → ${o.resolved ?? ''}`;
+    }
     // 请求：AI 看到/引用了哪些内容（圈住的原文）
     if (o.nearby_text) txt += `\n   ⟵引用上下文: ${String(o.nearby_text).replace(/\n/g, ' ').slice(0, 90)}`;
     // 结果：AI 回复 + 指回的来源（页 · 命中块数）+ 跨页回看了哪些页

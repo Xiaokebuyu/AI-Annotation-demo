@@ -11,7 +11,7 @@ import type { AnnotationEvent, EventType, OutputMode } from './contracts';
 import { classifyScored, detectQueryIntent } from './classify';
 
 /** 形状门槛：低于此分的单笔自由涂抹不算手势（不触发 AI），笔迹仍无损留着。 */
-export const GESTURE_MIN_SCORE = 0.4;
+export const GESTURE_MIN_SCORE = 0.3;
 
 /**
  * 这次停笔到底算不算"刻意的手势"——决定生成与否（看是否画得像范例，而非有没有动作）。
