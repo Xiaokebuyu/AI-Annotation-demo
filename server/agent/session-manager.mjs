@@ -34,6 +34,11 @@ async function ensureSession(bookId, cfg) {
   const existing = sessions.get(bookId);
   if (existing && !existing.closed) return existing;
 
+  // 一本书一个会话:单用户单文档,开新会话前关掉其它(避免旧子进程/会话长期堆积)
+  for (const [id, other] of sessions) {
+    if (id !== bookId && !other.closed) { try { other.inputQueue.close(); } catch { /* */ } sessions.delete(id); }
+  }
+
   const proxy = await getOrStartProxy({ gatewayUrl: cfg.gatewayUrl, realModel: cfg.realModel });
   const sessionId = `inkloop-${bookId}`;
   const baseUrlForBinary = `${proxy.baseUrl}/__nd/${encodeURIComponent(sessionId)}`;

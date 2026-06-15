@@ -9,8 +9,6 @@
  */
 import type { AnnotationEvent, EventType, OutputMode } from './contracts';
 import { classifyScored, detectQueryIntent } from './classify';
-import { pageCss } from './transform';
-import { state } from '../app/state';
 
 /** 形状门槛：低于此分的单笔自由涂抹不算手势（不触发 AI），笔迹仍无损留着。 */
 export const GESTURE_MIN_SCORE = 0.3;
@@ -74,68 +72,4 @@ export function resolveGesture(events: AnnotationEvent[]): Gesture {
   // 全是 stroke（潦草笔但有一笔过门槛）：由 VLM 视觉路径承担"是写字还是抽象符号"的判定；
   // 几何路径下，保守地当批注。如果想要更精准识别，切 routing='vlm'。
   return GESTURES.note;
-}
-
-// ───────────────────────── 三档 auto 路由 ─────────────────────────
-
-export interface RouteDecision {
-  route: 'mark' | 'write' | 'vlm';
-  n: number;
-  medSize: number; // 中位笔画对角线 ÷ 本地行高（px）；行高未知记 -1
-  primMax: number; // 最像某原语（圈/划/箭头）的分
-  reason: string;  // 人读：为什么这么路由（进 trace）
-}
-
-function median(xs: number[]): number {
-  if (!xs.length) return 0;
-  const s = [...xs].sort((a, b) => a - b);
-  return s[s.length >> 1];
-}
-
-/** 笔迹 y 带附近的中位字高（px）。无文本层命中 → null（量不出 → 交 VLM）。 */
-function localLineHeightPx(yTop: number, yBot: number): number | null {
-  const hs = state.textBlocks
-    .filter((tb) => tb.text.trim() && tb.bbox[1] < yBot && tb.bbox[1] + tb.bbox[3] > yTop)
-    .map((tb) => tb.bbox[3] * pageCss.h);
-  if (!hs.length) return null;
-  return median(hs);
-}
-
-/**
- * 把一次组装窗（已滤掉 tap 的真实笔画）判成三档之一。只用三个特征：
- *   n        笔画数
- *   medSize  中位笔画对角线 ÷ 本地行高 —— 记号比它指的字大；手写跟字一样大
- *   primMax  最像某原语的分 —— 干净圈/划/箭头高，潦草手写低
- * 判定偏向"宁可升级 VLM，别把手写误吞成记号"：只有够大够像的单原语才本地判记号，
- * 只有多笔·字号·不像原语才本地判手写，其余（含量不出行高）一律交 VLM 裁决。
- * 阈值先写死，真机再调；trace 里会显示 n/medSize/primMax 便于调。
- */
-export function routeAssembly(events: AnnotationEvent[]): RouteDecision {
-  const n = events.length;
-  const scored = events.map((e) => classifyScored(e.stroke_points, e.geometry.bbox));
-  const primMax = Math.max(0, ...scored.map((s) => {
-    const r = s.raw;
-    return r ? Math.max(r.circle, r.underline, r.arrow) : 0;
-  }));
-
-  let yTop = 1, yBot = 0;
-  for (const e of events) {
-    yTop = Math.min(yTop, e.geometry.bbox[1]);
-    yBot = Math.max(yBot, e.geometry.bbox[1] + e.geometry.bbox[3]);
-  }
-  const lineHpx = localLineHeightPx(yTop, yBot);
-  if (lineHpx == null) {
-    return { route: 'vlm', n, medSize: -1, primMax, reason: '无文本层·量不出行高 → VLM' };
-  }
-
-  const diagPxs = events.map((e) => Math.hypot(e.geometry.bbox[2] * pageCss.w, e.geometry.bbox[3] * pageCss.h));
-  const medSize = median(diagPxs) / lineHpx;
-
-  if (n <= 2 && primMax >= 0.5 && medSize >= 1.6) {
-    return { route: 'mark', n, medSize, primMax, reason: '单原语·够大够像 → 记号（几何·0 token）' };
-  }
-  if (n >= 3 && medSize <= 1.0 && primMax < 0.35) {
-    return { route: 'write', n, medSize, primMax, reason: '多笔·字号·不像原语 → 手写（读字+最近N行）' };
-  }
-  return { route: 'vlm', n, medSize, primMax, reason: '信号不确定 → VLM 裁决（可回 nothing 不打扰）' };
 }
