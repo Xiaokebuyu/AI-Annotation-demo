@@ -39,10 +39,16 @@ let live: { x: number; y: number }[] | null = null;
 const DISC = 'disc_r_';
 
 // ── 渲染 ──
-function render(items: RenderItem[]): void {
-  el.querySelectorAll('.reader-page, .reader-empty').forEach((n) => n.remove());
+function render(items: RenderItem[], warn: string = ''): void {
+  el.querySelectorAll('.reader-page, .reader-empty, .reader-warn').forEach((n) => n.remove());
   pageWrap = null;
   inkStrokes.length = 0;
+  if (warn) {
+    const w = document.createElement('p');
+    w.className = 'reader-warn';
+    w.textContent = warn;
+    el.insertBefore(w, inkCv);
+  }
   if (!items.length) {
     const empty = document.createElement('p');
     empty.className = 'reader-empty';
@@ -163,7 +169,15 @@ async function rebuild(): Promise<void> {
     // 把原页图像按 y 顺序插回阅读流（图不丢；reflow 纯函数不动）
     const figures: FigureItem[] = state.imageRegions.map((bb, i) => ({ kind: 'figure', id: `fig_${state.pageIndex}_${i}`, source: bb }));
     const items: RenderItem[] = [...blocks, ...figures].sort((a, b) => a.source[1] - b.source[1]);
-    render(items);
+    // 畸形检测：图片型 PDF（textBlocks 极少）或字号统一的 OCR 嵌字 PDF（网页截图常见）→ 给诚实提示
+    const sizes = state.textBlocks.map((b) => b.bbox[3]);
+    const sizeSpread = sizes.length ? Math.max(...sizes) / Math.min(...sizes) - 1 : 0;
+    const unreliable = state.textBlocks.length > 0 && state.textBlocks.length < 5
+      ? '本页可识别文本极少（可能是图片型 PDF），重排不可靠 — 建议看「原版」。'
+      : sizeSpread < 0.06 && state.textBlocks.length > 20 && state.imageRegions.length === 0
+        ? '本页字号统一、缺标题层级线索（常见于网页截图生成的 PDF），重排可能仅是按段堆叠。'
+        : '';
+    render(items, unreliable);
   } catch (e) {
     reflowKey = '';                       // 失败可重试（同输入下次触发再来一遍）
     if (seq !== reflowSeq) return;

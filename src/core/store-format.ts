@@ -6,7 +6,7 @@
  * 改动递增 version 并通知两组（决策 D4）。归属上属 B 组「序列化在 OCR 之后、推理之前」，
  * solo 阶段先做，格式按 contract 设计，团队并行时交还/对齐。
  */
-import type { NormBBox } from './contracts';
+import type { NormBBox, ScreenOverlay, StrokePoint } from './contracts';
 import type { ReflowBlock } from './reflow';
 import type { PageMark } from './memory';
 
@@ -30,12 +30,10 @@ export interface PersistedMemory {
   marks: PageMark[];
 }
 
-/** 标注的低成本序列：源 stroke 无损留在 trace（ADR D3），存储这里可抽稀。本轮字段先定义。 */
-export interface PersistedAnnotation {
-  discId: string | null;
-  gesture: string;
-  bbox: NormBBox;
-  points?: Array<[number, number]>; // 归一化、抽稀后的点串（可复原大致形状）
+/** 一笔的低成本序列：源 stroke 无损留在 trace（ADR D3）；这里存归一化点串复原原貌。 */
+export interface PersistedStroke {
+  tool: 'pen' | 'highlighter' | 'eraser' | 'hand';
+  points: StrokePoint[];
 }
 
 export interface PersistedPage {
@@ -44,7 +42,8 @@ export interface PersistedPage {
   reflow_engine: string | null;   // 产出该重排的引擎（local/hybrid/vision）—— 切引擎需重排
   images: PersistedImage[];
   memory: PersistedMemory;
-  annotations: PersistedAnnotation[];
+  strokes: PersistedStroke[];     // 原始笔迹（按页存，可视恢复）
+  overlays: ScreenOverlay[];      // AI 卡片（按 overlay_id upsert 自带状态）
   status: 'pending' | 'reflowed' | 'done';
 }
 

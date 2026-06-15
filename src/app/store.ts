@@ -4,9 +4,9 @@
  * 内存里持有当前文档 `current`（同步读写），改动去抖后异步落 IndexedDB。
  * 全程 try/catch：IDB 不可用（隐私模式等）则退化为「仅内存」，不影响主流程。
  */
-import type { NormBBox } from '../core/contracts';
+import type { NormBBox, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../core/reflow';
-import type { PersistedDoc, PersistedMemory, PersistedPage } from '../core/store-format';
+import type { PersistedDoc, PersistedMemory, PersistedPage, PersistedStroke } from '../core/store-format';
 import { STORE_VERSION } from '../core/store-format';
 
 const DB_NAME = 'inkloop';
@@ -80,10 +80,15 @@ function page(i: number): PersistedPage | null {
   if (!current.pages[i]) {
     current.pages[i] = {
       page_index: i, reflow: null, reflow_engine: null, images: [],
-      memory: { content: null, activity: null, marks: [] }, annotations: [], status: 'pending',
+      memory: { content: null, activity: null, marks: [] },
+      strokes: [], overlays: [], status: 'pending',
     };
   }
-  return current.pages[i];
+  // 老格式兼容：恢复旧文档时补字段
+  const p = current.pages[i];
+  if (!p.strokes) p.strokes = [];
+  if (!p.overlays) p.overlays = [];
+  return p;
 }
 
 function scheduleSave(): void {
@@ -144,4 +149,33 @@ export function putContent(i: number, content: string): void {
 }
 export function getContent(i: number): string | null {
   return current?.pages[i]?.memory.content ?? null;
+}
+
+// ── 笔迹（每页全量存）──
+export function putStrokes(i: number, strokes: PersistedStroke[]): void {
+  const p = page(i);
+  if (!p) return;
+  p.strokes = strokes.slice();
+  scheduleSave();
+}
+export function getStrokes(i: number): PersistedStroke[] {
+  return current?.pages[i]?.strokes ?? [];
+}
+
+// ── AI 卡片（按 overlay_id upsert）──
+export function upsertOverlay(i: number, o: ScreenOverlay): void {
+  const p = page(i);
+  if (!p) return;
+  const idx = p.overlays.findIndex((x) => x.overlay_id === o.overlay_id);
+  if (idx >= 0) p.overlays[idx] = o; else p.overlays.push(o);
+  scheduleSave();
+}
+export function removeOverlay(i: number, id: string): void {
+  const p = page(i);
+  if (!p) return;
+  p.overlays = p.overlays.filter((x) => x.overlay_id !== id);
+  scheduleSave();
+}
+export function getOverlays(i: number): ScreenOverlay[] {
+  return current?.pages[i]?.overlays ?? [];
 }

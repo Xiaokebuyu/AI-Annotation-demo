@@ -154,7 +154,11 @@ export function initWhisper(whisperLayer: HTMLElement): void {
     if (el) el.dataset.state = ov.state;
     relayout();
   });
-  bus.on('page:rendered', relayout);
+  bus.on('page:rendered', () => {
+    // 持久化恢复的 overlays 在 state 里但还没 DOM → 当前页的补上
+    for (const o of state.overlays) if (o.page_id === state.pageId && !els.has(o.overlay_id)) add(o);
+    relayout();
+  });
   bus.on('settings:changed', relayout);
   bus.on('whisper:reveal', (overlayId) => {
     const el = els.get(overlayId as string);

@@ -2,6 +2,12 @@ import type { StrokePoint } from '../core/contracts';
 import { normToPx, pxToNorm, pageCss } from '../core/transform';
 import { trace } from '../core/trace';
 import { bus, currentStrokes, state, type Stroke, type Tool } from '../app/state';
+import { putStrokes } from '../app/store';
+
+/** 把当前页笔迹落盘（每次抬笔/擦除/撤销都调一次，去抖在 store 内部）。 */
+export function persistInk(): void {
+  putStrokes(state.pageIndex, currentStrokes().map((s) => ({ tool: s.tool, points: s.points })));
+}
 
 let cv: HTMLCanvasElement;
 let ctx: CanvasRenderingContext2D;
@@ -79,6 +85,7 @@ function eraseAt(e: PointerEvent): void {
     if (hit) {
       const [removed] = strokes.splice(i, 1);
       trace('StrokeErased', { page_id: state.pageId ?? '', points: removed.points.length });
+      persistInk();
       redrawInk();
       return;
     }
@@ -90,6 +97,7 @@ export function undoStroke(): void {
   if (!strokes.length) return;
   strokes.pop();
   trace('StrokeUndone', { page_id: state.pageId ?? '' });
+  persistInk();
   redrawInk();
 }
 

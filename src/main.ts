@@ -3,11 +3,12 @@ import { recordEvent, commitDiscussion, summarizePage } from './core/pipeline';
 import { resolveGesture, isDeliberate, type Gesture } from './core/gesture';
 import { shortId } from './core/ids';
 import { bus, state, settings } from './app/state';
-import { storedDoc } from './app/store';
+import { getOverlays, getStrokes, removeOverlay, storedDoc, upsertOverlay } from './app/store';
 import { restorePage } from './core/memory';
+import type { ScreenOverlay } from './core/contracts';
 import type { AnnotationEvent, EventType, NormBBox, OutputMode } from './core/contracts';
 import { initRenderer, loadFile, gotoPage, setZoom, hasDocument } from './ui/renderer';
-import { initInk } from './ui/ink';
+import { initInk, persistInk } from './ui/ink';
 import { initWhisper } from './ui/whisper';
 import { initReader } from './ui/reader';
 import { initInsightPanel } from './ui/insight-panel';
@@ -98,6 +99,7 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
   const evt = recordEvent(stroke, sessionTrace, pointerType, penUpAt);
   if (!evt) return;
   pending.push(evt);
+  persistInk(); // 每笔落盘（去抖在 store 内部）
 
   // 1.2s：一次手势组装完 → 过形状门槛(画得像范例)才记为"已识别手势"，随手涂忽略
   window.clearTimeout(sessionTimer);
@@ -120,6 +122,18 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
 
 // 设置变化时取消在途计时（避免旧设置下的延迟触发）
 bus.on('settings:changed', cancelTimers);
+
+// AI 卡片持久化：page_id 形如 pg_{hash8}_{idx} → 取末段为页号
+function pageIdxOf(pageId: string): number {
+  const m = pageId.match(/_(\d+)$/);
+  return m ? Number(m[1]) : state.pageIndex;
+}
+bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; upsertOverlay(pageIdxOf(ov.page_id), ov); });
+bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; upsertOverlay(pageIdxOf(ov.page_id), ov); });
+bus.on('overlay:remove', (id) => {
+  const ov = state.overlays.find((x) => x.overlay_id === (id as string));
+  if (ov) removeOverlay(pageIdxOf(ov.page_id), ov.overlay_id);
+});
 
 initWhisper($('whisper-layer'));
 initReader($('reader'));
@@ -177,13 +191,17 @@ bus.on('document:loaded', () => {
   document.body.classList.add('doc-loaded');
   $('empty-state').style.display = 'none';
   $('doc-name').textContent = state.fileName;
-  // 从持久化恢复各页两段记忆（重排/图解缓存由 reader 按需读 store；标注可视恢复留作下一步）
+  // 从持久化恢复：两段记忆、原始笔迹、AI 卡片（重排/图解缓存由 reader 按需读 store）
   const doc = storedDoc();
-  if (doc && state.documentId) {
-    for (const p of Object.values(doc.pages)) {
-      const pid = `pg_${state.documentId.slice(4, 12)}_${p.page_index}`;
-      restorePage(pid, p.page_index, p.memory.content, p.memory.activity, p.memory.marks);
-    }
+  if (!doc || !state.documentId) return;
+  state.overlays = [];
+  for (const p of Object.values(doc.pages)) {
+    const pid = `pg_${state.documentId.slice(4, 12)}_${p.page_index}`;
+    restorePage(pid, p.page_index, p.memory.content, p.memory.activity, p.memory.marks);
+    // 笔迹：填回 strokesByPage（按 page_id 索引）
+    if (p.strokes?.length) state.strokesByPage.set(pid, p.strokes.map((s) => ({ tool: s.tool, points: s.points })));
+    // 卡片：合到全局 overlays（whisper/reader 按当前 page_id 过滤显示）
+    if (p.overlays?.length) state.overlays.push(...p.overlays);
   }
 });
 
