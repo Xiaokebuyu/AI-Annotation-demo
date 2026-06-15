@@ -89,8 +89,19 @@
       </label>
     </div>
     <div class="drawer-section">
-      <label>OCR provider</label>
-      <select id="ocr-provider"></select>
+      <label>文字识别（OCR）</label>
+      <label class="set-check">
+        <input type="checkbox" id="set-textlayer" />
+        <span>PDF 文本层（数字版精确·0 成本；图片型 PDF 无效）</span>
+      </label>
+      <div class="set-row">
+        <span>图像 OCR</span>
+        <select id="set-ocr-image">
+          <option value="off">关闭</option>
+          <option value="region">局部图（裁标注区域）</option>
+          <option value="page">整页图（看全页）</option>
+        </select>
+      </div>
       <label>推理 provider</label>
       <select id="infer-provider"></select>
     </div>

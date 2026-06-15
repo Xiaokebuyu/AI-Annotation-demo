@@ -1,8 +1,7 @@
 import { selfTest } from '../core/transform';
 import { snapshot } from '../core/metrics';
 import { downloadTrace } from '../core/trace';
-import { bus, state, settings, type Placement } from '../app/state';
-import { OCR_PROVIDER_LABELS } from '../providers/ocr';
+import { bus, state, settings, type Placement, type OcrImageMode } from '../app/state';
 import { INFER_PROVIDER_LABELS } from '../providers/inference';
 
 /**
@@ -52,18 +51,24 @@ function initSettings(): void {
   const $id = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
   const placement = $id<HTMLSelectElement>('set-placement');
   const reflow = $id<HTMLSelectElement>('set-reflow');
+  const textlayer = $id<HTMLInputElement>('set-textlayer');
+  const ocrImage = $id<HTMLSelectElement>('set-ocr-image');
   const gesture = $id<HTMLInputElement>('set-gesture');
   const pauseSec = $id<HTMLInputElement>('set-pause-sec');
 
   // 从 settings 初始化控件
   placement.value = settings.placement;
   reflow.value = settings.reflowProvider;
+  textlayer.checked = settings.ocr.textlayer;
+  ocrImage.value = settings.ocr.image;
   gesture.checked = settings.gesture.enabled;
   pauseSec.value = String(settings.gesture.pauseSeconds);
 
   const changed = () => bus.emit('settings:changed');
   placement.addEventListener('change', () => { settings.placement = placement.value as Placement; changed(); });
   reflow.addEventListener('change', () => { settings.reflowProvider = reflow.value; changed(); });
+  textlayer.addEventListener('change', () => { settings.ocr.textlayer = textlayer.checked; changed(); });
+  ocrImage.addEventListener('change', () => { settings.ocr.image = ocrImage.value as OcrImageMode; changed(); });
   gesture.addEventListener('change', () => { settings.gesture.enabled = gesture.checked; changed(); });
   pauseSec.addEventListener('change', () => {
     const n = Math.min(30, Math.max(1, Number(pauseSec.value) || settings.gesture.pauseSeconds));
@@ -75,7 +80,6 @@ function initSettings(): void {
 
 export function initDevDrawer(els: {
   drawer: HTMLElement;
-  ocrSelect: HTMLSelectElement;
   inferSelect: HTMLSelectElement;
   metricsBody: HTMLElement;
   traceLog: HTMLElement;
@@ -89,9 +93,7 @@ export function initDevDrawer(els: {
   selftestEl = els.selftest;
 
   initSettings();
-  fillSelect(els.ocrSelect, OCR_PROVIDER_LABELS, state.ocrProvider);
   fillSelect(els.inferSelect, INFER_PROVIDER_LABELS, state.inferProvider);
-  els.ocrSelect.addEventListener('change', () => { state.ocrProvider = els.ocrSelect.value; });
   els.inferSelect.addEventListener('change', () => { state.inferProvider = els.inferSelect.value; });
   els.downloadBtn.addEventListener('click', () => downloadTrace());
   els.closeBtn.addEventListener('click', () => toggleDrawer(false));

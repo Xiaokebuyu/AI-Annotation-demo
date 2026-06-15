@@ -129,7 +129,6 @@ initInsightPanel({
 });
 initDevDrawer({
   drawer: $('dev-drawer'),
-  ocrSelect: $<HTMLSelectElement>('ocr-provider'),
   inferSelect: $<HTMLSelectElement>('infer-provider'),
   metricsBody: $('metrics-body'),
   traceLog: $('trace-log'),
@@ -193,6 +192,26 @@ bus.on('page:rendered', () => {
 
 $('prev').addEventListener('click', () => gotoPage(-1));
 $('next').addEventListener('click', () => gotoPage(1));
+
+// 翻页手势：笔/手指分流后，手指横滑（或 hand 工具拖动）→ ink.ts 发 nav:flip
+bus.on('nav:flip', (dir) => gotoPage(Number(dir) || 0));
+
+// 触控板两指横滑 → 翻页（最贴近真机手指翻页）。横向为主才拦，竖向滚动放行；一次滑一翻、加锁防连翻。
+let wheelAccum = 0;
+let wheelLock = false;
+$('stage-wrap').addEventListener('wheel', (e) => {
+  if (settings.viewMode !== 'page' || !hasDocument()) return;
+  if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // 竖向滚动不翻页
+  e.preventDefault();                                    // 拦 Safari/浏览器的前进后退手势
+  if (wheelLock) return;
+  wheelAccum += e.deltaX;
+  if (Math.abs(wheelAccum) > 80) {
+    gotoPage(wheelAccum > 0 ? 1 : -1);
+    wheelAccum = 0;
+    wheelLock = true;
+    window.setTimeout(() => { wheelLock = false; }, 450);
+  }
+}, { passive: false });
 $('zoom-in').addEventListener('click', () => setZoom(state.zoom + 0.25));
 $('zoom-out').addEventListener('click', () => setZoom(state.zoom - 0.25));
 $('dev-toggle').addEventListener('click', () => toggleDrawer());

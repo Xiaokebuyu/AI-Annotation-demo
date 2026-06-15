@@ -3,10 +3,16 @@ import { SCHEMA_VERSION } from '../core/contracts';
 import type { ReflowBlock } from '../core/reflow';
 import { bus, settings, state } from '../app/state';
 import { reflowProviders } from '../providers/reflow';
+import { grabRegion } from '../providers/ocr';
 import { bboxOf, classifyScored } from '../core/classify';
 import { resolveGesture } from '../core/gesture';
 import { commitDiscussion } from '../core/pipeline';
+import { memorySnapshot } from '../core/memory';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
+
+/** 重排阅读流里的一项：重排出的文本块，或保留的原页图像（带 AI 解读）。 */
+interface FigureItem { kind: 'figure'; id: string; source: NormBBox; }
+type RenderItem = ReflowBlock | FigureItem;
 
 /**
  * 重排阅读面（settings.viewMode === 'reader'）。
@@ -15,6 +21,7 @@ import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
  */
 
 let el: HTMLElement;             // #reader 滚动容器
+let pageWrap: HTMLElement | null = null; // 居中的阅读块（正文列 + AI 注栏）
 let inkCv: HTMLCanvasElement;    // 行内圈画画布（内容坐标，随内容滚动）
 let inkCtx: CanvasRenderingContext2D | null = null;
 
@@ -31,10 +38,11 @@ let live: { x: number; y: number }[] | null = null;
 const DISC = 'disc_r_';
 
 // ── 渲染 ──
-function render(blocks: ReflowBlock[]): void {
-  el.querySelectorAll('.reader-col, .reader-empty').forEach((n) => n.remove());
+function render(items: RenderItem[]): void {
+  el.querySelectorAll('.reader-page, .reader-empty').forEach((n) => n.remove());
+  pageWrap = null;
   inkStrokes.length = 0;
-  if (!blocks.length) {
+  if (!items.length) {
     const empty = document.createElement('p');
     empty.className = 'reader-empty';
     empty.textContent = '这一页没有可重排的文本层（扫描版或空白页）。';
@@ -42,10 +50,32 @@ function render(blocks: ReflowBlock[]): void {
     resizeInk();
     return;
   }
+  const wrap = document.createElement('div');
+  wrap.className = 'reader-page';
   const col = document.createElement('article');
   col.className = 'reader-col';
   blockRefs = [];
-  for (const b of blocks) {
+  for (const it of items) {
+    if ('kind' in it) {
+      // 原页图像：保留图本身 + AI 解读注（不丢图，旁附一句它在讲什么）
+      const crop = grabRegion(it.source, 0, 1024);
+      const fig = document.createElement('figure');
+      fig.className = 'reader-fig';
+      fig.dataset.block = it.id;
+      const img = document.createElement('img');
+      img.alt = '原文图像';
+      if (crop) img.src = crop;
+      const cap = document.createElement('figcaption');
+      cap.className = 'reader-figcap';
+      cap.dataset.pending = '1';
+      cap.textContent = '正在解读这张图…';
+      fig.appendChild(img);
+      fig.appendChild(cap);
+      col.appendChild(fig);
+      void explainFigure(cap, it.source, crop);
+      continue;
+    }
+    const b = it;
     const node = document.createElement(b.type === 'heading' ? 'h2' : 'p');
     node.className = b.type === 'heading' ? 'reader-h' : 'reader-p';
     if (b.type === 'heading') node.dataset.level = String(b.level);
@@ -55,18 +85,64 @@ function render(blocks: ReflowBlock[]): void {
     col.appendChild(node);
     blockRefs.push({ id: b.id, el: node, source: b.source });
   }
-  el.insertBefore(col, inkCv);
+  wrap.appendChild(col);
+  el.insertBefore(wrap, inkCv);
+  pageWrap = wrap;
   // 把已有的本页讨论注重新贴回（切引擎/重渲后不丢）
   state.overlays.filter((o) => o.overlay_id.startsWith(DISC) && o.page_id === state.pageId).forEach(renderNote);
   resizeInk();
 }
 
+/** 图附近的正文（喂给图像解读做上下文）。 */
+function nearbyText(bb: NormBBox): string {
+  const [x, y, w, h] = bb;
+  const pad = 0.06;
+  const near: NormBBox = [x - pad, y - pad, w + 2 * pad, h + 2 * pad];
+  const hit = (r: NormBBox, b: NormBBox) =>
+    b[0] < r[0] + r[2] && b[0] + b[2] > r[0] && b[1] < r[1] + r[3] && b[1] + b[3] > r[1];
+  return state.textBlocks.filter((t) => hit(near, t.bbox)).map((t) => t.text).join(' ').slice(0, 800);
+}
+
+/** 让 Kimi 看图，结合「图附近正文 + 前页总结」给一句解读，填进 figcaption。 */
+async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string): Promise<void> {
+  if (!image) { cap.textContent = '（无法截取此图）'; delete cap.dataset.pending; return; }
+  const nearby = nearbyText(source);
+  const prevSummary = memorySnapshot(state.pageId ?? '').find((m) => m.index === state.pageIndex - 1)?.summary ?? '';
+  try {
+    const resp = await fetch('/api/explain-image', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ image, nearby, prevSummary }),
+    });
+    const data = resp.ok ? await resp.json() : null;
+    cap.textContent = data?.text ? `图：${String(data.text)}` : '（这张图暂时没读出含义）';
+  } catch {
+    cap.textContent = '（解读失败）';
+  }
+  delete cap.dataset.pending;
+}
+
+let reflowKey = '';   // 上次重排的输入键（页 + 引擎）——只在它变了才重排
+let reflowSeq = 0;    // 防并发：快速翻页/切引擎时只让最新一次结果落地
+
 async function rebuild(): Promise<void> {
   if (settings.viewMode !== 'reader') return;
+  // 重排输入只由「当前页 + 重排引擎」决定。缩放、无关设置变化、布局抖动触发的 page:rendered
+  // 都不该重排——这是"重复触发"的根（hybrid/vision 还会重复打网关）。
+  const key = `${state.pageId ?? ''}|${settings.reflowProvider}`;
+  if (key === reflowKey) return;
+  reflowKey = key;
+  const seq = ++reflowSeq;
   try {
     const blocks = await reflowProviders[settings.reflowProvider](state.textBlocks);
-    if (settings.viewMode === 'reader') render(blocks);
+    if (seq !== reflowSeq || settings.viewMode !== 'reader') return; // 被更新的一次取代
+    // 把原页图像按 y 顺序插回阅读流（图不丢；reflow 纯函数不动）
+    const figures: FigureItem[] = state.imageRegions.map((bb, i) => ({ kind: 'figure', id: `fig_${state.pageIndex}_${i}`, source: bb }));
+    const items: RenderItem[] = [...blocks, ...figures].sort((a, b) => a.source[1] - b.source[1]);
+    render(items);
   } catch (e) {
+    reflowKey = '';                       // 失败可重试（同输入下次触发再来一遍）
+    if (seq !== reflowSeq) return;
     el.querySelectorAll('.reader-col, .reader-empty').forEach((n) => n.remove());
     const err = document.createElement('p');
     err.className = 'reader-empty';
@@ -86,7 +162,7 @@ function renderNote(o: ScreenOverlay): void {
   note.dataset.for = o.overlay_id;
   note.dataset.block = blockId;
   note.textContent = o.display_text;
-  el.appendChild(note); // 绝对定位进右侧留白，不进文档流 → 不扰乱正文排版
+  (pageWrap ?? el).appendChild(note); // 绝对定位进右侧留白，不进文档流 → 不扰乱正文排版
   layoutNotes();
 }
 
@@ -200,7 +276,8 @@ export function initReader(readerEl: HTMLElement): void {
 
   el.addEventListener('pointerdown', (e) => {
     if (settings.viewMode !== 'reader' || !state.pageId) return;
-    if (state.tool === 'eraser') return;
+    if (state.tool === 'eraser' || state.tool === 'hand') return; // hand 工具/手指不在重排面画
+    if (e.pointerType === 'touch') return;                        // 触屏手指留给滚动导航
     live = [contentPoint(e)];
   });
   el.addEventListener('pointermove', (e) => {

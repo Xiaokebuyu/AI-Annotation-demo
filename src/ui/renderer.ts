@@ -1,7 +1,8 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import type { PDFDocumentProxy } from 'pdfjs-dist';
+import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from 'pdfjs-dist';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import type { NormBBox } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
 import { sha256Hex } from '../core/ids';
 import { setPageSize, GUTTER_W } from '../core/transform';
@@ -29,6 +30,54 @@ export function initRenderer(els: {
 
 export function hasDocument(): boolean {
   return pdf !== null;
+}
+
+// ── 原页图像区域抽取（扫 PDF 操作流找 paintImage* 算子，用累计变换矩阵求图在页面的 bbox）──
+type Mat = [number, number, number, number, number, number];
+const matMul = (m: Mat, n: Mat): Mat => [
+  m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+  m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+  m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5],
+];
+const matApply = (m: Mat, x: number, y: number): [number, number] => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+
+function overlapFrac(a: NormBBox, b: NormBBox): number {
+  const ix = Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0]));
+  const iy = Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1]));
+  return (ix * iy) / (Math.min(a[2] * a[3], b[2] * b[3]) || 1);
+}
+
+async function extractImageRegions(page: PDFPageProxy, vp: PageViewport): Promise<NormBBox[]> {
+  try {
+    const ops = await page.getOperatorList();
+    const O = pdfjsLib.OPS;
+    const IMG = new Set([O.paintImageXObject, O.paintInlineImageXObject, O.paintImageMaskXObject].filter((v) => v !== undefined));
+    let ctm: Mat = [1, 0, 0, 1, 0, 0];
+    const stack: Mat[] = [];
+    const out: NormBBox[] = [];
+    for (let i = 0; i < ops.fnArray.length; i++) {
+      const fn = ops.fnArray[i];
+      if (fn === O.save) stack.push(ctm);
+      else if (fn === O.restore) ctm = stack.pop() ?? [1, 0, 0, 1, 0, 0];
+      else if (fn === O.transform) ctm = matMul(ctm, ops.argsArray[i] as Mat);
+      else if (IMG.has(fn)) {
+        const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map(([x, y]) => {
+          const [ux, uy] = matApply(ctm, x, y);
+          return vp.convertToViewportPoint(ux, uy) as [number, number];
+        });
+        const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1]);
+        const x0 = Math.min(...xs) / vp.width, x1 = Math.max(...xs) / vp.width;
+        const y0 = Math.min(...ys) / vp.height, y1 = Math.max(...ys) / vp.height;
+        const bb: NormBBox = [x0, y0, x1 - x0, y1 - y0];
+        if (bb[2] > 0.06 && bb[3] > 0.04 && bb[2] * bb[3] > 0.012) out.push(bb); // 滤掉图标/分隔线/底纹点
+      }
+    }
+    const kept: NormBBox[] = []; // 去重：高度重叠当作同一张图（mask + 本体常各出现一次）
+    for (const b of out) if (!kept.some((k) => overlapFrac(k, b) > 0.6)) kept.push(b);
+    return kept;
+  } catch {
+    return [];
+  }
 }
 
 export async function loadFile(file: File): Promise<void> {
@@ -111,6 +160,9 @@ export async function renderPage(): Promise<void> {
   } catch {
     state.textBlocks = [];
   }
+
+  // 原页图像区域（重排时保留，不丢图）
+  state.imageRegions = await extractImageRegions(page, vp);
 
   state.pageId = `pg_${state.documentId.slice(4, 12)}_${state.pageIndex}`;
   state.pageRecord = {

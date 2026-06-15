@@ -6,7 +6,22 @@ import { bus, currentStrokes, state, type Stroke, type Tool } from '../app/state
 let cv: HTMLCanvasElement;
 let ctx: CanvasRenderingContext2D;
 let live: { tool: Tool; points: StrokePoint[]; t0: number; pointerType: string } | null = null;
+let nav: { x0: number; y0: number } | null = null;
 let onStrokeComplete: ((stroke: Stroke, pointerType: string, penUpAt: number) => void) | null = null;
+
+const SWIPE_MIN_PX = 60; // 横滑超过此距离且以横向为主 → 翻页
+
+/**
+ * 输入意图分流 —— 笔 / 手指的「硬件接口」，policy 只在这一处：
+ *  - pointerType 'pen'   → 标注（触控笔 / iPad Apple Pencil）
+ *  - pointerType 'touch' → 翻页·导航（手指 / 触屏）
+ * 真机 / iPad 直接命中上面两支（搬过去零改）；桌面鼠标无 pen/touch，落到 hand 工具兜底。
+ */
+function resolveIntent(pointerType: string): 'annotate' | 'navigate' {
+  if (pointerType === 'pen') return 'annotate';
+  if (pointerType === 'touch') return 'navigate';
+  return state.tool === 'hand' ? 'navigate' : 'annotate';
+}
 
 interface SegStyle {
   stroke: string;
@@ -88,6 +103,13 @@ export function initInk(
 
   cv.addEventListener('pointerdown', (e) => {
     if (!state.documentId) return;
+    // 手指/手型 → 导航：记起点，抬笔时判横滑翻页（不进笔迹采集）
+    if (resolveIntent(e.pointerType) === 'navigate') {
+      e.preventDefault();
+      nav = { x0: e.clientX, y0: e.clientY };
+      try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      return;
+    }
     e.preventDefault();
     if (state.tool === 'eraser') { eraseAt(e); return; }
     try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
@@ -129,11 +151,19 @@ export function initInk(
     onStrokeComplete?.(stroke, pointerType, penUpAt);
   };
 
-  cv.addEventListener('pointerup', finish);
-  cv.addEventListener('pointercancel', () => { live = null; });
+  // 导航抬笔：横滑距离够且以横向为主 → 翻页（左滑下一页、右滑上一页）。main.ts 接 nav:flip。
+  const finishNav = (e: PointerEvent) => {
+    if (!nav) return;
+    const dx = e.clientX - nav.x0, dy = e.clientY - nav.y0;
+    nav = null;
+    if (Math.abs(dx) > SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy)) bus.emit('nav:flip', dx < 0 ? 1 : -1);
+  };
+
+  cv.addEventListener('pointerup', (e) => { if (nav) finishNav(e); else finish(); });
+  cv.addEventListener('pointercancel', () => { live = null; nav = null; });
 
   bus.on('page:rendered', () => redrawInk());
   bus.on('tool', () => {
-    cv.style.cursor = state.tool === 'eraser' ? 'cell' : 'crosshair';
+    cv.style.cursor = state.tool === 'eraser' ? 'cell' : state.tool === 'hand' ? 'grab' : 'crosshair';
   });
 }

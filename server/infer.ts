@@ -231,12 +231,41 @@ export async function runReflow(payload: any): Promise<any[]> {
 export async function runOcrVlm(payload: any): Promise<{ text: string }> {
   const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
   if (!image) return { text: '' };
+  const isPage = payload?.scope === 'page';
+  const bbox = Array.isArray(payload?.bbox) ? payload.bbox.map((n: any) => Number(n)) : null;
   const system =
-    '你是一个 OCR 转写器。输入是一张从 PDF 页面裁出的局部截图。' +
-    '原样转写图中的文字（可能是印刷体或手写），按自然阅读顺序输出纯文本，多行用换行分隔。' +
-    '不要解释、不要翻译、不要加任何说明或标点修饰。若图中没有可辨认的文字，输出空字符串。';
-  const user = '转写这张截图里的文字：';
-  const text = await gateway(system, user, 500, image);
+    '你是一个 OCR 转写器。' +
+    (isPage
+      ? '输入是一整页 PDF 截图，以及用户标注框在页面上的大致位置。只转写标注框那块区域内的文字。'
+      : '输入是一张从 PDF 页面裁出的局部截图。转写图中的文字。') +
+    '可能是印刷体或手写，按自然阅读顺序输出纯文本，多行用换行分隔。' +
+    '不要解释、不要翻译、不要加任何说明或标点修饰。若没有可辨认的文字，输出空字符串。';
+  let user = '转写这张截图里的文字：';
+  if (isPage && bbox) {
+    const [x, y, w, h] = bbox;
+    const pct = (v: number) => Math.round(v * 100);
+    user = `用户标注框大约在页面横向 ${pct(x)}%–${pct(x + w)}%、纵向 ${pct(y)}%–${pct(y + h)}%（左上角为原点）。转写该区域内的文字：`;
+  }
+  const text = await gateway(system, user, isPage ? 700 : 500, image);
+  return { text: text.trim() };
+}
+
+/**
+ * 图像解读：看一张从原页裁出的图，结合「图附近正文 + 前页总结」说清它在讲什么。
+ * 重排时图不丢，旁附这一句 AI 注解。（未来上下文可扩到相邻页。）
+ */
+export async function runExplainImage(payload: any): Promise<{ text: string }> {
+  const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
+  if (!image) return { text: '' };
+  const nearby = String(payload?.nearby || '').slice(0, 800);
+  const prev = String(payload?.prevSummary || '').slice(0, 200);
+  const system =
+    '你在帮读者理解一篇文档里的一张图（照片 / 图表 / 示意图 / 公式截图）。' +
+    '结合给到的上下文，用一两句中文说清这张图在讲什么、为什么放在这里、它支撑了什么观点。' +
+    '不要逐像素描述外观，不要寒暄，不要 markdown，最多 2 句。读不出就说「这张图的含义不明确」。';
+  const ctx = [prev ? `前页梗概：${prev}` : '', nearby ? `图附近的正文：${nearby}` : ''].filter(Boolean).join('\n');
+  const user = `${ctx ? ctx + '\n\n' : ''}看这张图，给读者一句解读：`;
+  const text = await gateway(system, user, 300, image);
   return { text: text.trim() };
 }
 

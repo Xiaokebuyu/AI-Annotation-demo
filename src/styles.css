@@ -423,7 +423,7 @@ body.doc-loaded #stage::after {
 /* AI 注：绝对定位进右侧留白、与所属段同行对齐；斜体 + 半透明、无强调符；不进文档流（不扰排版）*/
 .reader-note {
   position: absolute;
-  right: 24px;
+  right: 0;                /* 相对 .reader-page wrapper 的右缘 */
   width: 224px;
   font: italic 13.5px/1.6 var(--serif);
   color: var(--ink);
@@ -431,11 +431,16 @@ body.doc-loaded #stage::after {
   pointer-events: none;
   z-index: 3;
 }
-#reading.reader #toolbar { display: none; }
+/* 居中的阅读块：正文列 + 右侧 AI 注栏作为一个整体在页面居中（两侧留白均衡） */
+.reader-page {
+  position: relative;
+  max-width: 968px;        /* 正文 ~600 + 间隙 + 注栏 224 */
+  margin: 0 auto;
+}
 .reader-col {
-  max-width: min(620px, calc(100% - 280px)); /* 左对齐，右侧留出给 AI 注的空位 */
+  max-width: 600px;        /* 阅读行宽（measure）：约 60–70 字/行，左对齐 */
   margin: 0;
-  font: 16px/1.85 var(--serif);
+  font: 16.5px/1.8 var(--serif);
   color: var(--ink);
 }
 .reader-h {
@@ -447,7 +452,19 @@ body.doc-loaded #stage::after {
 .reader-h[data-level="1"] { font-size: 27px; }
 .reader-h[data-level="2"] { font-size: 22px; }
 .reader-h[data-level="3"] { font-size: 19px; }
-.reader-p { margin: 0 0 1.05em; text-align: justify; hyphens: auto; }
+.reader-p { margin: 0 0 1.05em; text-align: left; }
+/* 重排里保留的原页图像 + AI 解读注（图不丢，旁附一句它在讲什么） */
+.reader-fig { margin: 1.4em 0; }
+.reader-fig img {
+  display: block; max-width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--paper);
+}
+.reader-figcap {
+  margin: 0.5em 0 0;
+  font: italic 13.5px/1.6 var(--serif);
+  color: var(--ink); opacity: 0.7;
+}
+.reader-figcap[data-pending="1"] { opacity: 0.4; }
 .reader-empty {
   max-width: 680px;
   margin: 48px auto;

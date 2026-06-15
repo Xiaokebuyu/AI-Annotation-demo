@@ -4,8 +4,8 @@ import { DEVICE_ID, SESSION_ID, shortId } from './ids';
 import { bboxOf, classify } from './classify';
 import { mark } from './metrics';
 import { trace } from './trace';
-import { bus, state, type Stroke } from '../app/state';
-import { grabRegion, ocrProviders } from '../providers/ocr';
+import { bus, settings, state, type Stroke } from '../app/state';
+import { grabPage, grabRegion, runOcr } from '../providers/ocr';
 import { inferProviders } from '../providers/inference';
 import { memorySnapshot, pageMarks, recordMark, setSummary } from './memory';
 
@@ -133,8 +133,8 @@ export async function commitDiscussion(
   evt.trace_id = shortId('disc');
   if (eventType) evt.event_type = eventType; // 单手势时写 canonical 类型，服务端据此框定语气
 
-  // 逐标注取圈住的上下文（单条 OCR 失败跳过，不连累整体）
-  const ocrs = await Promise.all(events.map((e) => ocrProviders[state.ocrProvider](e).catch(() => null)));
+  // 逐标注取圈住的上下文（单条 OCR 失败跳过，不连累整体）。runOcr 由设置决定 textlayer / 图像 OCR
+  const ocrs = await Promise.all(events.map((e) => runOcr(e).catch(() => null)));
   const parts = events.map((e, i) => {
     const blocks = ocrs[i]?.text_blocks ?? [];
     return { type: e.event_type, text: (blocks.map((b) => b.text).join('') || ocrs[i]?.nearby_text || '').trim() };
@@ -148,10 +148,10 @@ export async function commitDiscussion(
     const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, modes) as InferenceRequest & { memory?: unknown; image?: string };
     req.memory = memorySnapshot(evt.page_id);
     trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>); // 此时尚未挂 image，trace 不被 base64 撑大
-    // 转写+图：当这簇手势的 OCR 实际走了 VLM 截图（runtime=cloud_fallback）才把区域截图带给推理做底图
-    // （数字版命中 textlayer 则不带图，省 token）。proxy 级附加，不动冻结契约。
+    // 转写+图：当这簇手势的 OCR 实际走了 VLM（runtime=cloud_fallback）才把截图带给推理做底图——
+    // 图像模式是整页图就给整页、局部图就给那一块；数字版命中 textlayer 则不带图，省 token。
     if (ocrs.some((o) => o?.runtime === 'cloud_fallback')) {
-      const img = grabRegion(evt.geometry.bbox, 0.03);
+      const img = settings.ocr.image === 'page' ? grabPage() : grabRegion(evt.geometry.bbox, 0.03);
       if (img) req.image = img;
     }
     result = await inferProviders[state.inferProvider](req);
