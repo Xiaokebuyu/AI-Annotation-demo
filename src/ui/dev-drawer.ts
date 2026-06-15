@@ -107,6 +107,7 @@ function initSettings(): void {
   const gestureRouting = $id<HTMLSelectElement>('set-gesture-routing');
   const ctxLines = $id<HTMLInputElement>('set-ctx-lines');
   const pauseSec = $id<HTMLInputElement>('set-pause-sec');
+  const inferEngine = $id<HTMLSelectElement>('set-infer-engine');
 
   // 从 settings 初始化控件
   placement.value = settings.placement;
@@ -121,6 +122,7 @@ function initSettings(): void {
   gestureRouting.value = settings.gesture.routing;
   ctxLines.value = String(settings.gesture.contextLines);
   pauseSec.value = String(settings.gesture.pauseSeconds);
+  inferEngine.value = settings.inferEngine;
 
   const changed = () => bus.emit('settings:changed');
   const clampPp = (el: HTMLInputElement, cur: number) => Math.min(100, Math.max(0, Number(el.value) || cur));
@@ -134,6 +136,14 @@ function initSettings(): void {
   ppDigest.addEventListener('change', () => { settings.preprocess.digestPages = clampPp(ppDigest, settings.preprocess.digestPages); ppDigest.value = String(settings.preprocess.digestPages); });
   gesture.addEventListener('change', () => { settings.gesture.enabled = gesture.checked; changed(); });
   gestureRouting.addEventListener('change', () => { settings.gesture.routing = gestureRouting.value as 'auto' | 'geometric' | 'vlm'; changed(); });
+  inferEngine.addEventListener('change', () => {
+    settings.inferEngine = inferEngine.value === 'session' ? 'session' : 'stateless';
+    // 切到会话且已开书 → 预热(起会话+spawn,消首笔冷启)
+    if (settings.inferEngine === 'session' && state.documentId) {
+      fetch('/api/agent/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bookId: state.documentId }) }).catch(() => { /* 预热失败不影响 */ });
+    }
+    changed();
+  });
   ctxLines.addEventListener('change', () => {
     const n = Math.min(10, Math.max(0, Number(ctxLines.value) || settings.gesture.contextLines));
     settings.gesture.contextLines = n;

@@ -87,6 +87,13 @@
         <span>手势响应（段落讨论：圈=解释·划=重点·圈+问号=提问·写字=批注）</span>
       </label>
       <div class="set-row">
+        <span>推理引擎</span>
+        <select id="set-infer-engine">
+          <option value="stateless">无状态（快 ~1-2s · 无跨标注记忆）</option>
+          <option value="session">会话（连贯·记得本书前文 · 热轮 ~5s）</option>
+        </select>
+      </div>
+      <div class="set-row">
         <span>手势判定</span>
         <select id="set-gesture-routing">
           <option value="auto">自动三档（记号→几何·手写→读字·拿不准→VLM 裁决）</option>

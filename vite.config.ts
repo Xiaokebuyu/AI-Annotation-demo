@@ -34,6 +34,13 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       post('/api/interpret', runInterpret);
       post('/api/interpret-gesture', runInterpretGesture);
       post('/api/reflow-vlm', runReflowVlm);
+
+      // P3 会话引擎(Agent SDK):懒加载,含 SDK 子进程;失败只影响 /api/agent/*,不拖垮 dev server。
+      let agentMod: { agentTurnEndpoint: (b: unknown) => Promise<unknown>; agentOpenEndpoint: (b: unknown) => Promise<unknown>; agentCloseEndpoint: (b: unknown) => unknown } | null = null;
+      const agent = async () => (agentMod ??= await import('./server/agent/session-manager.mjs') as any);
+      post('/api/agent/turn', async (b) => (await agent()).agentTurnEndpoint(b));
+      post('/api/agent/open', async (b) => (await agent()).agentOpenEndpoint(b));
+      post('/api/agent/close', async (b) => (await agent()).agentCloseEndpoint(b));
     },
   };
 }

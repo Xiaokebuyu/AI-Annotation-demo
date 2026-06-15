@@ -38,6 +38,7 @@ async function ensureSession(bookId, cfg) {
   const baseUrlForBinary = `${proxy.baseUrl}/__nd/${encodeURIComponent(sessionId)}`;
   const inputQueue = new AsyncQueue();
   const s = { inputQueue, pending: [], curText: '', closed: false, bookId };
+  s.ready = new Promise((resolve) => { s._resolveReady = resolve; }); // SDK 'init' 到达(子进程就绪)即 resolve
   sessions.set(bookId, s);
 
   const stream = query({
@@ -56,7 +57,9 @@ async function ensureSession(bookId, cfg) {
   s.consumer = (async () => {
     try {
       for await (const msg of stream) {
-        if (msg.type === 'assistant') {
+        if (msg.type === 'system' && msg.subtype === 'init') {
+          s._resolveReady?.(); // 子进程就绪 → 预热完成
+        } else if (msg.type === 'assistant') {
           const t = (msg.message?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
           if (t) s.curText += t;
         } else if (msg.type === 'result') {
@@ -69,6 +72,7 @@ async function ensureSession(bookId, cfg) {
       s.pending.splice(0).forEach((p) => p.reject(e));
     } finally {
       s.closed = true;
+      s._resolveReady?.(); // 别让 open 的等待挂死
       s.pending.splice(0).forEach((p) => p.reject(new Error('session closed')));
     }
   })();
@@ -127,4 +131,31 @@ export function closeAgentSession(bookId) {
 
 export function agentSessionStats() {
   return [...sessions.entries()].map(([id, s]) => ({ bookId: id, closed: s.closed, pending: s.pending.length }));
+}
+
+// ── HTTP 端点封装(vite 中间件挂载用;cfg 从 env 取,key 不出服务端) ──
+function cfgFromEnv() {
+  return { gatewayUrl: process.env.LLM_GATEWAY_URL, key: process.env.LLM_GATEWAY_KEY, realModel: process.env.LLM_MODEL || 'kimi-k2.6' };
+}
+
+/** POST /api/agent/turn —— 跑一轮标注。 */
+export async function agentTurnEndpoint(body) {
+  const { bookId, gestureType, pageText, focus, image, modes } = body || {};
+  if (!bookId) throw new Error('bookId required');
+  return runAgentTurn(bookId, { gestureType, pageText, focus, image, modes }, cfgFromEnv());
+}
+
+/** POST /api/agent/open —— 开书预热:起会话 + spawn 子进程,消掉首笔 ~14s 冷启。 */
+export async function agentOpenEndpoint(body) {
+  if (!body?.bookId) throw new Error('bookId required');
+  const s = await ensureSession(body.bookId, cfgFromEnv());
+  // 等子进程 'init' 就绪(spawn 完),让开书后的首笔标注变成热轮;超时兜底不挂死
+  await Promise.race([s.ready, new Promise((r) => setTimeout(r, 20000))]);
+  return { ok: true, warmed: body.bookId };
+}
+
+/** POST /api/agent/close —— 关书结束会话。 */
+export function agentCloseEndpoint(body) {
+  closeAgentSession(body?.bookId);
+  return { ok: true };
 }

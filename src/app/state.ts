@@ -58,6 +58,9 @@ export interface Settings {
   //            geometric=只几何阈值（本地·0 token）；vlm=每次抬笔都截图给 VLM 判定
   //   contextLines: 手写批注的"最近正文"行数（按笔迹 y 距离取最近 N 行）
   gesture: { enabled: boolean; pauseSeconds: number; routing: 'auto' | 'geometric' | 'vlm'; contextLines: number };
+  // 推理引擎：stateless=每标注一次无状态 /api/infer（快 ~1-2s，无跨标注记忆）；
+  //          session=一本书一个长驻 Agent SDK 会话（跨标注连贯，但热轮 ~5s/冷启 ~14s）。默认 stateless。
+  inferEngine: 'stateless' | 'session';
 }
 
 export const settings: Settings = {
@@ -67,6 +70,7 @@ export const settings: Settings = {
   ocr: { textlayer: true, image: 'off' },
   preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
   gesture: { enabled: true, pauseSeconds: 5, routing: 'auto', contextLines: 3 },
+  inferEngine: 'stateless',
 };
 
 export interface Stroke {

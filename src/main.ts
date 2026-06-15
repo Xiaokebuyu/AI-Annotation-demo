@@ -274,6 +274,10 @@ bus.on('document:loaded', () => {
   document.body.classList.add('doc-loaded');
   $('empty-state').style.display = 'none';
   $('doc-name').textContent = state.fileName;
+  // 会话引擎:开书即预热(起长驻会话 + spawn 子进程),消掉首笔 ~14s 冷启
+  if (settings.inferEngine === 'session' && state.documentId) {
+    fetch('/api/agent/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bookId: state.documentId }) }).catch(() => { /* 预热失败不影响 */ });
+  }
   // 从持久化恢复：两段记忆、原始笔迹、AI 卡片（重排/图解缓存由 reader 按需读 store）
   const doc = storedDoc();
   if (!doc || !state.documentId) return;
