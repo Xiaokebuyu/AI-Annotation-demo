@@ -5,3 +5,7 @@ dist/
 .env
 .env.bedrock
 .env.kimi
+
+# pdfjs CMap/字体资产：postinstall 自动从 node_modules 拷入，不入库（见 scripts/copy-pdfjs-assets.mjs）
+public/cmaps/
+public/standard_fonts/

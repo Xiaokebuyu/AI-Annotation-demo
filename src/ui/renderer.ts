@@ -88,7 +88,15 @@ export async function loadFile(file: File): Promise<void> {
   state.fileHash = await sha256Hex(buf);
   state.documentId = 'doc_' + state.fileHash.slice(0, 12); // hash 派生，重复导入 id 稳定
   state.fileName = file.name;
-  pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  // cMapUrl/standardFontDataUrl：救老中文 PDF —— 非嵌入 CID 字体 + 预定义 CJK CMap（如 GBK-EUC-H）
+  // 需要 CMap 表才能把字符码映射成字形，否则中文画布渲染与 getTextContent 都出空白/乱码。
+  // 资产在 public/（cp 自 pdfjs-dist），dev 与 build 均自动服务于根路径。
+  pdf = await pdfjsLib.getDocument({
+    data: buf,
+    cMapUrl: '/cmaps/',
+    cMapPacked: true,
+    standardFontDataUrl: '/standard_fonts/',
+  }).promise;
   state.pageCount = pdf.numPages;
   state.pageIndex = 0;
   state.strokesByPage.clear();
