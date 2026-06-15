@@ -76,6 +76,21 @@ function render(items: RenderItem[]): void {
       continue;
     }
     const b = it;
+    if (b.type === 'list') {
+      // 列表：保留语义结构（项目符号/编号），不压成一坨段落
+      const listEl = document.createElement(b.ordered ? 'ol' : 'ul');
+      listEl.className = 'reader-list';
+      listEl.dataset.bbox = b.source.map((n) => n.toFixed(4)).join(',');
+      listEl.dataset.block = b.id;
+      for (const item of b.items ?? []) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        listEl.appendChild(li);
+      }
+      col.appendChild(listEl);
+      blockRefs.push({ id: b.id, el: listEl, source: b.source });
+      continue;
+    }
     const node = document.createElement(b.type === 'heading' ? 'h2' : 'p');
     node.className = b.type === 'heading' ? 'reader-h' : 'reader-p';
     if (b.type === 'heading') node.dataset.level = String(b.level);

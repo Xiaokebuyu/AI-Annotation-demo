@@ -38,7 +38,11 @@ async function refine(base: ReflowBlock[], image?: string): Promise<ReflowBlock[
     const resp = await fetch('/api/reflow', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ blocks: base.map((b) => ({ id: b.id, type: b.type, text: b.text })), image }),
+      // 列表用占位文本送给模型（只让它排序，不让它拆平结构）
+      body: JSON.stringify({
+        blocks: base.map((b) => ({ id: b.id, type: b.type, text: b.type === 'list' ? `（列表）${(b.items ?? []).join(' / ')}` : b.text })),
+        image,
+      }),
     });
     if (!resp.ok) return base;
     refined = await resp.json();
@@ -51,6 +55,7 @@ async function refine(base: ReflowBlock[], image?: string): Promise<ReflowBlock[
   for (const r of refined) {
     const src = byId.get(r.id);
     if (!src) continue;
+    if (src.type === 'list') { out.push(src); byId.delete(r.id); continue; } // 列表原样保留结构，只取模型给的位置
     out.push({
       id: src.id,
       type: r.type === 'heading' ? 'heading' : 'para',

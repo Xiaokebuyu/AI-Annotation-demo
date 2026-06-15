@@ -17,15 +17,20 @@ function blockId(text: string, index: number): string {
   return `rfl_${index}_${(h >>> 0).toString(36)}`;
 }
 
-export type ReflowBlockType = 'heading' | 'para';
+export type ReflowBlockType = 'heading' | 'para' | 'list';
 
 export interface ReflowBlock {
   id: string;
   type: ReflowBlockType;
-  level: number;       // heading：1–3；para：0
+  level: number;       // heading：1–3；para/list：0
   text: string;
   source: NormBBox;    // 原页归一化 bbox 并集
+  items?: string[];    // list：各列表项文本（已去掉前缀符号）
+  ordered?: boolean;   // list：有序(1.2.3 / 一二三)还是无序(•-*)
 }
+
+/** 列表项前缀：项目符号 / 数字 / 圆圈数字 / 中文数字（行首 + 其后空白）。 */
+const LIST_RE = /^\s*([•·‣▪◦●○]|[-–—*]|\(?\d{1,2}[.)、]|[①-⑳]|[一二三四五六七八九十]{1,3}[、.])\s+/;
 
 interface Line {
   runs: OcrTextBlock[];
@@ -103,31 +108,65 @@ export function reflowLocal(blocks: OcrTextBlock[]): ReflowBlock[] {
 
   const bodyFont = median(lines.map((l) => l.size)) || medH;
 
-  // 聚段 + 认标题
+  // 聚段 + 认标题 + 认列表
   const out: ReflowBlock[] = [];
   let para: Line[] = [];
-  const flush = () => {
+  let listLines: Line[] = [];
+  let listItems: string[] = [];
+  let listOrdered = false;
+  let listMarkerX = 0;
+
+  const flushPara = () => {
     if (!para.length) return;
     const text = joinRuns(para.map((l) => joinRuns(l.runs.map((r) => r.text))));
     out.push({ id: blockId(text, out.length), type: 'para', level: 0, text, source: unionBBox(para.flatMap((l) => l.runs)) });
     para = [];
   };
+  const flushList = () => {
+    if (!listItems.length) return;
+    const text = listItems.join('\n');
+    out.push({ id: blockId(text, out.length), type: 'list', level: 0, text, items: listItems.slice(), ordered: listOrdered, source: unionBBox(listLines.flatMap((l) => l.runs)) });
+    listItems = []; listLines = []; listOrdered = false;
+  };
+  const flushAll = () => { flushPara(); flushList(); };
+
   for (let i = 0; i < lines.length; i++) {
     const ln = lines[i];
+    const lineText = joinRuns(ln.runs.map((r) => r.text));
     const ratio = ln.size / bodyFont;
     const isHeading = ratio >= 1.22 && ln.runs.length > 0;
     if (isHeading) {
-      flush();
+      flushAll();
       const level = ratio >= 1.7 ? 1 : ratio >= 1.4 ? 2 : 3;
-      const htext = joinRuns(ln.runs.map((r) => r.text));
-      out.push({ id: blockId(htext, out.length), type: 'heading', level, text: htext, source: unionBBox(ln.runs) });
+      out.push({ id: blockId(lineText, out.length), type: 'heading', level, text: lineText, source: unionBBox(ln.runs) });
       continue;
+    }
+    // 列表项：行首是项目符号/编号
+    const m = lineText.match(LIST_RE);
+    if (m) {
+      flushPara();
+      const ordered = /[\d①-⑳一二三四五六七八九十]/.test(m[1]);
+      if (listItems.length && ordered !== listOrdered) flushList(); // 有序/无序切换 → 断开
+      if (!listItems.length) { listOrdered = ordered; listMarkerX = ln.runs[0].bbox[0]; }
+      listItems.push(lineText.slice(m[0].length).trim());
+      listLines.push(ln);
+      continue;
+    }
+    // 在列表中且本行缩进过 marker（悬挂续行）→ 接到上一项；否则结束列表
+    if (listItems.length) {
+      const prevBot = listLines[listLines.length - 1].yBot;
+      if (ln.runs[0].bbox[0] > listMarkerX + 0.012 && (ln.yTop - prevBot) < 0.9 * bodyFont) {
+        listItems[listItems.length - 1] += ' ' + lineText;
+        listLines.push(ln);
+        continue;
+      }
+      flushList();
     }
     const prev = lines[i - 1];
     const gap = prev ? ln.yTop - prev.yBot : 0;
-    if (para.length && gap > 1.3 * bodyFont) flush(); // 段间距 → 断段
+    if (para.length && gap > 1.3 * bodyFont) flushPara(); // 段间距 → 断段
     para.push(ln);
   }
-  flush();
+  flushAll();
   return out;
 }
