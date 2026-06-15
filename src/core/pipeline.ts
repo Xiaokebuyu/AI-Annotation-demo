@@ -2,6 +2,7 @@ import type { AnnotationEvent, EventType, InferenceRequest, InferenceResult, Nor
 import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
 import { DEVICE_ID, SESSION_ID, shortId } from './ids';
 import { bboxOf, classify } from './classify';
+import { INTENT_MODES } from './gesture';
 import { mark } from './metrics';
 import { trace } from './trace';
 import { bus, settings, state, type Stroke } from '../app/state';
@@ -129,6 +130,7 @@ export async function commitDiscussion(
   discId: string,
   modes: OutputMode[],
   eventType?: EventType,
+  intent?: string,
 ): Promise<void> {
   if (!events.length) return;
   const evt = representative(events);
@@ -141,15 +143,35 @@ export async function commitDiscussion(
     const blocks = ocrs[i]?.text_blocks ?? [];
     return { type: e.event_type, text: (blocks.map((b) => b.text).join('') || ocrs[i]?.nearby_text || '').trim() };
   });
-  const structured = parts.map((p) => `〔${SYM_LABEL[p.type]}〕"${(p.text || '此处').slice(0, 40)}"`).join('  ');
+  let structured = parts.map((p) => `〔${SYM_LABEL[p.type]}〕"${(p.text || '此处').slice(0, 40)}"`).join('  ');
   const allBlocks = ocrs.flatMap((o) => o?.text_blocks ?? []);
+
+  // Phase C 意图理解：手写批注 → VLM 读手写 + 判「为什么写」（疑问/命令/关联/记想法），据此路由推理
+  let finalModes = modes;
+  let finalIntent = intent ?? '';
+  if (evt.event_type === 'margin_note') {
+    const crop = grabRegion(evt.geometry.bbox, 0.02);
+    if (crop) {
+      try {
+        const resp = await fetch('/api/interpret', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: crop }),
+        });
+        if (resp.ok) {
+          const r = await resp.json();
+          if (r?.reading) structured = `〔批注〕"${String(r.reading).slice(0, 80)}"${structured ? '  ' + structured : ''}`;
+          const im = (INTENT_MODES as Record<string, OutputMode[]>)[r?.intent];
+          if (im) { finalModes = im; finalIntent = String(r.intent); }
+        }
+      } catch { /* 解读失败 → 退回几何意图 */ }
+    }
+  }
 
   let result: InferenceResult;
   let memoryPages = 0;
   let hasImage = false;
   try {
     // Tier2：附带前页记忆快照，让模型按需 recall（见 server/infer agentLoop）；契约不变，memory 是 proxy 级附加
-    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, modes) as InferenceRequest & { memory?: unknown; image?: string };
+    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, finalModes) as InferenceRequest & { memory?: unknown; image?: string };
     req.memory = memorySnapshot(evt.page_id);
     memoryPages = Array.isArray(req.memory) ? req.memory.length : 0;
     trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>); // 此时尚未挂 image，trace 不被 base64 撑大
@@ -172,7 +194,8 @@ export async function commitDiscussion(
     ts: new Date().toISOString(),
     pageIndex: state.pageIndex,
     gesture: evt.event_type,
-    modes,
+    intent: finalIntent,
+    modes: finalModes,
     nearby: structured,
     ocrTexts: allBlocks.map((b) => b.text),
     memoryPages,

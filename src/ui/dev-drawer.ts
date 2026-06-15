@@ -42,7 +42,7 @@ function renderInspect(): void {
     const d = (r.debug ?? {}) as Record<string, unknown>;
     const mem = (d.memory_pages as Array<{ index: number; content: string | null; summary: string | null }> | undefined) ?? [];
     const memLine = mem.length ? mem.map((m) => `第${m.index + 1}页：${m.content || m.summary || '—'}`).join('；') : '无';
-    const tag = `${SYM[r.gesture] ?? r.gesture} → ${r.resultType}`;
+    const tag = `${SYM[r.gesture] ?? r.gesture}${r.intent ? '·' + r.intent : ''} → ${r.resultType}`;
     const flags = [r.hasImage ? '含图' : '', r.recalled.length ? `回看[${r.recalled.join(',')}]` : '', String(d.tier ?? '')].filter(Boolean).join(' · ');
     return `<details class="ins-card"><summary><span class="ins-tag">${esc(tag)}</span><span class="ins-meta">第${r.pageIndex + 1}页 · ${esc(r.model)}${flags ? ' · ' + esc(flags) : ''}</span></summary>`
       + `<div class="ins-body">`

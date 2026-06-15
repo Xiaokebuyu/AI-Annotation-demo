@@ -286,8 +286,9 @@ function runReaderDiscussions(): void {
     const events = recs.map((r) => r.event);
     let modes: OutputMode[] = ['summary'];
     let eventType: EventType | undefined;
-    if (events.length === 1) { const g = resolveGesture(events); modes = g.output_modes; eventType = g.eventType; }
-    void commitDiscussion(events, performance.now(), discId, modes, eventType);
+    let intent = 'summary';
+    if (events.length === 1) { const g = resolveGesture(events); modes = g.output_modes; eventType = g.eventType; intent = g.intent; }
+    void commitDiscussion(events, performance.now(), discId, modes, eventType, intent);
   }
 }
 

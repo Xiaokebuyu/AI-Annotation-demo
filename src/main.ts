@@ -71,10 +71,10 @@ function clusterByProximity(recs: RecGesture[]): RecGesture[][] {
 }
 
 /** 一簇手势 → 生成参数：单手势按其意图，多手势走综合，含提问则作答。 */
-function clusterIntent(cluster: RecGesture[]): { modes: OutputMode[]; eventType?: EventType } {
-  if (cluster.some((c) => c.gesture.kind === 'ask')) return { modes: ['question'], eventType: 'circle' };
-  if (cluster.length === 1) return { modes: cluster[0].gesture.output_modes, eventType: cluster[0].gesture.eventType };
-  return { modes: ['summary'] };
+function clusterIntent(cluster: RecGesture[]): { modes: OutputMode[]; eventType?: EventType; intent: string } {
+  if (cluster.some((c) => c.gesture.kind === 'ask')) return { modes: ['question'], eventType: 'circle', intent: 'question' };
+  if (cluster.length === 1) return { modes: cluster[0].gesture.output_modes, eventType: cluster[0].gesture.eventType, intent: cluster[0].gesture.intent };
+  return { modes: ['summary'], intent: 'summary' };
 }
 
 /** 停顿到点：聚类本页已识别手势，每簇一条讨论；成员没变则跳过（不重复生成）。 */
@@ -88,8 +88,8 @@ function runDiscussions(pid: string): void {
     const sig = ids.join(',');
     if (lastSig.get(discId) === sig) continue;
     lastSig.set(discId, sig);
-    const { modes, eventType } = clusterIntent(cluster);
-    void commitDiscussion(events, performance.now(), discId, modes, eventType);
+    const { modes, eventType, intent } = clusterIntent(cluster);
+    void commitDiscussion(events, performance.now(), discId, modes, eventType, intent);
   }
 }
 

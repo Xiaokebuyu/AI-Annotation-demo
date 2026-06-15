@@ -8,6 +8,7 @@ export interface InferenceInspect {
   ts: string;
   pageIndex: number;
   gesture: string;          // 触发的手势/符号
+  intent: string;           // 用户意图（为什么写）——手写经 VLM 判定
   modes: string[];          // output_modes
   nearby: string;           // 圈住/附近的结构化上下文
   ocrTexts: string[];       // 命中的 OCR 文本块

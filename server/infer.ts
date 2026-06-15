@@ -203,6 +203,24 @@ export async function runInference(req: any): Promise<any> {
   };
 }
 
+/**
+ * 意图理解：读用户在页边的手写批注截图 —— ①转写手写文字 ②判断「为什么写」。
+ * 几何手势（圈/划/箭头）的意图已知；手写靠这条 VLM 解读补上（Phase C）。
+ */
+export async function runInterpret(payload: any): Promise<{ reading: string; intent: string }> {
+  const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
+  if (!image) return { reading: '', intent: 'free_note' };
+  const system =
+    '这是用户在文档页边手写的批注截图。做两件事：' +
+    '①原样转写其中的手写文字；②判断用户意图，从这四个里选最贴切的一个：' +
+    'question（在提问）、command（在下指令，如"总结这段"/"翻译"）、relation（在指出关联）、free_note（只是记想法）。' +
+    '只输出一个 JSON：{"reading":"转写的文字","intent":"question|command|relation|free_note"}。除该 JSON 外不要任何文字。';
+  const raw = await gateway(system, '转写这段手写并判断意图：', 300, image);
+  const j = extractJson(raw);
+  const intent = ['question', 'command', 'relation', 'free_note'].includes(j.intent) ? j.intent : 'free_note';
+  return { reading: String(j.reading || '').trim(), intent };
+}
+
 /** 内容解读（记忆A）：把一页文字压成一两句「这页在讲什么」，预处理流水线调用。 */
 export async function runDigest(payload: any): Promise<{ digest: string }> {
   const text = String(payload?.text || '').slice(0, 4000);
