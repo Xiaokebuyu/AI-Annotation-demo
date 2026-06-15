@@ -17,17 +17,31 @@ export interface PageMark {
 
 export interface PageMemory {
   index: number;
-  summary: string | null;
-  marks: PageMark[];
+  content: string | null;  // 记忆A：本页内容解读（预处理填；本轮先 null）
+  summary: string | null;  // 记忆B：用户行为·理解的一句概述（翻页摘要）
+  marks: PageMark[];       // 记忆B 明细
 }
 
 const mem = new Map<string, PageMemory>();
 
 function ensure(pageId: string, index: number): PageMemory {
   let m = mem.get(pageId);
-  if (!m) { m = { index, summary: null, marks: [] }; mem.set(pageId, m); }
+  if (!m) { m = { index, content: null, summary: null, marks: [] }; mem.set(pageId, m); }
   m.index = index;
   return m;
+}
+
+/** 记忆A：本页内容解读（预处理流水线写入）。 */
+export function setContent(pageId: string, index: number, content: string): void {
+  ensure(pageId, index).content = content;
+}
+
+/** 从持久化恢复一页记忆（重开文档时调用）。 */
+export function restorePage(pageId: string, index: number, content: string | null, summary: string | null, marks: PageMark[]): void {
+  const m = ensure(pageId, index);
+  m.content = content;
+  m.summary = summary;
+  m.marks = marks.slice();
 }
 
 /** 记录/更新一条标注记忆（按 discId upsert，与讨论原地更新一致）。 */
@@ -51,11 +65,11 @@ export function getMemory(pageId: string): PageMemory | undefined {
 }
 
 /** Tier2：前页记忆快照（除当前页），随请求带给服务端，供模型按需 recall_page。 */
-export function memorySnapshot(currentPageId: string): Array<{ index: number; summary: string | null; marks: Array<{ text: string; note: string }> }> {
+export function memorySnapshot(currentPageId: string): Array<{ index: number; content: string | null; summary: string | null; marks: Array<{ text: string; note: string }> }> {
   return [...mem.entries()]
-    .filter(([pid, m]) => pid !== currentPageId && (m.summary || m.marks.length))
+    .filter(([pid, m]) => pid !== currentPageId && (m.content || m.summary || m.marks.length))
     .sort((a, b) => a[1].index - b[1].index)
-    .map(([, m]) => ({ index: m.index, summary: m.summary, marks: m.marks.map((k) => ({ text: k.text, note: k.note })) }));
+    .map(([, m]) => ({ index: m.index, content: m.content, summary: m.summary, marks: m.marks.map((k) => ({ text: k.text, note: k.note })) }));
 }
 
 /** 前文脉络（Tier1 备用）：除当前页外，按页序列出各页摘要。供非工具型 provider 注入。 */

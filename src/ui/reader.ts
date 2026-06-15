@@ -4,6 +4,7 @@ import type { ReflowBlock } from '../core/reflow';
 import { bus, settings, state } from '../app/state';
 import { reflowProviders } from '../providers/reflow';
 import { grabRegion } from '../providers/ocr';
+import { getImageExplain, getReflow, putImageExplain, putReflow } from '../app/store';
 import { bboxOf, classifyScored } from '../core/classify';
 import { resolveGesture } from '../core/gesture';
 import { commitDiscussion } from '../core/pipeline';
@@ -121,6 +122,8 @@ function nearbyText(bb: NormBBox): string {
 /** 让 Kimi 看图，结合「图附近正文 + 前页总结」给一句解读，填进 figcaption。 */
 async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string): Promise<void> {
   if (!image) { cap.textContent = '（无法截取此图）'; delete cap.dataset.pending; return; }
+  const cached = getImageExplain(state.pageIndex, source); // 已解读过 → 直接用，不再调模型
+  if (cached) { cap.textContent = `图：${cached}`; delete cap.dataset.pending; return; }
   const nearby = nearbyText(source);
   const prevSummary = memorySnapshot(state.pageId ?? '').find((m) => m.index === state.pageIndex - 1)?.summary ?? '';
   try {
@@ -130,7 +133,8 @@ async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string)
       body: JSON.stringify({ image, nearby, prevSummary }),
     });
     const data = resp.ok ? await resp.json() : null;
-    cap.textContent = data?.text ? `图：${String(data.text)}` : '（这张图暂时没读出含义）';
+    if (data?.text) { cap.textContent = `图：${String(data.text)}`; putImageExplain(state.pageIndex, source, String(data.text)); }
+    else cap.textContent = '（这张图暂时没读出含义）';
   } catch {
     cap.textContent = '（解读失败）';
   }
@@ -149,8 +153,13 @@ async function rebuild(): Promise<void> {
   reflowKey = key;
   const seq = ++reflowSeq;
   try {
-    const blocks = await reflowProviders[settings.reflowProvider](state.textBlocks);
-    if (seq !== reflowSeq || settings.viewMode !== 'reader') return; // 被更新的一次取代
+    // 先读持久化的预排版缓存（重开/翻回即时，不再实时重排）；没有才算，算完写回
+    let blocks = getReflow(state.pageIndex, settings.reflowProvider);
+    if (!blocks) {
+      blocks = await reflowProviders[settings.reflowProvider](state.textBlocks);
+      if (seq !== reflowSeq || settings.viewMode !== 'reader') return; // 被更新的一次取代
+      putReflow(state.pageIndex, settings.reflowProvider, blocks);
+    }
     // 把原页图像按 y 顺序插回阅读流（图不丢；reflow 纯函数不动）
     const figures: FigureItem[] = state.imageRegions.map((bb, i) => ({ kind: 'figure', id: `fig_${state.pageIndex}_${i}`, source: bb }));
     const items: RenderItem[] = [...blocks, ...figures].sort((a, b) => a.source[1] - b.source[1]);

@@ -2,12 +2,15 @@ import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from 'pdfjs-dist';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import type { NormBBox } from '../core/contracts';
+import type { NormBBox, OcrTextBlock } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
 import { sha256Hex } from '../core/ids';
 import { setPageSize, GUTTER_W } from '../core/transform';
 import { trace } from '../core/trace';
-import { bus, state } from '../app/state';
+import { reflowLocal } from '../core/reflow';
+import { setContent } from '../core/memory';
+import { bus, settings, state } from '../app/state';
+import { getContent, getReflow, openDoc, putContent, putReflow } from '../app/store';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -89,6 +92,8 @@ export async function loadFile(file: File): Promise<void> {
   state.pageCount = pdf.numPages;
   state.pageIndex = 0;
   state.strokesByPage.clear();
+  // 载入本地已存的语义蒸馏（重排/记忆/图解缓存）；没有则新建。重开同一文档即恢复。
+  await openDoc({ document_id: state.documentId, file_hash: state.fileHash, filename: file.name, page_count: state.pageCount });
   trace('PDFDocument', {
     document_id: state.documentId,
     file_hash: state.fileHash,
@@ -101,6 +106,77 @@ export async function loadFile(file: File): Promise<void> {
   });
   bus.emit('document:loaded');
   await renderPage();
+  // 后台预处理（封顶页数 dev 可设）：预排版 + 内容解读，不阻塞首屏
+  void preprocess(settings.preprocess.reflowPages, settings.preprocess.digestPages);
+}
+
+/** 抽取一页的文本块（归一化 bbox，zoom/rotation 无关）。渲染与预处理共用。 */
+async function extractTextBlocks(page: PDFPageProxy, vp: PageViewport): Promise<OcrTextBlock[]> {
+  try {
+    const tc = await page.getTextContent();
+    return tc.items
+      .filter((it): it is TextItem => 'str' in it && typeof it.str === 'string' && it.str.trim().length > 0)
+      .map((it, i) => {
+        const [, b, , d, e, f] = it.transform;
+        const fontH = Math.hypot(b, d) || Math.abs(d) || 10;
+        const [vx1, vy1] = vp.convertToViewportPoint(e, f) as [number, number];
+        const [vx2, vy2] = vp.convertToViewportPoint(e + it.width, f + fontH) as [number, number];
+        const x0 = Math.min(vx1, vx2) / vp.width;
+        const x1 = Math.max(vx1, vx2) / vp.width;
+        const y0 = Math.min(vy1, vy2) / vp.height;
+        const y1 = Math.max(vy1, vy2) / vp.height;
+        return { id: 'tl_' + i, text: it.str, bbox: [x0, y0, x1 - x0, y1 - y0] as NormBBox, confidence: 1, language: 'auto' };
+      });
+  } catch {
+    return [];
+  }
+}
+
+let preprocessing = false;
+/**
+ * 预处理流水线（后台、顺序、可中断）：导入后封顶若干页——
+ *  - 前 reflowCap 页：预排版（local 引擎）写入缓存 → 进重排面即时。
+ *  - 前 digestCap 页：内容解读（记忆A）→ 喂跨页推理更准。
+ * 只取文本层、不渲染画布，省性能（墨水屏友好）；已缓存的页跳过。
+ */
+export async function preprocess(reflowCap: number, digestCap: number): Promise<void> {
+  if (!pdf || !state.documentId || preprocessing) return;
+  preprocessing = true;
+  const docId = state.documentId;
+  const cap = Math.min(pdf.numPages, Math.max(reflowCap, digestCap));
+  try {
+    for (let i = 0; i < cap; i++) {
+      if (!pdf || state.documentId !== docId) break; // 文档换了 → 停
+      try {
+        const page = await pdf.getPage(i + 1);
+        const vp = page.getViewport({ scale: 1 });
+        const blocks = await extractTextBlocks(page, vp);
+        if (blocks.length) {
+          if (i < reflowCap && !getReflow(i, 'local')) {
+            const rb = reflowLocal(blocks);
+            if (rb.length) putReflow(i, 'local', rb);
+          }
+          if (i < digestCap && !getContent(i)) {
+            const text = blocks.map((b) => b.text).join(' ').slice(0, 4000);
+            const resp = await fetch('/api/digest', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }),
+            });
+            if (resp.ok) {
+              const d = await resp.json().catch(() => null);
+              if (d?.digest) {
+                setContent(`pg_${docId.slice(4, 12)}_${i}`, i, String(d.digest));
+                putContent(i, String(d.digest));
+              }
+            }
+          }
+        }
+      } catch { /* 跳过该页 */ }
+      bus.emit('preprocess:progress', i + 1, cap);
+    }
+  } finally {
+    preprocessing = false;
+    bus.emit('preprocess:done');
+  }
 }
 
 export async function renderPage(): Promise<void> {
@@ -142,24 +218,7 @@ export async function renderPage(): Promise<void> {
   }
 
   // text layer：数字版 PDF 的真实文本 + 精确位置（归一化，zoom/rotation 无关）
-  try {
-    const tc = await page.getTextContent();
-    state.textBlocks = tc.items
-      .filter((it): it is TextItem => 'str' in it && typeof it.str === 'string' && it.str.trim().length > 0)
-      .map((it, i) => {
-        const [, b, , d, e, f] = it.transform;
-        const fontH = Math.hypot(b, d) || Math.abs(d) || 10;
-        const [vx1, vy1] = vp.convertToViewportPoint(e, f) as [number, number];
-        const [vx2, vy2] = vp.convertToViewportPoint(e + it.width, f + fontH) as [number, number];
-        const x0 = Math.min(vx1, vx2) / vp.width;
-        const x1 = Math.max(vx1, vx2) / vp.width;
-        const y0 = Math.min(vy1, vy2) / vp.height;
-        const y1 = Math.max(vy1, vy2) / vp.height;
-        return { id: 'tl_' + i, text: it.str, bbox: [x0, y0, x1 - x0, y1 - y0] as [number, number, number, number], confidence: 1, language: 'auto' };
-      });
-  } catch {
-    state.textBlocks = [];
-  }
+  state.textBlocks = await extractTextBlocks(page, vp);
 
   // 原页图像区域（重排时保留，不丢图）
   state.imageRegions = await extractImageRegions(page, vp);

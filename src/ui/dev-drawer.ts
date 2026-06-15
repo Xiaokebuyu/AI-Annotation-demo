@@ -3,6 +3,13 @@ import { snapshot } from '../core/metrics';
 import { downloadTrace } from '../core/trace';
 import { bus, state, settings, type Placement, type OcrImageMode } from '../app/state';
 import { INFER_PROVIDER_LABELS } from '../providers/inference';
+import { inspectLog } from '../core/inspect';
+
+const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
+const SYM: Record<string, string> = {
+  circle: '圈选', underline: '划线', highlight: '高亮', arrow: '箭头',
+  margin_note: '批注', tap_region: '点选', stroke: '标记', eraser: '擦除', unknown: '标记',
+};
 
 /**
  * 开发抽屉 —— 规范要求：Debug 信息只在开发/研究模式出现，普通用户不被打扰。
@@ -23,6 +30,30 @@ function fillSelect(sel: HTMLSelectElement, labels: Record<string, string>, curr
     if (value === current) opt.selected = true;
     sel.appendChild(opt);
   }
+}
+
+/** 上下文监控：渲染最近若干次推理「喂了什么 + 回了什么」。 */
+function renderInspect(): void {
+  const box = document.getElementById('inspect-log');
+  if (!box) return;
+  const items = inspectLog();
+  if (!items.length) { box.innerHTML = '<p class="ins-empty">还没有推理。圈/划一处、停笔，结果会出现在这里。</p>'; return; }
+  box.innerHTML = items.map((r) => {
+    const d = (r.debug ?? {}) as Record<string, unknown>;
+    const mem = (d.memory_pages as Array<{ index: number; content: string | null; summary: string | null }> | undefined) ?? [];
+    const memLine = mem.length ? mem.map((m) => `第${m.index + 1}页：${m.content || m.summary || '—'}`).join('；') : '无';
+    const tag = `${SYM[r.gesture] ?? r.gesture} → ${r.resultType}`;
+    const flags = [r.hasImage ? '含图' : '', r.recalled.length ? `回看[${r.recalled.join(',')}]` : '', String(d.tier ?? '')].filter(Boolean).join(' · ');
+    return `<details class="ins-card"><summary><span class="ins-tag">${esc(tag)}</span><span class="ins-meta">第${r.pageIndex + 1}页 · ${esc(r.model)}${flags ? ' · ' + esc(flags) : ''}</span></summary>`
+      + `<div class="ins-body">`
+      + `<div class="ins-k">系统提示</div><div class="ins-v">${esc(String(d.system ?? '—'))}</div>`
+      + `<div class="ins-k">任务（模型实际被问）</div><div class="ins-v">${esc(String(d.task ?? '—'))}</div>`
+      + `<div class="ins-k">圈住 / 附近</div><div class="ins-v">${esc(r.nearby || '—')}</div>`
+      + `<div class="ins-k">OCR 块（${r.ocrTexts.length}）</div><div class="ins-v">${esc(r.ocrTexts.join(' / ') || '—')}</div>`
+      + `<div class="ins-k">前页记忆（${r.memoryPages}）</div><div class="ins-v">${esc(memLine)}</div>`
+      + `<div class="ins-k">回复（信心 ${r.confidence}）</div><div class="ins-v">${esc(r.content)}</div>`
+      + `</div></details>`;
+  }).join('');
 }
 
 function renderMetrics(): void {
@@ -53,6 +84,8 @@ function initSettings(): void {
   const reflow = $id<HTMLSelectElement>('set-reflow');
   const textlayer = $id<HTMLInputElement>('set-textlayer');
   const ocrImage = $id<HTMLSelectElement>('set-ocr-image');
+  const ppReflow = $id<HTMLInputElement>('set-pp-reflow');
+  const ppDigest = $id<HTMLInputElement>('set-pp-digest');
   const gesture = $id<HTMLInputElement>('set-gesture');
   const pauseSec = $id<HTMLInputElement>('set-pause-sec');
 
@@ -61,14 +94,19 @@ function initSettings(): void {
   reflow.value = settings.reflowProvider;
   textlayer.checked = settings.ocr.textlayer;
   ocrImage.value = settings.ocr.image;
+  ppReflow.value = String(settings.preprocess.reflowPages);
+  ppDigest.value = String(settings.preprocess.digestPages);
   gesture.checked = settings.gesture.enabled;
   pauseSec.value = String(settings.gesture.pauseSeconds);
 
   const changed = () => bus.emit('settings:changed');
+  const clampPp = (el: HTMLInputElement, cur: number) => Math.min(100, Math.max(0, Number(el.value) || cur));
   placement.addEventListener('change', () => { settings.placement = placement.value as Placement; changed(); });
   reflow.addEventListener('change', () => { settings.reflowProvider = reflow.value; changed(); });
   textlayer.addEventListener('change', () => { settings.ocr.textlayer = textlayer.checked; changed(); });
   ocrImage.addEventListener('change', () => { settings.ocr.image = ocrImage.value as OcrImageMode; changed(); });
+  ppReflow.addEventListener('change', () => { settings.preprocess.reflowPages = clampPp(ppReflow, settings.preprocess.reflowPages); ppReflow.value = String(settings.preprocess.reflowPages); });
+  ppDigest.addEventListener('change', () => { settings.preprocess.digestPages = clampPp(ppDigest, settings.preprocess.digestPages); ppDigest.value = String(settings.preprocess.digestPages); });
   gesture.addEventListener('change', () => { settings.gesture.enabled = gesture.checked; changed(); });
   pauseSec.addEventListener('change', () => {
     const n = Math.min(30, Math.max(1, Number(pauseSec.value) || settings.gesture.pauseSeconds));
@@ -99,6 +137,9 @@ export function initDevDrawer(els: {
   els.closeBtn.addEventListener('click', () => toggleDrawer(false));
 
   bus.on('metrics', renderMetrics);
+  bus.on('inspect', renderInspect);
+  bus.on('preprocess:progress', (i, n) => { const el = document.getElementById('pp-progress'); if (el) el.textContent = `预处理中 ${i as number}/${n as number} 页…`; });
+  bus.on('preprocess:done', () => { const el = document.getElementById('pp-progress'); if (el) el.textContent = '预处理完成'; });
   bus.on('page:rendered', runSelfTest);
   bus.on('trace', (kind, obj) => {
     const o = obj as {
@@ -129,5 +170,6 @@ export function initDevDrawer(els: {
 
   if (new URLSearchParams(location.search).get('dev') === '1') toggleDrawer(true);
   renderMetrics();
+  renderInspect();
   runSelfTest();
 }

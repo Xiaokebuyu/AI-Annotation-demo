@@ -57,7 +57,7 @@ async function gateway(system: string, user: string, maxTokens: number, imageB64
   return textOf(await callGateway({ system, messages: [{ role: 'user', content }], maxTokens }));
 }
 
-type MemSnap = Array<{ index: number; summary: string | null; marks: Array<{ text: string; note: string }> }>;
+type MemSnap = Array<{ index: number; content?: string | null; summary: string | null; marks: Array<{ text: string; note: string }> }>;
 
 /**
  * Tier2 按需 recall：给模型 recall_page 工具 + 前页索引，让它自己决定回看哪页综合作答。
@@ -69,7 +69,8 @@ async function agentLoop(system: string, task: string, jsonRule: string, memory:
     description: '回看某一页的标注与摘要，用于跨页综合',
     input_schema: { type: 'object', properties: { page: { type: 'integer', description: '页码，从 1 起' } }, required: ['page'] },
   }];
-  const idx = memory.map((m) => `第${m.index + 1}页${m.summary ? '：' + m.summary : `（${m.marks.length}处标注）`}`).join('；');
+  // 优先用内容解读（记忆A，预处理产出），其次行为摘要（记忆B）
+  const idx = memory.map((m) => `第${m.index + 1}页${m.content ? '：' + m.content : m.summary ? '：' + m.summary : `（${m.marks.length}处标注）`}`).join('；');
   const firstText = `${task}\n\n可回看的前页：${idx}。若与当前内容相关，用 recall_page(页码) 取该页详情来综合；不需要就直接给最终答案。\n\n${jsonRule}`;
   const messages: any[] = [{
     role: 'user',
@@ -91,7 +92,7 @@ async function agentLoop(system: string, task: string, jsonRule: string, memory:
         recalled.push(page);
         const m = memory.find((x) => x.index === page - 1);
         const body = m
-          ? `第${page}页：${m.summary || '(无摘要)'}\n${(m.marks || []).map((k) => `- "${k.text}" → ${k.note}`).join('\n')}`
+          ? `第${page}页：${m.content || m.summary || '(无摘要)'}\n${(m.marks || []).map((k) => `- "${k.text}" → ${k.note}`).join('\n')}`
           : `第${page}页没有标注记录。`;
         return { type: 'tool_result', tool_use_id: tu.id, content: body };
       }),
@@ -184,7 +185,29 @@ export async function runInference(req: any): Promise<any> {
     model_name: cfg().model,
     model_version: 'nodesk-gateway',
     recalled, // 服务端额外字段：本次回看了哪些页（开发面板监控用）
+    // 上下文监控（proxy 级附加，不动冻结契约）：暴露模型真正看到的 system + 任务 + 上下文
+    _debug: {
+      model: cfg().model,
+      system,
+      task,
+      enclosed,
+      nearby,
+      ocr_block_count: (req.ocr_blocks || []).length,
+      has_image: !!img,
+      tier: memory.length ? 'tier2-recall' : 'single',
+      memory_pages: memory.map((m) => ({ index: m.index, content: m.content ?? null, summary: m.summary, marks: m.marks.length })),
+    },
   };
+}
+
+/** 内容解读（记忆A）：把一页文字压成一两句「这页在讲什么」，预处理流水线调用。 */
+export async function runDigest(payload: any): Promise<{ digest: string }> {
+  const text = String(payload?.text || '').slice(0, 4000);
+  if (!text) return { digest: '' };
+  const system = '你在为一页文档做「内容解读」：用一两句中文概括这页在讲什么、核心论点或关键信息。不寒暄、不复述原文、不用 markdown、不超过 2 句。';
+  const user = `这一页的文字：\n${text}\n\n给出这页的内容解读：`;
+  const out = await gateway(system, user, 200);
+  return { digest: out.trim() };
 }
 
 function extractJsonArray(text: string): any[] {

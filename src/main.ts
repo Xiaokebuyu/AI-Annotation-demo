@@ -3,6 +3,8 @@ import { recordEvent, commitDiscussion, summarizePage } from './core/pipeline';
 import { resolveGesture, isDeliberate, type Gesture } from './core/gesture';
 import { shortId } from './core/ids';
 import { bus, state, settings } from './app/state';
+import { storedDoc } from './app/store';
+import { restorePage } from './core/memory';
 import type { AnnotationEvent, EventType, NormBBox, OutputMode } from './core/contracts';
 import { initRenderer, loadFile, gotoPage, setZoom, hasDocument } from './ui/renderer';
 import { initInk } from './ui/ink';
@@ -175,6 +177,14 @@ bus.on('document:loaded', () => {
   document.body.classList.add('doc-loaded');
   $('empty-state').style.display = 'none';
   $('doc-name').textContent = state.fileName;
+  // 从持久化恢复各页两段记忆（重排/图解缓存由 reader 按需读 store；标注可视恢复留作下一步）
+  const doc = storedDoc();
+  if (doc && state.documentId) {
+    for (const p of Object.values(doc.pages)) {
+      const pid = `pg_${state.documentId.slice(4, 12)}_${p.page_index}`;
+      restorePage(pid, p.page_index, p.memory.content, p.memory.activity, p.memory.marks);
+    }
+  }
 });
 
 let lastPageId: string | null = null;

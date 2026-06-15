@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import type { Plugin } from 'vite';
-import { runInference, runReflow, runSummarize, runOcrVlm, runExplainImage } from './server/infer';
+import { runInference, runReflow, runSummarize, runOcrVlm, runExplainImage, runDigest } from './server/infer';
 
 /** dev-only 推理代理：浏览器 POST /api/infer → 网关 → InferenceResult。Key 留服务端。 */
 function inferenceProxy(env: Record<string, string>): Plugin {
@@ -30,6 +30,7 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       post('/api/summarize', runSummarize);
       post('/api/ocr-vlm', runOcrVlm);
       post('/api/explain-image', runExplainImage);
+      post('/api/digest', runDigest);
     },
   };
 }

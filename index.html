@@ -106,6 +106,20 @@
       <select id="infer-provider"></select>
     </div>
     <div class="drawer-section">
+      <label>预处理（导入后台跑 · 封顶页数）</label>
+      <label class="set-check">
+        <span>预排版</span>
+        <input type="number" id="set-pp-reflow" class="sec-in" min="0" max="100" step="1" /><span class="sec-u">页</span>
+        <span class="pp-gap">预解读</span>
+        <input type="number" id="set-pp-digest" class="sec-in" min="0" max="100" step="1" /><span class="sec-u">页（记忆A）</span>
+      </label>
+      <div id="pp-progress" class="pp-progress">未开始</div>
+    </div>
+    <div class="drawer-section">
+      <label>上下文监控 · 最近推理（喂了什么 / 回了什么）</label>
+      <div id="inspect-log"></div>
+    </div>
+    <div class="drawer-section">
       <div id="selftest">坐标自测：未运行</div>
     </div>
     <div class="drawer-section">

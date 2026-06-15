@@ -7,7 +7,9 @@ import { trace } from './trace';
 import { bus, settings, state, type Stroke } from '../app/state';
 import { grabPage, grabRegion, runOcr } from '../providers/ocr';
 import { inferProviders } from '../providers/inference';
-import { memorySnapshot, pageMarks, recordMark, setSummary } from './memory';
+import { getMemory, memorySnapshot, pageMarks, recordMark, setSummary } from './memory';
+import { putMemory } from '../app/store';
+import { pushInspect } from './inspect';
 
 /** 单笔封装为契约 shape。会话内多笔共享一个 trace_id（决策：停笔会话）。 */
 export function makeEvent(stroke: Stroke, traceId: string): AnnotationEvent | null {
@@ -143,16 +145,19 @@ export async function commitDiscussion(
   const allBlocks = ocrs.flatMap((o) => o?.text_blocks ?? []);
 
   let result: InferenceResult;
+  let memoryPages = 0;
+  let hasImage = false;
   try {
     // Tier2：附带前页记忆快照，让模型按需 recall（见 server/infer agentLoop）；契约不变，memory 是 proxy 级附加
     const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, modes) as InferenceRequest & { memory?: unknown; image?: string };
     req.memory = memorySnapshot(evt.page_id);
+    memoryPages = Array.isArray(req.memory) ? req.memory.length : 0;
     trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>); // 此时尚未挂 image，trace 不被 base64 撑大
     // 转写+图：当这簇手势的 OCR 实际走了 VLM（runtime=cloud_fallback）才把截图带给推理做底图——
     // 图像模式是整页图就给整页、局部图就给那一块；数字版命中 textlayer 则不带图，省 token。
     if (ocrs.some((o) => o?.runtime === 'cloud_fallback')) {
       const img = settings.ocr.image === 'page' ? grabPage() : grabRegion(evt.geometry.bbox, 0.03);
-      if (img) req.image = img;
+      if (img) { req.image = img; hasImage = true; }
     }
     result = await inferProviders[state.inferProvider](req);
     trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
@@ -160,6 +165,25 @@ export async function commitDiscussion(
     result = errorResult(evt, err);
     trace('InferenceResult(error)', result as unknown as Record<string, unknown>);
   }
+
+  // 上下文监控：记一条「这次喂了什么、模型回了什么」
+  const dbg = result as unknown as { _debug?: Record<string, unknown>; recalled?: number[] };
+  pushInspect({
+    ts: new Date().toISOString(),
+    pageIndex: state.pageIndex,
+    gesture: evt.event_type,
+    modes,
+    nearby: structured,
+    ocrTexts: allBlocks.map((b) => b.text),
+    memoryPages,
+    hasImage,
+    debug: dbg._debug ?? null,
+    resultType: result.result_type,
+    content: result.content,
+    confidence: result.confidence,
+    recalled: dbg.recalled ?? [],
+    model: result.model_name,
+  });
 
   // upsert by discId：移除同一讨论的上一条，原地换最新一条
   const prev = state.overlays.find((o) => o.overlay_id === discId);
@@ -180,6 +204,8 @@ export async function commitDiscussion(
     text: parts.map((p) => p.text).filter(Boolean).join(' '),
     note: result.content,
   });
+  const pm = getMemory(evt.page_id); // 写穿持久化（记忆B 更新即落盘）
+  if (pm) putMemory(pm.index, { content: pm.content, activity: pm.summary, marks: pm.marks });
   mark('total', performance.now() - penUpAt);
 }
 
@@ -195,6 +221,10 @@ export async function summarizePage(pageId: string): Promise<void> {
     });
     if (!resp.ok) return;
     const data = await resp.json();
-    if (data?.summary) setSummary(pageId, String(data.summary).trim());
+    if (data?.summary) {
+      setSummary(pageId, String(data.summary).trim());
+      const pm = getMemory(pageId); // 写穿持久化（记忆B 摘要）
+      if (pm) putMemory(pm.index, { content: pm.content, activity: pm.summary, marks: pm.marks });
+    }
   } catch { /* 总结失败不影响主流程 */ }
 }

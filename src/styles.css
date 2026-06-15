@@ -475,6 +475,20 @@ body.doc-loaded #stage::after {
   font: italic 14px/1.8 var(--serif);
 }
 
+/* ═══ 开发面板：预处理进度 + 上下文监控 ═══ */
+.pp-gap { margin-left: 10px; }
+.pp-progress { margin-top: 6px; font: 11px/1.5 var(--mono); color: var(--hint); }
+#inspect-log { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.ins-empty { color: var(--hint); font: italic 12px/1.6 var(--serif); margin: 4px 0; }
+.ins-card { border: 1px solid var(--line); border-radius: 8px; background: var(--paper); overflow: hidden; }
+.ins-card > summary { list-style: none; cursor: pointer; padding: 7px 9px; display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.ins-card > summary::-webkit-details-marker { display: none; }
+.ins-tag { font-weight: 500; color: var(--ink); white-space: nowrap; }
+.ins-meta { color: var(--hint); font: 10.5px/1.4 var(--mono); }
+.ins-body { padding: 4px 9px 9px; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11.5px; }
+.ins-k { color: var(--hint); white-space: nowrap; }
+.ins-v { color: var(--ink); word-break: break-word; white-space: pre-wrap; }
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
 #dev-drawer ::-webkit-scrollbar-thumb { background: #4a463f; }
