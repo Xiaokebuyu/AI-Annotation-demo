@@ -95,7 +95,12 @@ function fixupBody(body, { realModel, channel, channelUrl }) {
   try { p = JSON.parse(body.toString('utf8')); } catch { return body; }
   if (!p || typeof p !== 'object') return body;
   if (realModel) p.model = realModel; // 我们只有 kimi 网关,任何模型(spoof alias / SDK 内部 helper)一律改成真模型
-  if (p.thinking && p.thinking.type === 'adaptive') p.thinking = { type: 'enabled', budget_tokens: 8192 };
+  // SDK 对非白名单模型强转 thinking 'adaptive'(Kimi 不支持→0 思考块);改回 enabled。
+  // 但旁注是"一两句"的轻任务,8192 预算会让 Kimi 过度推理→编造事实(如凭空"八五年")+慢。
+  // 降到低预算:够产出思考块(SDK 需要),又不过度发散。env 可调。
+  if (p.thinking && p.thinking.type === 'adaptive') {
+    p.thinking = { type: 'enabled', budget_tokens: Number(process.env.AGENT_THINK_BUDGET) || 1024 };
+  }
   if (Array.isArray(p.messages)) liftImagesFromToolResult(p.messages);
   p.channel = channel;
   p.channel_url = channelUrl;
