@@ -5,7 +5,7 @@ import { bboxOf, classify } from './classify';
 import { mark } from './metrics';
 import { trace } from './trace';
 import { bus, state, type Stroke } from '../app/state';
-import { ocrProviders } from '../providers/ocr';
+import { grabRegion, ocrProviders } from '../providers/ocr';
 import { inferProviders } from '../providers/inference';
 import { memorySnapshot, pageMarks, recordMark, setSummary } from './memory';
 
@@ -145,9 +145,15 @@ export async function commitDiscussion(
   let result: InferenceResult;
   try {
     // Tier2：附带前页记忆快照，让模型按需 recall（见 server/infer agentLoop）；契约不变，memory 是 proxy 级附加
-    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, modes) as InferenceRequest & { memory?: unknown };
+    const req = buildRequest(evt, { text_blocks: allBlocks, nearby_text: structured || null }, modes) as InferenceRequest & { memory?: unknown; image?: string };
     req.memory = memorySnapshot(evt.page_id);
-    trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>);
+    trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>); // 此时尚未挂 image，trace 不被 base64 撑大
+    // 转写+图：当这簇手势的 OCR 实际走了 VLM 截图（runtime=cloud_fallback）才把区域截图带给推理做底图
+    // （数字版命中 textlayer 则不带图，省 token）。proxy 级附加，不动冻结契约。
+    if (ocrs.some((o) => o?.runtime === 'cloud_fallback')) {
+      const img = grabRegion(evt.geometry.bbox, 0.03);
+      if (img) req.image = img;
+    }
     result = await inferProviders[state.inferProvider](req);
     trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
   } catch (err) {

@@ -63,16 +63,19 @@ type MemSnap = Array<{ index: number; summary: string | null; marks: Array<{ tex
  * Tier2 按需 recall：给模型 recall_page 工具 + 前页索引，让它自己决定回看哪页综合作答。
  * 返回 { text, recalled }（recalled 供开发面板监控"AI 回看了哪些页"）。
  */
-async function agentLoop(system: string, task: string, jsonRule: string, memory: MemSnap): Promise<{ text: string; recalled: number[] }> {
+async function agentLoop(system: string, task: string, jsonRule: string, memory: MemSnap, imageB64?: string): Promise<{ text: string; recalled: number[] }> {
   const tools = [{
     name: 'recall_page',
     description: '回看某一页的标注与摘要，用于跨页综合',
     input_schema: { type: 'object', properties: { page: { type: 'integer', description: '页码，从 1 起' } }, required: ['page'] },
   }];
   const idx = memory.map((m) => `第${m.index + 1}页${m.summary ? '：' + m.summary : `（${m.marks.length}处标注）`}`).join('；');
+  const firstText = `${task}\n\n可回看的前页：${idx}。若与当前内容相关，用 recall_page(页码) 取该页详情来综合；不需要就直接给最终答案。\n\n${jsonRule}`;
   const messages: any[] = [{
     role: 'user',
-    content: `${task}\n\n可回看的前页：${idx}。若与当前内容相关，用 recall_page(页码) 取该页详情来综合；不需要就直接给最终答案。\n\n${jsonRule}`,
+    content: imageB64
+      ? [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageB64 } }, { type: 'text', text: firstText }]
+      : firstText,
   }];
   const recalled: number[] = [];
   for (let turn = 0; turn < 3; turn++) {
@@ -144,16 +147,19 @@ export async function runInference(req: any): Promise<any> {
   }
   const jsonRule = `最终只输出一个 JSON 对象：{"result_type":"…","content":"…","confidence":0.x}。result_type 从这些里选最贴切的一个：${modes.join(' / ')}；content 是要显示的旁注文字；confidence 是 0–1 把握度。除该 JSON 外不要输出任何文字。`;
 
+  // 局部截图（vlm/full 模式）随请求带来时，作为底图让模型看着原文现场作答（转写+图）
+  const img = req.image ? String(req.image).replace(/^data:image\/[a-z]+;base64,/, '') : undefined;
+
   // Tier2：附带前页记忆快照时，走 recall 工具循环；否则单发
   const memory: MemSnap = Array.isArray(req.memory) ? req.memory : [];
   let raw: string;
   let recalled: number[] = [];
   if (memory.length) {
-    const r = await agentLoop(system, task, jsonRule, memory);
+    const r = await agentLoop(system, task, jsonRule, memory, img);
     raw = r.text;
     recalled = r.recalled;
   } else {
-    raw = await gateway(system, `${task}\n\n${jsonRule}`, isDigest ? 600 : 400);
+    raw = await gateway(system, `${task}\n\n${jsonRule}`, isDigest ? 600 : 400, img);
   }
   const parsed = extractJson(raw);
   const result_type = modes.includes(parsed.result_type) ? parsed.result_type : modes[0];
@@ -216,6 +222,22 @@ export async function runReflow(payload: any): Promise<any[]> {
     level: typeof r.level === 'number' ? r.level : 0,
     text: String(r.text || '').trim(),
   }));
+}
+
+/**
+ * 局部截图 OCR：读一张从 PDF 裁出的标注区域图，原样转写其中文字（含手写）。
+ * 只转写、不解释、不翻译——转写文字回前端填 OCRResult.text_blocks，喂推理 + 装 source_refs。
+ */
+export async function runOcrVlm(payload: any): Promise<{ text: string }> {
+  const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
+  if (!image) return { text: '' };
+  const system =
+    '你是一个 OCR 转写器。输入是一张从 PDF 页面裁出的局部截图。' +
+    '原样转写图中的文字（可能是印刷体或手写），按自然阅读顺序输出纯文本，多行用换行分隔。' +
+    '不要解释、不要翻译、不要加任何说明或标点修饰。若图中没有可辨认的文字，输出空字符串。';
+  const user = '转写这张截图里的文字：';
+  const text = await gateway(system, user, 500, image);
+  return { text: text.trim() };
 }
 
 /** 翻页总结：把一页的标注 + AI 回应压成一句备忘，供跨页综合。 */
