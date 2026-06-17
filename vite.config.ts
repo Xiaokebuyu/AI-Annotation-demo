@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import type { Plugin } from 'vite';
-import { runInference, runReflow, runReflowAi, reflowAiStream, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runReflowVlm } from './server/infer';
+import { runInference, runReflow, runReflowAi, reflowAiStream, chatStream, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runReflowVlm } from './server/infer';
 import { debugEvent, debugSnapshot } from './server/debug.mjs';
 
 /** dev-only 推理代理：浏览器 POST /api/infer → 网关 → InferenceResult。Key 留服务端。 */
@@ -68,12 +68,25 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       post('/api/interpret-gesture', runInterpretGesture);
       post('/api/reflow-vlm', runReflowVlm);
 
-      // P3 会话引擎(Agent SDK):懒加载,含 SDK 子进程;失败只影响 /api/agent/*,不拖垮 dev server。
-      let agentMod: { agentTurnEndpoint: (b: unknown) => Promise<unknown>; agentOpenEndpoint: (b: unknown) => Promise<unknown>; agentCloseEndpoint: (b: unknown) => unknown } | null = null;
-      const agent = async () => (agentMod ??= await import('./server/agent/session-manager.mjs') as any);
-      post('/api/agent/turn', async (b) => (await agent()).agentTurnEndpoint(b));
-      post('/api/agent/open', async (b) => (await agent()).agentOpenEndpoint(b));
-      post('/api/agent/close', async (b) => (await agent()).agentCloseEndpoint(b));
+      // 网页对话式聊天（流式·替代退役的 Agent SDK 会话）：客户端持每本书 buffer、整串 messages 传入，
+      // 服务端无状态、逐段 text/plain 增量写回。chat/ 面板（P4）消费它。
+      server.middlewares.use('/api/chat', (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end('POST only'); return; }
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', async () => {
+          res.setHeader('content-type', 'text/plain; charset=utf-8');
+          res.setHeader('cache-control', 'no-cache');
+          res.setHeader('x-accel-buffering', 'no');
+          try {
+            for await (const delta of chatStream(JSON.parse(body))) res.write(delta);
+            res.end();
+          } catch (e) {
+            if (!res.headersSent) { res.statusCode = 502; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ error: String((e as Error)?.message || e) })); }
+            else res.end();
+          }
+        });
+      });
     },
   };
 }

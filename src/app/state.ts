@@ -59,14 +59,9 @@ export interface Settings {
   //            geometric=只几何阈值（本地·0 token）；vlm=每次抬笔都截图给 VLM 判定
   //   contextLines: 手写批注的"最近正文"行数（按笔迹 y 距离取最近 N 行）
   gesture: { enabled: boolean; pauseSeconds: number; routing: 'auto' | 'geometric' | 'vlm'; contextLines: number };
-  // 推理引擎：session=一本书一个长驻 Agent SDK 会话（跨标注连贯·记得本书前文，热轮 ~5s/冷启 ~14s）=主线；
-  //          stateless=每标注一次无状态 /api/infer（快 ~1-2s，无跨标注记忆）=快速档。默认 session（2026-06-16 用户定）。
-  inferEngine: 'stateless' | 'session';
-  // 推理模型：按前缀路由渠道——kimi*→moonshot；claude/gpt/gemini*→DMX。默认 kimi（中文笔迹稳，用户保留）。
+  // 推理模型：按前缀路由渠道——kimi*→moonshot；claude/gpt/gemini*→DMX。默认 gemini-3.1-flash-lite。
+  // （Agent SDK 会话引擎已退役 P2；单线走无状态 /api/infer，跨标注连贯交 chat/ 每本书 buffer。）
   inferModel: string;
-  // 思考链开关（仅 session 路径）：on→代理 thinking enabled(预算 env AGENT_THINK_BUDGET 或 1024)；off→删 thinking。
-  // 注：kimi 远端仍会思考(只是不回传推理链)；Claude 才是真开关。默认 off（更快）。
-  thinking: boolean;
   // 是否把合成图(墨迹叠原文)送给理解模型。**合成图非徐智强方案**——他的路线靠 HMP 取证事实
   //（命中原文 + text_hint）让 AI 理解，不靠截图。默认 false=纯徐路线验证；dev 控制台可临时 true 做 A/B。
   sendMarkImage: boolean;
@@ -82,10 +77,8 @@ export const settings: Settings = {
   ocr: { textlayer: true, image: 'off' },
   preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
   gesture: { enabled: true, pauseSeconds: 5, routing: 'auto', contextLines: 3 },
-  inferEngine: 'session', // 主线：长驻会话+跨标注记忆（多图两路径都支持）。切快速档在 dev 面板。
   inferModel: 'gemini-3.1-flash-lite', // 默认快模型（≈端侧小模型体验·徐方向）；kimi 仍可在 dev 面板切回（中文手写更稳，待 A/B）。
   //   注：旧用户 localStorage 里存了 kimi-k2.6 会覆盖此默认——要验证 gemini 需在 dev 面板手动选一次或清缓存。
-  thinking: false, // 思考链默认关（更快）；dev 面板可开。kimi 远端仍思考、仅 Claude 真关。
   sendMarkImage: false, // 默认不送合成图：纯验证徐智强的取证路线（AI 只吃 HMP 事实+整页上下文）。
   devOverlay: false,    // dev bbox 叠层默认关。
 };

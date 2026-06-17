@@ -283,40 +283,19 @@ export async function commitDiscussion(
   let memoryPages = 0;
   let hasImage = false;
   try {
-    if (settings.inferEngine === 'session' && state.documentId) {
-      // P3 会话引擎:一本书一个长驻 Agent SDK 会话,记得本书前文(替代 memorySnapshot)。
-      // 合成图放在 user message(可缓存、不进 tool_result,避开 SDK lift 缓存陷阱)。
-      hasImage = images.length > 0;
-      trace('InferenceRequest(disc)', { engine: 'session', page_id: evt.page_id, gesture: evt.event_type, focus: focusStr, page_text_len: pgText.length, image_count: images.length } as unknown as Record<string, unknown>);
-      const r = await fetch('/api/agent/turn', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ bookId: state.documentId, pageIndex: state.pageIndex, gestureType: evt.event_type, intent: finalIntent, pageText: pgText, focus: focusStr, image: sendImg ? composite : undefined, images, modes: finalModes, model: settings.inferModel, thinking: settings.thinking }),
-      }).then((x) => x.json());
-      if (r?.error) throw new Error(String(r.error));
-      result = {
-        result_id: shortId('res'), trace_id: evt.trace_id, request_id: 'agent',
-        result_type: (finalModes.includes(r.result_type) ? r.result_type : finalModes[0]) as InferenceResult['result_type'],
-        content: String(r.content || '此刻没能想清楚，稍后再为你低语。').trim(),
-        source_refs: [{ page_id: evt.page_id, bbox: evt.geometry.bbox, ocr_block_ids: [], event_id: evt.event_id }],
-        confidence: typeof r.confidence === 'number' ? r.confidence : 0.8,
-        created_at: new Date().toISOString(), model_name: (r?._meta?.model as string) || settings.inferModel, model_version: 'agent-session',
-      };
-      (result as unknown as { _debug?: unknown })._debug = { mode: 'agent-session', focus: focusStr, page_text_len: pgText.length, has_image: hasImage, ms: r?._meta?.ms, cost: r?._meta?.cost };
-      trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
-    } else {
-      // P1 无状态:每标注一次 /api/infer。page_text/focus/image 为 proxy 级 wire 附加(不动冻结契约 D4)
-      const req = buildRequest(evt, { text_blocks: [], nearby_text: focusStr || null }, finalModes) as InferenceRequest & { memory?: unknown; image?: string; images?: Array<{ role: string; data: string }>; page_text?: string; focus?: string; model?: string; intent?: string };
-      req.page_text = pgText;
-      req.focus = focusStr;
-      req.intent = finalIntent;
-      req.model = settings.inferModel;
-      req.memory = memorySnapshot(evt.page_id);
-      memoryPages = Array.isArray(req.memory) ? req.memory.length : 0;
-      trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>); // 此时尚未挂 image，trace 不被 base64 撑大
-      if (images.length) { req.images = images; req.image = composite; hasImage = true; }
-      result = await inferProviders[state.inferProvider](req);
-      trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
-    }
+    // 单线无状态推理:每标注一次 /api/infer。page_text/focus/image 为 proxy 级 wire 附加(不动冻结契约 D4)。
+    // （会话引擎/Agent SDK 已退役 P2；跨标注连贯将由 chat/ 面板的每本书 buffer 承接。）
+    const req = buildRequest(evt, { text_blocks: [], nearby_text: focusStr || null }, finalModes) as InferenceRequest & { memory?: unknown; image?: string; images?: Array<{ role: string; data: string }>; page_text?: string; focus?: string; model?: string; intent?: string };
+    req.page_text = pgText;
+    req.focus = focusStr;
+    req.intent = finalIntent;
+    req.model = settings.inferModel;
+    req.memory = memorySnapshot(evt.page_id);
+    memoryPages = Array.isArray(req.memory) ? req.memory.length : 0;
+    trace('InferenceRequest(disc)', req as unknown as Record<string, unknown>); // 此时尚未挂 image，trace 不被 base64 撑大
+    if (images.length) { req.images = images; req.image = composite; hasImage = true; }
+    result = await inferProviders[state.inferProvider](req);
+    trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
   } catch (err) {
     result = errorResult(evt, err);
     trace('InferenceResult(error)', result as unknown as Record<string, unknown>);

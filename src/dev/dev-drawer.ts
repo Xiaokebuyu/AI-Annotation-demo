@@ -186,10 +186,8 @@ function initSettings(): void {
   const gestureRouting = $id<HTMLSelectElement>('set-gesture-routing');
   const ctxLines = $id<HTMLInputElement>('set-ctx-lines');
   const pauseSec = $id<HTMLInputElement>('set-pause-sec');
-  const inferEngine = $id<HTMLSelectElement>('set-infer-engine');
   const inferModel = $id<HTMLSelectElement>('set-infer-model');
   const reflowModel = $id<HTMLSelectElement>('set-reflow-model');
-  const thinking = $id<HTMLInputElement>('set-thinking');
   const sendImage = $id<HTMLInputElement>('set-send-image');
   const devOverlay = $id<HTMLInputElement>('set-dev-overlay');
 
@@ -206,10 +204,8 @@ function initSettings(): void {
   gestureRouting.value = settings.gesture.routing;
   ctxLines.value = String(settings.gesture.contextLines);
   pauseSec.value = String(settings.gesture.pauseSeconds);
-  inferEngine.value = settings.inferEngine;
   inferModel.value = settings.inferModel;
   reflowModel.value = settings.reflowModel;
-  thinking.checked = settings.thinking;
   sendImage.checked = settings.sendMarkImage;
   devOverlay.checked = settings.devOverlay;
 
@@ -228,26 +224,7 @@ function initSettings(): void {
   ppDigest.addEventListener('change', () => { settings.preprocess.digestPages = clampPp(ppDigest, settings.preprocess.digestPages); ppDigest.value = String(settings.preprocess.digestPages); saveSettings(); });
   gesture.addEventListener('change', () => { settings.gesture.enabled = gesture.checked; changed(); });
   gestureRouting.addEventListener('change', () => { settings.gesture.routing = gestureRouting.value as 'auto' | 'geometric' | 'vlm'; changed(); });
-  inferEngine.addEventListener('change', () => {
-    settings.inferEngine = inferEngine.value === 'session' ? 'session' : 'stateless';
-    // 切到会话且已开书 → 预热(起会话+spawn,消首笔冷启)
-    if (settings.inferEngine === 'session' && state.documentId) {
-      fetch('/api/agent/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bookId: state.documentId, model: settings.inferModel }) }).catch(() => { /* 预热失败不影响 */ });
-    }
-    changed();
-  });
-  inferModel.addEventListener('change', () => {
-    settings.inferModel = inferModel.value;
-    // 会话引擎下换模型 = 重起会话(代理按新模型前缀路由 kimi/DMX) → 用新模型预热消冷启
-    if (settings.inferEngine === 'session' && state.documentId) {
-      fetch('/api/agent/open', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bookId: state.documentId, model: settings.inferModel, thinking: settings.thinking }) }).catch(() => { /* 预热失败不影响 */ });
-    }
-    changed();
-  });
-  thinking.addEventListener('change', () => {
-    settings.thinking = thinking.checked; // 仅 session 生效；代理每轮刷新思考预算，下一条标注即生效（无需重起会话）
-    changed();
-  });
+  inferModel.addEventListener('change', () => { settings.inferModel = inferModel.value; changed(); });
   ctxLines.addEventListener('change', () => {
     const n = Math.min(10, Math.max(0, Number(ctxLines.value) || settings.gesture.contextLines));
     settings.gesture.contextLines = n;

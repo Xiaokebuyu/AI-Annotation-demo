@@ -586,6 +586,20 @@ export async function runReflowVlm(payload: any): Promise<any[]> {
   }));
 }
 
+/**
+ * 网页对话式聊天（流式·P2 替代退役的 Agent SDK 会话）。
+ * 无状态端点：会话状态（每本书 buffer）由客户端持有、整串 messages 传入——正是 ChatGPT/Claude 网页对话的形态。
+ * 逐段 yield 文字增量；客户端 append + 可解析锚点结构化输出（锚点落位 P3/P4 接）。
+ */
+export async function* chatStream(payload: any): AsyncGenerator<string> {
+  const messages: any[] = Array.isArray(payload?.messages) ? payload.messages : [];
+  if (!messages.length) return;
+  const system = String(payload?.system || '');
+  const model = payload?.model || cfg().model;
+  const maxTokens = typeof payload?.maxTokens === 'number' ? payload.maxTokens : 800;
+  for await (const delta of gatewayTextStream({ system, messages, maxTokens, model })) yield delta;
+}
+
 /** 翻页总结：把一页的标注 + AI 回应压成一句备忘，供跨页综合。 */
 export async function runSummarize(payload: any): Promise<{ summary: string }> {
   const marks: any[] = payload?.marks || [];
