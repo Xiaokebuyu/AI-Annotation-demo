@@ -64,6 +64,15 @@ function cancelTimers(): void {
   sessionTrace = null;
 }
 
+/** 手势决策 = trace + 镜像到 dev 通道（让"圈了几次/每笔判成什么/有没有被并/被丢"在通道里可见）。 */
+function gtrace(o: Record<string, unknown>): void {
+  trace('GestureSession', o);
+  void fetch('/api/__debug/event', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ kind: 'gesture', ts: new Date().toISOString(), strokeCount: Array.isArray(o.strokes) ? (o.strokes as unknown[]).length : undefined, ...o }),
+  }).catch(() => { /* 镜像失败不连累主链路 */ });
+}
+
 /** 按纵向邻近把已识别手势聚成"段落讨论"簇。 */
 function clusterByProximity(recs: RecGesture[]): RecGesture[][] {
   const sorted = [...recs].sort((a, b) => a.bbox[1] - b.bbox[1]);
@@ -126,18 +135,18 @@ async function resolveAssemblyWindow(): Promise<void> {
     const scored = scoredFull.map((x) => ({ type: x.s.type, score: Number(x.s.score.toFixed(2)), raw: x.s.raw }));
     const pid = batch[0].page_id;
     if (!real.length) {
-      trace('GestureSession', { page_id: pid, routing: 'auto', strokes: scored, resolved: '— 全是点按/误触，不触发' });
+      gtrace({ page_id: pid, routing: 'auto', strokes: scored, resolved: '— 全是点按/误触，不触发' });
       return;
     }
     const gesture = resolveGesture(real); // 几何只定 tone（圈/划/箭头/写字）；真正语义 LLM 看合成图再判
-    trace('GestureSession', { page_id: pid, routing: 'auto', strokes: scored, route: 'llm', resolved: `${gesture.label} (→ ${gesture.eventType} · ${gesture.intent}) · 交 LLM` });
+    gtrace({ page_id: pid, routing: 'auto', strokes: scored, route: 'llm', resolved: `${gesture.label} (→ ${gesture.eventType} · ${gesture.intent}) · 交 LLM` });
     recBucket(pid).push({ events: real, gesture, bbox: unionBBox(real) });
     return;
   }
 
   if (settings.gesture.routing === 'vlm') {
     const r = await resolveByVlm(batch);
-    trace('GestureSession', {
+    gtrace({
       page_id: batch[0].page_id,
       routing: 'vlm',
       resolved: r ? `${r.gesture.label} (→ ${r.gesture.eventType} · ${r.gesture.intent})${r.reading ? ' · 读到「' + r.reading.slice(0, 24) + '」' : ''}` : '— VLM 判 nothing，不触发',
@@ -153,7 +162,7 @@ async function resolveAssemblyWindow(): Promise<void> {
   });
   const deliberate = isDeliberate(batch);
   const gesture = deliberate ? resolveGesture(batch) : null;
-  trace('GestureSession', {
+  gtrace({
     page_id: batch[0].page_id,
     routing: 'geometric',
     strokes: scored,
