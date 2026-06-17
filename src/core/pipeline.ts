@@ -128,7 +128,7 @@ async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[
     if (crop) {
       hmp.crop_ref = crop;
       try {
-        const r = await fetch('/api/ocr-vlm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: crop }) });
+        const r = await fetch('/api/ocr-vlm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: crop, model: settings.inferModel }) });
         if (r.ok) {
           const t = String((await r.json())?.text || '').trim();
           if (t) {
@@ -148,7 +148,7 @@ async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[
     hmp.vector_ref = inkData; // 矢量证据先留（preReading 已填 text_hint 时也保留）
     if (!hmp.text_hint) {
       try {
-        const r = await fetch('/api/interpret', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: inkData }) });
+        const r = await fetch('/api/interpret', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: inkData, model: settings.inferModel }) });
         if (r.ok) {
           const reading = String((await r.json())?.reading || '').trim();
           if (reading) {

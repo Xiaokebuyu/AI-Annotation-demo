@@ -148,6 +148,18 @@ async function extractTextBlocks(page: PDFPageProxy, vp: PageViewport): Promise<
   }
 }
 
+/** 取任意页的文本块（只读文本层、不渲染画布）——供重排预热下一页用，墨水屏友好。 */
+export async function extractPageBlocks(pageIndex: number): Promise<OcrTextBlock[]> {
+  if (!pdf || pageIndex < 0 || pageIndex >= pdf.numPages) return [];
+  try {
+    const page = await pdf.getPage(pageIndex + 1);
+    const vp = page.getViewport({ scale: 1 });
+    return await extractTextBlocks(page, vp);
+  } catch {
+    return [];
+  }
+}
+
 let preprocessing = false;
 /**
  * 预处理流水线（后台、顺序、可中断）：导入后封顶若干页——

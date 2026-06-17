@@ -140,6 +140,15 @@
             <option value="rewrite">VLM 看图重写</option>
           </select>
         </div>
+        <div class="set-row">
+          <span>重排模型（快 · 结构任务）</span>
+          <select id="set-reflow-model">
+            <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite（默认 · 快）</option>
+            <option value="gemini-3.5-flash">gemini-3.5-flash（DMX）</option>
+            <option value="kimi-k2.6">kimi-k2.6（慢 · 对照）</option>
+            <option value="claude-sonnet-4-6">claude-sonnet-4-6（对照 · 准）</option>
+          </select>
+        </div>
         <label class="set-check">
           <input type="checkbox" id="set-textlayer" />
           <span>PDF 文本层（SurfaceIndex 源 · 数字版精确）</span>

@@ -50,6 +50,54 @@ async function callGateway(opts: { system: string; messages: any[]; maxTokens: n
   return data;
 }
 
+/**
+ * 流式网关调用：以 SSE(stream:true) 拉取，逐段 yield 文字增量(text_delta)。
+ * 网关若不支持流式(返回 application/json) → 退化为一次性读出全文再 yield 一次，
+ * 调用方逻辑不变(只是不再是增量)。供 reflowAiStream 做"按段流式重排"。
+ */
+async function* gatewayTextStream(opts: { system: string; messages: any[]; maxTokens: number; model?: string }): AsyncGenerator<string> {
+  const { url, key } = cfg();
+  const model = opts.model || cfg().model;
+  if (!key) throw new Error('LLM_GATEWAY_KEY 未配置（在 annotation-loop-demo/.env 填网关 Key）');
+  const { channel, channel_url } = route(model);
+  const max_tokens = model.startsWith('gemini') ? Math.max(opts.maxTokens, 2048) : opts.maxTokens;
+  const body: any = { model, max_tokens, system: opts.system, messages: opts.messages, channel, channel_url, stream: true };
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json', 'anthropic-version': '2023-06-01', accept: 'text/event-stream' },
+    body: JSON.stringify(body),
+  });
+  const ct = resp.headers.get('content-type') || '';
+  if (!resp.ok || !resp.body || !ct.includes('event-stream')) {
+    // 网关没给 SSE（不支持流式/报错）→ 一次性读出，yield 一次（仍正确，只是不增量）
+    const data: any = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data?.error?.message || `网关返回 ${resp.status}`);
+    yield textOf(data);
+    return;
+  }
+  const reader = (resp.body as any).getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') return;
+      try {
+        const ev = JSON.parse(payload);
+        const t = ev?.delta?.text ?? (ev?.delta?.type === 'text_delta' ? ev.delta.text : undefined);
+        if (typeof t === 'string' && t) yield t;
+      } catch { /* 非 JSON 的 SSE 行（注释/心跳）跳过 */ }
+    }
+  }
+}
+
 const textOf = (data: any): string =>
   (data?.content || []).filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('').trim();
 
@@ -299,7 +347,7 @@ export async function runInterpretGesture(payload: any): Promise<{ kind: string;
     '③reading：若 kind=handwriting，原样转写其中文字；否则空字符串。' +
     '只输出一个 JSON：{"kind":"...","intent":"...","reading":"...","confidence":0.x}。除该 JSON 外不要任何文字。' +
     '如果看不出明确意图（很可能只是用户走神涂了一笔），kind="nothing"，让系统不打扰用户。';
-  const raw = await gateway(system, '判定这笔笔迹：', 400, image);
+  const raw = await gateway(system, '判定这笔笔迹：', 400, image, payload?.model); // 手写视觉随 inferModel 走（kimi/gemini A/B）
   const j = extractJson(raw);
   const KINDS = ['circle', 'underline', 'arrow', 'handwriting', 'abstract', 'nothing'];
   const INTENTS = ['what_is_this', 'key_point', 'question', 'relation', 'free_note', 'command'];
@@ -323,7 +371,7 @@ export async function runInterpret(payload: any): Promise<{ reading: string; int
     '①原样转写其中的手写文字；②判断用户意图，从这四个里选最贴切的一个：' +
     'question（在提问）、command（在下指令，如"总结这段"/"翻译"）、relation（在指出关联）、free_note（只是记想法）。' +
     '只输出一个 JSON：{"reading":"转写的文字","intent":"question|command|relation|free_note"}。除该 JSON 外不要任何文字。';
-  const raw = await gateway(system, '转写这段手写并判断意图：', 300, image);
+  const raw = await gateway(system, '转写这段手写并判断意图：', 300, image, payload?.model); // 手写转写随 inferModel 走（kimi/gemini A/B）
   const j = extractJson(raw);
   const intent = ['question', 'command', 'relation', 'free_note'].includes(j.intent) ? j.intent : 'free_note';
   return { reading: String(j.reading || '').trim(), intent };
@@ -376,32 +424,93 @@ export async function runReflow(payload: any): Promise<any[]> {
   }));
 }
 
+/** 默认重排模型：结构分类任务、对延迟敏感、质量要求低 → 用快模型。dev 面板/payload 可覆盖。 */
+const REFLOW_MODEL = 'gemini-3.1-flash-lite';
+
 /**
- * AI 结构重建：给"行"（id+相对字号+文字）让模型分组成 标题/段落/列表。
+ * 重排提示词（流式/非流式共用）。输出改为 **NDJSON**——一行一个语义块对象，
+ * 便于服务端边收边解析、客户端按段流式渲染（治"等整页排完才显示"的延迟）。
+ */
+function buildReflowAiPrompt(lines: any[]): { system: string; user: string } {
+  const list = lines.map((l) => `${l.id}\t[${l.sizeRatio ?? 1}x] ${String(l.text || '').slice(0, 200)}`).join('\n');
+  const system = '你在重建一页 PDF 的文档结构。下面是按阅读顺序的"行"，每行有 id、相对字号(1=正文)、文字。把这些行分组成干净的语义块：heading(标题,带 level)、para(正文段落)、list(列表)。靠内容与字号判断——标题通常字号偏大且独立成行；连续正文要按语义切成多个 para，**绝不能因为行距均匀就把多段并成一段**；项目符号/编号行归 list。';
+  const rules =
+    `逐行输出 NDJSON——**一行一个独立 JSON 对象**，每行就是一个语义块，按阅读顺序排：\n` +
+    `{"type":"heading"|"para"|"list","level":1到3(仅heading需要),"lineIds":["ln_x",...]}\n` +
+    `- 每个行 id 必须恰好出现一次，不丢、不重、不新增；\n` +
+    `- 不要改写、翻译或新增任何文字——你只做分组与分类；\n` +
+    `- 一行一个 JSON 对象，**不要包成数组、不要加 \`\`\` 代码块、不要任何额外解释或编号**。`;
+  return { system, user: `${list}\n\n${rules}` };
+}
+
+/** 把模型吐的一行解析成合法分组（校验 lineIds 都在本页行内）；非分组行返回 null。 */
+function parseGroupLine(line: string, valid: Set<unknown>): { type: string; level: number; lineIds: string[] } | null {
+  if (!line || line[0] !== '{') return null; // 代码块/数组/空行/解释文字一律跳过
+  let g: any;
+  try { g = JSON.parse(line); } catch { return null; }
+  if (!g || !Array.isArray(g.lineIds)) return null;
+  const lineIds = g.lineIds.filter((id: unknown) => valid.has(id));
+  if (!lineIds.length) return null;
+  return { type: g.type === 'heading' ? 'heading' : g.type === 'list' ? 'list' : 'para', level: typeof g.level === 'number' ? g.level : 1, lineIds };
+}
+
+/**
+ * AI 结构重建（非流式）：给"行"（id+相对字号+文字）让模型分组成 标题/段落/列表。
  * 模型只输出分组 lineIds、不改写文字——前端按 lineIds 把文字与原页 bbox 拼回（重排块可追溯）。
  * 关键治"多段并一块"：标题靠字号+独立成行，连续正文按语义切多段，绝不因行距均匀而合并。
+ * 用于预热下一页 + 流式失败兜底；实时主路径走 reflowAiStream（SSE 按段流式）。
  */
 export async function runReflowAi(payload: any): Promise<any[]> {
   const lines: any[] = payload?.lines || [];
   if (lines.length < 2) return [];
-  const list = lines.map((l) => `${l.id}\t[${l.sizeRatio ?? 1}x] ${String(l.text || '').slice(0, 200)}`).join('\n');
-  const system = '你在重建一页 PDF 的文档结构。下面是按阅读顺序的"行"，每行有 id、相对字号(1=正文)、文字。把这些行分组成干净的语义块：heading(标题,带 level)、para(正文段落)、list(列表)。靠内容与字号判断——标题通常字号偏大且独立成行；连续正文要按语义切成多个 para，**绝不能因为行距均匀就把多段并成一段**；项目符号/编号行归 list。';
-  const rules =
-    `输出一个 JSON 数组，每个元素 {"type":"heading"|"para"|"list","level":1到3(仅heading需要),"lineIds":["ln_x",...]}：\n` +
-    `- 每个行 id 必须恰好出现一次，不丢、不重、不新增；整体按阅读顺序；\n` +
-    `- 不要改写、翻译或新增任何文字——你只做分组与分类；\n` +
-    `只输出该 JSON 数组，别的都不要。`;
-  const raw = await gateway(system, `${list}\n\n${rules}`, 3500);
-  const arr = extractJsonArray(raw);
+  const { system, user } = buildReflowAiPrompt(lines);
+  const model = payload?.model || REFLOW_MODEL;
+  const raw = await gateway(system, user, model.startsWith('gemini') ? 4096 : 3500, undefined, model);
   const valid = new Set(lines.map((l) => l.id));
-  return arr
+  // 优先按 NDJSON 逐行解析
+  const groups = raw.split('\n').map((ln) => parseGroupLine(ln.trim(), valid)).filter(Boolean) as any[];
+  if (groups.length) return groups;
+  // 兜底：模型仍输出了 JSON 数组（旧习惯）
+  return extractJsonArray(raw)
     .filter((g) => g && Array.isArray(g.lineIds))
-    .map((g) => ({
-      type: g.type === 'heading' ? 'heading' : g.type === 'list' ? 'list' : 'para',
-      level: typeof g.level === 'number' ? g.level : 1,
-      lineIds: g.lineIds.filter((id: unknown) => valid.has(id)),
-    }))
+    .map((g) => ({ type: g.type === 'heading' ? 'heading' : g.type === 'list' ? 'list' : 'para', level: typeof g.level === 'number' ? g.level : 1, lineIds: g.lineIds.filter((id: unknown) => valid.has(id)) }))
     .filter((g) => g.lineIds.length);
+}
+
+/**
+ * AI 结构重建（流式）：边收模型 NDJSON 边 yield 分组。供 /api/reflow-ai-stream
+ * 一段段写回浏览器，让重排"按段冒出来"而非整页排完才显示。网关不支持流式时
+ * gatewayTextStream 会退化为一次性返回——本生成器照常逐组 yield（只是不增量）。
+ */
+export async function* reflowAiStream(payload: any): AsyncGenerator<{ type: string; level: number; lineIds: string[] }> {
+  const lines: any[] = payload?.lines || [];
+  if (lines.length < 2) return;
+  const { system, user } = buildReflowAiPrompt(lines);
+  const model = payload?.model || REFLOW_MODEL;
+  const valid = new Set(lines.map((l) => l.id));
+  let buf = '';
+  let full = '';
+  let yielded = 0;
+  for await (const delta of gatewayTextStream({ system, messages: [{ role: 'user', content: user }], maxTokens: model.startsWith('gemini') ? 4096 : 3500, model })) {
+    buf += delta; full += delta;
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const g = parseGroupLine(buf.slice(0, nl).trim(), valid);
+      buf = buf.slice(nl + 1);
+      if (g) { yielded++; yield g; }
+    }
+  }
+  const tail = parseGroupLine(buf.trim(), valid); // 最后一行可能无换行
+  if (tail) { yielded++; yield tail; }
+  if (yielded === 0) {
+    // 模型没按 NDJSON（输出了数组/代码块）→ 整体兜底解析，逐组补出
+    for (const g of extractJsonArray(full)) {
+      if (g && Array.isArray(g.lineIds)) {
+        const lineIds = g.lineIds.filter((id: unknown) => valid.has(id));
+        if (lineIds.length) yield { type: g.type === 'heading' ? 'heading' : g.type === 'list' ? 'list' : 'para', level: typeof g.level === 'number' ? g.level : 1, lineIds };
+      }
+    }
+  }
 }
 
 /**
@@ -426,7 +535,7 @@ export async function runOcrVlm(payload: any): Promise<{ text: string }> {
     const pct = (v: number) => Math.round(v * 100);
     user = `用户标注框大约在页面横向 ${pct(x)}%–${pct(x + w)}%、纵向 ${pct(y)}%–${pct(y + h)}%（左上角为原点）。转写该区域内的文字：`;
   }
-  const text = await gateway(system, user, isPage ? 700 : 500, image);
+  const text = await gateway(system, user, isPage ? 700 : 500, image, payload?.model); // 局部 OCR 随 inferModel 走（kimi/gemini A/B）
   return { text: text.trim() };
 }
 

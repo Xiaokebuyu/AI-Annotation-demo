@@ -48,6 +48,7 @@ export interface Settings {
   placement: Placement;
   viewMode: ViewMode;                            // 阅读面：原版 PDF / 重排
   reflowProvider: string;                        // 重排引擎：local / llm
+  reflowModel: string;                           // 重排专用模型（快·结构任务）：默认 gemini-3.1-flash-lite，独立于 inferModel
   // 文字识别：textlayer 数字版文本层（开关）+ 图像 OCR（关闭/局部图/整页图，给扫描·手写·图表）
   ocr: { textlayer: boolean; image: OcrImageMode };
   // 预处理：导入后台预排版前 reflowPages 页 + 预解读（记忆A）前 digestPages 页（封顶，喂推理更准）
@@ -77,11 +78,13 @@ export const settings: Settings = {
   placement: 'margin',
   viewMode: 'page',
   reflowProvider: 'ai', // 主线：AI 结构重建（文本驱动·保 bbox）
+  reflowModel: 'gemini-3.1-flash-lite', // 重排走快模型（结构任务·延迟敏感·质量门槛低）。新字段→所有人即时生效。
   ocr: { textlayer: true, image: 'off' },
   preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
   gesture: { enabled: true, pauseSeconds: 5, routing: 'auto', contextLines: 3 },
   inferEngine: 'session', // 主线：长驻会话+跨标注记忆（多图两路径都支持）。切快速档在 dev 面板。
-  inferModel: 'kimi-k2.6', // 默认 kimi（中文笔迹稳）；dev 面板可切 claude-opus-4-7/4-8 · sonnet-4-6 · gemini-3.5-flash/3.1-flash-lite。
+  inferModel: 'gemini-3.1-flash-lite', // 默认快模型（≈端侧小模型体验·徐方向）；kimi 仍可在 dev 面板切回（中文手写更稳，待 A/B）。
+  //   注：旧用户 localStorage 里存了 kimi-k2.6 会覆盖此默认——要验证 gemini 需在 dev 面板手动选一次或清缓存。
   thinking: false, // 思考链默认关（更快）；dev 面板可开。kimi 远端仍思考、仅 Claude 真关。
   sendMarkImage: false, // 默认不送合成图：纯验证徐智强的取证路线（AI 只吃 HMP 事实+整页上下文）。
   devOverlay: false,    // dev bbox 叠层默认关。

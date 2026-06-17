@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import type { Plugin } from 'vite';
-import { runInference, runReflow, runReflowAi, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runReflowVlm } from './server/infer';
+import { runInference, runReflow, runReflowAi, reflowAiStream, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runReflowVlm } from './server/infer';
 import { debugEvent, debugSnapshot } from './server/debug.mjs';
 
 /** dev-only 推理代理：浏览器 POST /api/infer → 网关 → InferenceResult。Key 留服务端。 */
@@ -40,6 +40,26 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       post('/api/infer', runInference);
       post('/api/reflow', runReflow);
       post('/api/reflow-ai', runReflowAi);
+      // 流式重排：NDJSON chunked——边收模型分组边写回，前端按段渲染。非流式端点(/api/reflow-ai)留给预热/兜底。
+      server.middlewares.use('/api/reflow-ai-stream', (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end('POST only'); return; }
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', async () => {
+          res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
+          res.setHeader('cache-control', 'no-cache');
+          res.setHeader('x-accel-buffering', 'no'); // 禁中间层缓冲，保证逐块到达
+          try {
+            for await (const group of reflowAiStream(JSON.parse(body))) {
+              res.write(JSON.stringify(group) + '\n');
+            }
+            res.end();
+          } catch (e) {
+            if (!res.headersSent) { res.statusCode = 502; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ error: String((e as Error)?.message || e) })); }
+            else res.end();
+          }
+        });
+      });
       post('/api/summarize', runSummarize);
       post('/api/ocr-vlm', runOcrVlm);
       post('/api/explain-image', runExplainImage);

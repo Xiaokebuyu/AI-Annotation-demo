@@ -83,7 +83,7 @@ async function resolveByVlm(batch: AnnotationEvent[]): Promise<{ gesture: Gestur
   if (!image) return null;
   try {
     const resp = await fetch('/api/interpret-gesture', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image, model: settings.inferModel }),
     });
     if (!resp.ok) return null;
     const r = await resp.json() as { kind: string; intent: string; reading: string; confidence: number };
@@ -355,6 +355,7 @@ $('view-toggle').addEventListener('click', () => {
   applyViewMode();
   bus.emit('view:changed');
 });
+applyViewMode(); // 初始即同步 DOM 到持久化的 viewMode（否则刷新后 reader 持久值不反映、停在 page）
 
 document.addEventListener('keydown', (e) => {
   if ((e.target as HTMLElement)?.isContentEditable) return;

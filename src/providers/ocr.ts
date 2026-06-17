@@ -219,7 +219,7 @@ async function transcribe(image: string, scope: 'region' | 'page', bbox?: NormBB
     const resp = await fetch('/api/ocr-vlm', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(scope === 'page' ? { image, scope, bbox } : { image }),
+      body: JSON.stringify(scope === 'page' ? { image, scope, bbox, model: settings.inferModel } : { image, model: settings.inferModel }),
     });
     if (resp.ok) return String((await resp.json())?.text || '').trim();
   } catch { /* 失败降级为空，不连累闭环 */ }

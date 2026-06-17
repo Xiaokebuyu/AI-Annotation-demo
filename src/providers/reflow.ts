@@ -1,6 +1,7 @@
 import type { NormBBox, OcrTextBlock } from '../core/contracts';
 import type { ReflowBlock, ReflowBlockType } from '../core/reflow';
 import { reflowLocal, groupLines, blockId, type ReflowLine } from '../core/reflow';
+import { settings } from '../app/state';
 
 /**
  * 重排 provider 接缝（跟 ocr.ts / inference.ts 同构）。
@@ -116,21 +117,43 @@ function unionLines(lines: ReflowLine[]): NormBBox {
   return [x0, y0, x1 - x0, y1 - y0];
 }
 
-/**
- * AI 结构重建（文本驱动·主线升级）：把"行"(id+相对字号+文字)交模型分组成 标题/段落/列表，
- * 靠内容+字号判段落边界与标题层级——治本地 gap 启发式把多段并成一块。模型只输出分组(lineIds)，
- * 文字与 source bbox 由前端按 lineIds 从原行拼回，**重排块照样映射回原页**（圈画可追溯）。
- */
-const ai: ReflowProvider = async (blocks) => {
+type Group = { type?: string; level?: number; lineIds?: string[] };
+
+/** 把一个分组(lineIds)按原行拼回 ReflowBlock：文字 join、source 取行并集 bbox（→重排块仍映射回原页）。 */
+function groupToBlock(g: Group, byId: Map<string, ReflowLine>, index: number): ReflowBlock | null {
+  const gls = (g.lineIds ?? []).map((id) => byId.get(id)).filter((l): l is ReflowLine => !!l);
+  if (!gls.length) return null;
+  const type: ReflowBlockType = g.type === 'heading' ? 'heading' : g.type === 'list' ? 'list' : 'para';
+  const text = gls.map((l) => l.text).join(type === 'list' ? '\n' : ' ');
+  return {
+    id: blockId(text, index), type,
+    level: type === 'heading' ? (g.level || 1) : 0,
+    text, source: unionLines(gls),
+    ...(type === 'list' ? { items: gls.map((l) => l.text), ordered: false } : {}),
+  };
+}
+
+/** 行集合 → groupLines + 相对字号 payload（流式/非流式共用的请求体构造）。 */
+function buildLinesPayload(blocks: OcrTextBlock[]): { lines: ReflowLine[]; payload: Array<{ id: string; sizeRatio: number; text: string }> } {
   const lines = groupLines(blocks);
-  if (lines.length < 3) return reflowLocal(blocks);
   const sizes = lines.map((l) => l.size).sort((a, b) => a - b);
   const bodyFont = sizes[sizes.length >> 1] || 0.012;
-  let groups: Array<{ type?: string; level?: number; lineIds?: string[] }>;
+  return { lines, payload: lines.map((l) => ({ id: l.id, sizeRatio: +(l.size / bodyFont).toFixed(2), text: l.text })) };
+}
+
+/**
+ * AI 结构重建（文本驱动·非流式）：把"行"交模型分组成 标题/段落/列表，靠内容+字号判段落边界。
+ * 模型只输出分组(lineIds)，文字与 source bbox 由前端按 lineIds 从原行拼回——**重排块照样映射回原页**。
+ * 用于预热下一页 + 流式失败兜底；实时主路径走 reflowAiStream。
+ */
+const ai: ReflowProvider = async (blocks) => {
+  const { lines, payload } = buildLinesPayload(blocks);
+  if (lines.length < 3) return reflowLocal(blocks);
+  let groups: Group[];
   try {
     const resp = await fetch('/api/reflow-ai', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ lines: lines.map((l) => ({ id: l.id, sizeRatio: +(l.size / bodyFont).toFixed(2), text: l.text })) }),
+      body: JSON.stringify({ lines: payload, model: settings.reflowModel }),
     });
     if (!resp.ok) return reflowLocal(blocks);
     groups = await resp.json();
@@ -141,22 +164,66 @@ const ai: ReflowProvider = async (blocks) => {
   const used = new Set<string>();
   const out: ReflowBlock[] = [];
   for (const g of groups) {
-    const gls = (g.lineIds ?? []).map((id) => byId.get(id)).filter((l): l is ReflowLine => !!l);
-    if (!gls.length) continue;
-    gls.forEach((l) => used.add(l.id));
-    const type: ReflowBlockType = g.type === 'heading' ? 'heading' : g.type === 'list' ? 'list' : 'para';
-    const text = gls.map((l) => l.text).join(type === 'list' ? '\n' : ' ');
-    out.push({
-      id: blockId(text, out.length), type,
-      level: type === 'heading' ? (g.level || 1) : 0,
-      text, source: unionLines(gls),
-      ...(type === 'list' ? { items: gls.map((l) => l.text), ordered: false } : {}),
-    });
+    const b = groupToBlock(g, byId, out.length);
+    if (!b) continue;
+    (g.lineIds ?? []).forEach((id) => used.add(id));
+    out.push(b);
   }
   for (const l of lines) if (!used.has(l.id)) out.push({ id: blockId(l.text, out.length + 1000), type: 'para', level: 0, text: l.text, source: l.bbox }); // 漏掉的行补回，别丢字
   out.sort((a, b) => a.source[1] - b.source[1]);
   return out.length ? out : reflowLocal(blocks);
 };
+
+/**
+ * AI 结构重建（流式·实时主路径）：边收服务端 NDJSON 边把每个分组拼成 ReflowBlock 回调出去，
+ * 让重排"按段冒出来"。返回收尾后的完整块表（含漏行补回、按 y 排序）供持久化。
+ * 任何失败（含网关不支持流式）→ 抛给调用方，由 reader 退回非流式 ai()。AbortError 原样抛出。
+ */
+export async function reflowAiStream(
+  blocks: OcrTextBlock[],
+  onBlock: (b: ReflowBlock, all: ReflowBlock[]) => void,
+  signal?: AbortSignal,
+): Promise<ReflowBlock[]> {
+  const { lines, payload } = buildLinesPayload(blocks);
+  if (lines.length < 3) return reflowLocal(blocks);
+  const byId = new Map(lines.map((l) => [l.id, l]));
+  const used = new Set<string>();
+  const out: ReflowBlock[] = [];
+  const take = (g: Group) => {
+    const b = groupToBlock(g, byId, out.length);
+    if (!b) return;
+    (g.lineIds ?? []).forEach((id) => used.add(id));
+    out.push(b);
+    onBlock(b, out);
+  };
+
+  const resp = await fetch('/api/reflow-ai-stream', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, signal,
+    body: JSON.stringify({ lines: payload, model: settings.reflowModel }),
+  });
+  if (!resp.ok || !resp.body) throw new Error(`reflow-ai-stream ${resp.status}`);
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try { take(JSON.parse(line)); } catch { /* 半行/坏行跳过 */ }
+    }
+  }
+  const tail = buf.trim();
+  if (tail) { try { take(JSON.parse(tail)); } catch { /* noop */ } }
+
+  for (const l of lines) if (!used.has(l.id)) { const b: ReflowBlock = { id: blockId(l.text, out.length + 1000), type: 'para', level: 0, text: l.text, source: l.bbox }; out.push(b); onBlock(b, out); }
+  out.sort((a, b) => a.source[1] - b.source[1]);
+  return out.length ? out : reflowLocal(blocks);
+}
 
 export const reflowProviders: Record<string, ReflowProvider> = { local, hybrid, vision, rewrite, ai };
 

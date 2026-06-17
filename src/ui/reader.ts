@@ -2,7 +2,9 @@ import type { AnnotationEvent, EventType, NormBBox, OutputMode, ScreenOverlay, S
 import { SCHEMA_VERSION } from '../core/contracts';
 import type { ReflowBlock } from '../core/reflow';
 import { bus, settings, state } from '../app/state';
-import { reflowProviders } from '../providers/reflow';
+import { reflowProviders, reflowAiStream } from '../providers/reflow';
+import { reflowLocal } from '../core/reflow';
+import { extractPageBlocks } from './renderer';
 import { grabRegion } from '../providers/ocr';
 import { getImageExplain, getReflow, putImageExplain, putReflow } from '../app/store';
 import { bboxOf, classifyScored } from '../core/classify';
@@ -39,6 +41,29 @@ let live: { x: number; y: number }[] | null = null;
 const DISC = 'disc_r_';
 
 // ── 渲染 ──
+/** 把一个重排文本块建成 DOM 节点（标题/段落/列表）。流式追加与整页渲染共用，保证两条路样式一致。 */
+function makeBlockNode(b: ReflowBlock): HTMLElement {
+  if (b.type === 'list') {
+    const listEl = document.createElement(b.ordered ? 'ol' : 'ul');
+    listEl.className = 'reader-list';
+    listEl.dataset.bbox = b.source.map((n) => n.toFixed(4)).join(',');
+    listEl.dataset.block = b.id;
+    for (const item of b.items ?? []) {
+      const li = document.createElement('li');
+      li.textContent = item;
+      listEl.appendChild(li);
+    }
+    return listEl;
+  }
+  const node = document.createElement(b.type === 'heading' ? 'h2' : 'p');
+  node.className = b.type === 'heading' ? 'reader-h' : 'reader-p';
+  if (b.type === 'heading') node.dataset.level = String(b.level);
+  node.dataset.bbox = b.source.map((n) => n.toFixed(4)).join(',');
+  node.dataset.block = b.id;
+  node.textContent = b.text;
+  return node;
+}
+
 function render(items: RenderItem[], warn: string = ''): void {
   el.querySelectorAll('.reader-page, .reader-empty, .reader-warn').forEach((n) => n.remove());
   pageWrap = null;
@@ -83,27 +108,7 @@ function render(items: RenderItem[], warn: string = ''): void {
       continue;
     }
     const b = it;
-    if (b.type === 'list') {
-      // 列表：保留语义结构（项目符号/编号），不压成一坨段落
-      const listEl = document.createElement(b.ordered ? 'ol' : 'ul');
-      listEl.className = 'reader-list';
-      listEl.dataset.bbox = b.source.map((n) => n.toFixed(4)).join(',');
-      listEl.dataset.block = b.id;
-      for (const item of b.items ?? []) {
-        const li = document.createElement('li');
-        li.textContent = item;
-        listEl.appendChild(li);
-      }
-      col.appendChild(listEl);
-      blockRefs.push({ id: b.id, el: listEl, source: b.source });
-      continue;
-    }
-    const node = document.createElement(b.type === 'heading' ? 'h2' : 'p');
-    node.className = b.type === 'heading' ? 'reader-h' : 'reader-p';
-    if (b.type === 'heading') node.dataset.level = String(b.level);
-    node.dataset.bbox = b.source.map((n) => n.toFixed(4)).join(',');
-    node.dataset.block = b.id;
-    node.textContent = b.text;
+    const node = makeBlockNode(b);
     col.appendChild(node);
     blockRefs.push({ id: b.id, el: node, source: b.source });
   }
@@ -147,46 +152,126 @@ async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string)
   delete cap.dataset.pending;
 }
 
-let reflowKey = '';   // 上次重排的输入键（页 + 引擎）——只在它变了才重排
+let reflowKey = '';   // 上次重排的输入键（页 + 引擎 + 模型）——只在它变了才重排
 let reflowSeq = 0;    // 防并发：快速翻页/切引擎时只让最新一次结果落地
+let reflowAbort: AbortController | null = null; // 取消上一次未完的流式请求（快速翻页）
+
+/** 缓存/重排身份键：ai 引擎把模型并入（换重排模型 → 独立缓存、可 A/B），其余引擎用引擎名。 */
+function engineKey(provider: string): string {
+  return provider === 'ai' ? `ai@${settings.reflowModel}` : provider;
+}
+
+/** 图片型 / 字号统一 PDF 的诚实提示（占位渲染时不显示，免占位也报"不可靠"）。 */
+function unreliableWarn(): string {
+  const sizes = state.textBlocks.map((b) => b.bbox[3]);
+  const sizeSpread = sizes.length ? Math.max(...sizes) / Math.min(...sizes) - 1 : 0;
+  if (state.textBlocks.length > 0 && state.textBlocks.length < 5)
+    return '本页可识别文本极少（可能是图片型 PDF），重排不可靠 — 建议看「原版」。';
+  if (sizeSpread < 0.06 && state.textBlocks.length > 20 && state.imageRegions.length === 0)
+    return '本页字号统一、缺标题层级线索（常见于网页截图生成的 PDF），重排可能仅是按段堆叠。';
+  return '';
+}
+
+/** 终渲：原页图像按 y 插回阅读流 + 警示，整页落地（建 blockRefs、重贴 AI 注）。 */
+function renderFinal(blocks: ReflowBlock[], provisional = false): void {
+  const figures: FigureItem[] = state.imageRegions.map((bb, i) => ({ kind: 'figure', id: `fig_${state.pageIndex}_${i}`, source: bb }));
+  const items: RenderItem[] = [...blocks, ...figures].sort((a, b) => a.source[1] - b.source[1]);
+  render(items, provisional ? '' : unreliableWarn());
+}
+
+// 流式渲染：首块到达时清占位、起空列；逐段 append（不插图，收尾 renderFinal 再按 y 插图 + 建 refs）。
+let streamCol: HTMLElement | null = null;
+function streamStart(): void {
+  el.querySelectorAll('.reader-page, .reader-empty, .reader-warn').forEach((n) => n.remove());
+  pageWrap = null; inkStrokes.length = 0; blockRefs = [];
+  const wrap = document.createElement('div'); wrap.className = 'reader-page';
+  const col = document.createElement('article'); col.className = 'reader-col';
+  wrap.appendChild(col);
+  el.insertBefore(wrap, inkCv);
+  pageWrap = wrap; streamCol = col;
+  resizeInk();
+}
+function streamAppend(b: ReflowBlock): void {
+  if (!streamCol) return;
+  const node = makeBlockNode(b);
+  streamCol.appendChild(node);
+  blockRefs.push({ id: b.id, el: node, source: b.source });
+  resizeInk();
+}
 
 async function rebuild(): Promise<void> {
   if (settings.viewMode !== 'reader') return;
-  // 重排输入只由「当前页 + 重排引擎」决定。缩放、无关设置变化、布局抖动触发的 page:rendered
-  // 都不该重排——这是"重复触发"的根（hybrid/vision 还会重复打网关）。
-  const key = `${state.pageId ?? ''}|${settings.reflowProvider}`;
+  // 重排输入只由「当前页 + 引擎 + 重排模型」决定。缩放、无关设置变化、布局抖动触发的 page:rendered
+  // 都不该重排——这是"重复触发"的根。
+  const provider = settings.reflowProvider;
+  const ekey = engineKey(provider);
+  const key = `${state.pageId ?? ''}|${ekey}`;
   if (key === reflowKey) return;
   reflowKey = key;
   const seq = ++reflowSeq;
+  reflowAbort?.abort(); reflowAbort = null;       // 翻得快 → 砍掉上一次未完的流
+  const stale = () => seq !== reflowSeq || settings.viewMode !== 'reader';
   try {
-    // 先读持久化的预排版缓存（重开/翻回即时，不再实时重排）；没有才算，算完写回
-    let blocks = getReflow(state.pageIndex, settings.reflowProvider);
-    if (!blocks) {
-      blocks = await reflowProviders[settings.reflowProvider](state.textBlocks);
-      if (seq !== reflowSeq || settings.viewMode !== 'reader') return; // 被更新的一次取代
-      putReflow(state.pageIndex, settings.reflowProvider, blocks);
+    // 1) 命中持久化缓存（翻回 / 已预热）→ 直接终渲，零请求
+    const cached = getReflow(state.pageIndex, ekey);
+    if (cached) { renderFinal(cached); void prewarmNext(provider); return; }
+
+    // 2) ai 引擎：即时 local 占位（翻页不空白）→ 按段流式增强 → 终渲 + 落缓存
+    if (provider === 'ai') {
+      renderFinal(reflowLocal(state.textBlocks), true); // 占位：翻页瞬间就有可读内容
+      let started = false;
+      const onBlock = (b: ReflowBlock): void => {
+        if (stale()) return;
+        if (!started) { started = true; streamStart(); } // 首块到达才清占位，避免空屏闪
+        streamAppend(b);
+      };
+      reflowAbort = new AbortController();
+      let blocks: ReflowBlock[];
+      try {
+        blocks = await reflowAiStream(state.textBlocks, onBlock, reflowAbort.signal);
+      } catch (e) {
+        if ((e as Error)?.name === 'AbortError' || stale()) return;
+        blocks = await reflowProviders.ai(state.textBlocks);  // 流式失败 → 非流式兜底
+      }
+      if (stale()) return;
+      streamCol = null;
+      putReflow(state.pageIndex, ekey, blocks);
+      renderFinal(blocks);                 // 终渲：图按 y 插回 + 建 blockRefs + 重贴 AI 注
+      void prewarmNext(provider);
+      return;
     }
-    // 把原页图像按 y 顺序插回阅读流（图不丢；reflow 纯函数不动）
-    const figures: FigureItem[] = state.imageRegions.map((bb, i) => ({ kind: 'figure', id: `fig_${state.pageIndex}_${i}`, source: bb }));
-    const items: RenderItem[] = [...blocks, ...figures].sort((a, b) => a.source[1] - b.source[1]);
-    // 畸形检测：图片型 PDF（textBlocks 极少）或字号统一的 OCR 嵌字 PDF（网页截图常见）→ 给诚实提示
-    const sizes = state.textBlocks.map((b) => b.bbox[3]);
-    const sizeSpread = sizes.length ? Math.max(...sizes) / Math.min(...sizes) - 1 : 0;
-    const unreliable = state.textBlocks.length > 0 && state.textBlocks.length < 5
-      ? '本页可识别文本极少（可能是图片型 PDF），重排不可靠 — 建议看「原版」。'
-      : sizeSpread < 0.06 && state.textBlocks.length > 20 && state.imageRegions.length === 0
-        ? '本页字号统一、缺标题层级线索（常见于网页截图生成的 PDF），重排可能仅是按段堆叠。'
-        : '';
-    render(items, unreliable);
+
+    // 3) 非 ai 引擎（local/hybrid/vision/rewrite）：整块算完再渲（老路径）
+    const blocks = await reflowProviders[provider](state.textBlocks);
+    if (stale()) return;
+    putReflow(state.pageIndex, ekey, blocks);
+    renderFinal(blocks);
+    void prewarmNext(provider);
   } catch (e) {
     reflowKey = '';                       // 失败可重试（同输入下次触发再来一遍）
+    streamCol = null;
     if (seq !== reflowSeq) return;
-    el.querySelectorAll('.reader-col, .reader-empty').forEach((n) => n.remove());
+    el.querySelectorAll('.reader-page, .reader-col, .reader-empty').forEach((n) => n.remove());
     const err = document.createElement('p');
     err.className = 'reader-empty';
     err.textContent = `重排失败：${(e as Error).message}`;
     el.insertBefore(err, inkCv);
   }
+}
+
+/** 预热下一页：后台抽下一页文本 + 非流式 ai 重排写入缓存，翻过去即缓存命中。只热 ai 主线。 */
+async function prewarmNext(provider: string): Promise<void> {
+  if (provider !== 'ai') return;
+  const next = state.pageIndex + 1;
+  if (next >= state.pageCount) return;
+  const ekey = engineKey(provider);
+  if (getReflow(next, ekey)) return;                       // 已缓存
+  try {
+    const blocks = await extractPageBlocks(next);
+    if (!blocks.length || getReflow(next, ekey)) return;   // 双检（期间可能被填）
+    const reflowed = await reflowProviders.ai(blocks);
+    if (reflowed.length && !getReflow(next, ekey)) putReflow(next, ekey, reflowed);
+  } catch { /* 预热失败不影响主流程 */ }
 }
 
 // ── 行内 AI 注 ──
