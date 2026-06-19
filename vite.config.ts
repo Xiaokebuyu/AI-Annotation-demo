@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import type { Plugin } from 'vite';
-import { runInference, runReflow, runReflowAi, reflowAiStream, chatStream, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runReflowVlm } from './server/infer';
+import { runInference, runReflow, runReflowAi, reflowAiStream, chatStream, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runClassifyContext, runReflowVlm } from './server/infer';
 import { debugEvent, debugSnapshot } from './server/debug.mjs';
 
 /** dev-only 推理代理：浏览器 POST /api/infer → 网关 → InferenceResult。Key 留服务端。 */
@@ -66,6 +66,7 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       post('/api/digest', runDigest);
       post('/api/interpret', runInterpret);
       post('/api/interpret-gesture', runInterpretGesture);
+      post('/api/classify-context', runClassifyContext);
       post('/api/reflow-vlm', runReflowVlm);
 
       // 网页对话式聊天（流式·替代退役的 Agent SDK 会话）：客户端持每本书 buffer、整串 messages 传入，

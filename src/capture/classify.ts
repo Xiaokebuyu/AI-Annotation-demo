@@ -21,6 +21,8 @@ export interface ScoredGesture {
   score: number; // 0–1：这笔画得有多像该模板（用于"画得像范例才算数"的门槛）
   /** 各模板的原始分数（用于诊断"为啥没识别成圈"）。 */
   raw?: { circle: number; underline: number; arrow: number };
+  /** 箭头方向：急转(箭头钩)在弧长 atFrac 处 → tip=该端；用于 mark-graph 的 A→B 语义边。 */
+  arrow?: { atFrac: number; tip: 'start' | 'end' };
 }
 
 /**
@@ -64,6 +66,7 @@ export function classifyScored(
 
   // 箭头：开口（非闭合）+ 主干够直 + 末端有个 >~100° 急转（箭头钩）。
   let arrowScore = 0;
+  let arrowAtFrac = 0; // 急转(箭头钩)所在弧长比例 → 推 tip 端（A→B 方向）
   if (closure > 0.5 * diagPx && points.length >= 6) {
     let sharpest = 0, atFrac = 0, acc = 0;
     for (let i = 1; i < points.length - 1; i++) {
@@ -78,13 +81,14 @@ export function classifyScored(
     const nearEnd = atFrac > 0.68 || atFrac < 0.32 ? 1 : 0;      // 急转靠近某一端
     const shaft = clamp01((closure / len - 0.45) / 0.4);         // 主干直度
     arrowScore = sharp * nearEnd * shaft;
+    arrowAtFrac = atFrac;
   }
 
   // 最小尺寸闸：屏幕上小于 ~3mm 的"圈/划"框不住任何词，多半是原地小抖 → 降为自由笔（低分）。
   const tooSmall = diagPx < 3 * PX_PER_MM;
   const raw = { circle: circleScore, underline: underlineScore, arrow: arrowScore };
   if (!tooSmall && circleScore >= Math.max(underlineScore, arrowScore) && circleScore > 0.22) return { type: 'circle', score: circleScore, raw };
-  if (!tooSmall && arrowScore > 0.45 && arrowScore >= underlineScore) return { type: 'arrow', score: arrowScore, raw };
+  if (!tooSmall && arrowScore > 0.45 && arrowScore >= underlineScore) return { type: 'arrow', score: arrowScore, raw, arrow: { atFrac: arrowAtFrac, tip: arrowAtFrac > 0.5 ? 'end' : 'start' } };
   if (!tooSmall && underlineScore > 0.22) return { type: 'underline', score: underlineScore, raw };
   return { type: 'stroke', score: 0.15 + Math.max(circleScore, underlineScore, arrowScore) * 0.3, raw }; // 自由笔：低分
 }
@@ -124,4 +128,75 @@ export function detectQueryIntent(types: EventType[]): boolean {
   const hasCircle = types.includes('circle');                  // 必须真的圈了东西
   const hasMark = types.some((t) => t === 'stroke');           // 旁边再加个潦草记号（问号/感叹号）
   return hasCircle && hasMark;                                 // tap 不再当问号—— tap 不进手势路径
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * 笔迹特征型分类器（level-1，确定性、便宜、端侧友好）—— 两段成本阶梯：
+ *   ① markup（圈/划/箭头）有干净几何模板 → 纯几何判定，准、零识别调用。
+ *   ② freeform（非模板）：几何**只做 OCR 门**——筛掉明显不是字的（单笔/近直线/太小=破折号/勾/点）
+ *      记 drawing 直接放过；其余（多笔 或 单笔够复杂）标 ocrWorthy，交 captureMark 调云端识别**定型**
+ *      （"手写 vs 画"无干净几何模板，最终由识别裁判 —— 故门要保守、偏向送 OCR，别漏真手写）。
+ *   level-2 端侧小分类器最终替掉②的云端识别；本函数是它的接缝。
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export type MarkFeatureType = 'markup' | 'handwriting' | 'drawing';
+
+export interface StrokeFeature {
+  type: MarkFeatureType;
+  confidence: number;
+  scaleRatio: number;     // mark 高 ÷ 局部正文字高（无标尺时 NaN）
+  raw: { strokeCount: number; templateScore: number; templateType: EventType; scaleRatio: number; complexity: number; ocrWorthy: boolean; tplSpan: number };
+}
+
+/** 路径复杂度 = 笔走过的总路程 ÷ bbox 对角线。近直线≈1；折返多的字/涂≈>1.6。 */
+function pathComplexity(points: StrokePoint[], bbox: NormBBox, dimW: number, dimH: number): number {
+  let len = 0;
+  for (let i = 1; i < points.length; i++) {
+    len += Math.hypot((points[i].x - points[i - 1].x) * dimW, (points[i].y - points[i - 1].y) * dimH);
+  }
+  const diag = Math.hypot(bbox[2] * dimW, bbox[3] * dimH);
+  return diag > 1 ? len / diag : 0;
+}
+
+export function classifyStrokeFeature(
+  perStroke: ScoredGesture[],
+  strokeBboxes: NormBBox[],
+  points: StrokePoint[],
+  bbox: NormBBox,
+  localCharH: number,
+  dimW: number = pageCss.w,
+  dimH: number = pageCss.h,
+): StrokeFeature {
+  const strokeCount = perStroke.length;
+  // 取每笔里最强的模板笔（圈/划/箭头）+ 记下是哪一笔（要看它的尺寸）；tap/stroke 不算模板。
+  let tplType: EventType = 'stroke';
+  let tplScore = 0;
+  let tplIdx = -1;
+  for (let i = 0; i < perStroke.length; i++) {
+    const s = perStroke[i];
+    if ((s.type === 'circle' || s.type === 'underline' || s.type === 'arrow') && s.score > tplScore) {
+      tplScore = s.score; tplType = s.type; tplIdx = i;
+    }
+  }
+  const scaleRatio = localCharH > 0 ? bbox[3] / localCharH : NaN;
+  const complexity = pathComplexity(points, bbox, dimW, dimH);
+  // **自相对**尺寸闸：模板笔的长边占整个 mark 长边的比例。
+  //  真圈/划本身就是整个 mark（占比≈1）；手写里的一个"横/口"只占整团字的一小块（占比小）。
+  //  自相对 → 不依赖字号，页边大字手写也不会被误判成 markup。
+  const tplBb = tplIdx >= 0 ? strokeBboxes[tplIdx] : null;
+  const tplSpan = tplBb ? Math.max(tplBb[2], tplBb[3]) : 0;
+  const markLong = Math.max(bbox[2], bbox[3]) || 1e-6;
+  const spanRatio = tplSpan / markLong;
+  const raw = { strokeCount, templateScore: tplScore, templateType: tplType, scaleRatio, complexity, ocrWorthy: false, tplSpan };
+
+  // ① 圈/划/箭头模板 **且这笔占满了整个 mark（它就是那个手势）** → markup（纯几何）。
+  //    自相对闸是关键：否则中文字里的"横"(=underline 1.0)/"口"(=circle) 会把整段手写误判成 markup。
+  if (tplScore >= 0.45 && spanRatio >= 0.6) {
+    return { type: 'markup', confidence: tplScore, scaleRatio, raw };
+  }
+  // ② freeform：保守 OCR 门——非太小 且 (多笔 或 单笔够复杂) → 值得送识别定型；否则散笔/线条，记 drawing。
+  const diagPx = Math.hypot(bbox[2] * dimW, bbox[3] * dimH);
+  const tooTiny = diagPx < 3 * PX_PER_MM; // ~11px：点/勾
+  raw.ocrWorthy = !tooTiny && (strokeCount >= 2 || complexity > 1.6);
+  return { type: 'drawing', confidence: 0, scaleRatio, raw };
 }

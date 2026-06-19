@@ -363,18 +363,53 @@ export async function runInterpretGesture(payload: any): Promise<{ kind: string;
  * 意图理解：读用户在页边的手写批注截图 —— ①转写手写文字 ②判断「为什么写」。
  * 几何手势（圈/划/箭头）的意图已知；手写靠这条 VLM 解读补上（Phase C）。
  */
-export async function runInterpret(payload: any): Promise<{ reading: string; intent: string }> {
+export async function runInterpret(payload: any): Promise<{ reading: string; kind: string }> {
   const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
-  if (!image) return { reading: '', intent: 'free_note' };
+  if (!image) return { reading: '', kind: 'none' };
+  // 类型分类器 + 转写器（v3：markup 由几何判，"手写 vs 画"这条无几何模板的轴交给识别——
+  // 它读这团墨是不是文字。**context-free**：只看墨图，不需要对话上下文。英文优先、中文兜底，逐字转写不翻译。
   const system =
-    '这是用户在文档页边手写的批注截图。做两件事：' +
-    '①原样转写其中的手写文字；②判断用户意图，从这四个里选最贴切的一个：' +
-    'question（在提问）、command（在下指令，如"总结这段"/"翻译"）、relation（在指出关联）、free_note（只是记想法）。' +
-    '只输出一个 JSON：{"reading":"转写的文字","intent":"question|command|relation|free_note"}。除该 JSON 外不要任何文字。';
-  const raw = await gateway(system, '转写这段手写并判断意图：', 300, image, payload?.model); // 手写转写随 inferModel 走（kimi/gemini A/B）
+    'This is a crop of ink the reader drew (white background, dark strokes). Judge the KIND of ink and transcribe any text. ' +
+    'kind: "handwriting" = legible letters / words / characters; "sketch" = a drawing / diagram / doodle / arrow / lone line, not text; ' +
+    '"mixed" = both text and a drawing; "none" = a stray dot or scribble with no content. ' +
+    'reading: if it contains text, transcribe it verbatim in its original language (the reader writes primarily English; Chinese also possible); otherwise empty. ' +
+    'Do not translate, summarize, or correct. Output only one JSON: {"kind":"handwriting|sketch|mixed|none","reading":"<text or empty>"}. No other text.';
+  const raw = await gateway(system, 'Classify and transcribe this ink:', 300, image, payload?.model);
   const j = extractJson(raw);
-  const intent = ['question', 'command', 'relation', 'free_note'].includes(j.intent) ? j.intent : 'free_note';
-  return { reading: String(j.reading || '').trim(), intent };
+  const reading = String(j.reading || '').trim();
+  const KINDS = ['handwriting', 'sketch', 'mixed', 'none'];
+  const kind = KINDS.includes(j.kind) ? j.kind : (reading ? 'handwriting' : 'none'); // 缺 kind 时按有无文字兜底
+  return { reading, kind };
+}
+
+/**
+ * 上下文分类器（v3）：判读者刚写下的一段手写，是不是想让伴读 AI 现在就回应。
+ *   respond=true：冲着 AI 来的提问/指令；respond=false：写给自己的笔记/感想（折叠不打扰）。
+ * 带与主模型同源的上下文（标注脉络 narrative + 所标 marked + 最近对话）；明确问号/疑问词/祈使偏 respond——
+ * 漏答一个真问题，比偶尔多答一句更糟。解析失败默认 respond=true。
+ */
+export async function runClassifyContext(payload: any): Promise<{ respond: boolean; reason: string }> {
+  const question = String(payload?.question || '').trim();
+  if (!question) return { respond: false, reason: '无手写文字' };
+  const narrative = String(payload?.view_narrative || '').trim();
+  const marked = String(payload?.marked || '').trim();
+  const convo: Array<{ role: string; content: string }> = Array.isArray(payload?.conversation) ? payload.conversation : [];
+  const history = convo.slice(-6).map((m) => `${m.role === 'user' ? '读者' : 'AI'}：${String(m.content || '').slice(0, 200)}`).join('\n');
+  const system =
+    '你在判断读者刚写下的一段手写，是不是想让伴读 AI 现在就回应。' +
+    'respond=true：这是冲着 AI 来的提问或指令（想要解释/回答/总结/翻译等）。' +
+    'respond=false：这只是读者写给自己的笔记、批注或感想，不需要 AI 出声。' +
+    '遇到明确问号、疑问词（什么/为什么/如何/谁/哪里）、或祈使指令，倾向 respond=true——漏答一个真问题，比偶尔多答一句更糟。' +
+    '只输出一个 JSON：{"respond":true|false,"reason":"一句话"}。除该 JSON 外不要任何文字。';
+  const user =
+    `读者刚写下：「${question}」\n` +
+    (marked ? `这一阵标注涉及：${marked}\n` : '') +
+    (narrative ? `标注脉络：${narrative}\n` : '') +
+    (history ? `\n最近对话：\n${history}\n` : '') +
+    '\n该不该现在回应？';
+  const raw = await gateway(system, user, 200, undefined, payload?.model);
+  const j = extractJson(raw);
+  return { respond: j?.respond !== false, reason: String(j?.reason || '').slice(0, 120) };
 }
 
 /** 内容解读（记忆A）：把一页文字压成一两句「这页在讲什么」，预处理流水线调用。 */

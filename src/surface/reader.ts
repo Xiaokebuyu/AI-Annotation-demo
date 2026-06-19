@@ -8,9 +8,7 @@ import { extractPageBlocks } from './renderer';
 import { grabRegion } from '../evidence/ocr';
 import { getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
 import { bboxOf, classifyScored } from '../capture/classify';
-import { resolveGesture } from '../capture/gesture';
 import { commitDiscussion } from '../core/pipeline';
-import { memorySnapshot } from '../local/memory';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
 
 /** 重排阅读流里的一项：重排出的文本块，或保留的原页图像（带 AI 解读）。 */
@@ -136,7 +134,7 @@ async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string)
   const cached = getImageExplain(state.pageIndex, source); // 已解读过 → 直接用，不再调模型
   if (cached) { cap.textContent = `图：${cached}`; delete cap.dataset.pending; return; }
   const nearby = nearbyText(source);
-  const prevSummary = memorySnapshot(state.pageId ?? '').find((m) => m.index === state.pageIndex - 1)?.summary ?? '';
+  const prevSummary = ''; // 跨页记忆撤除（押后）：图解不再带前页摘要
   try {
     const resp = await fetch('/api/explain-image', {
       method: 'POST',
@@ -383,11 +381,8 @@ function runReaderDiscussions(): void {
     if (lastSig.get(discId) === sig) continue;
     lastSig.set(discId, sig);
     const events = recs.map((r) => r.event);
-    let modes: OutputMode[] = ['summary'];
-    let eventType: EventType | undefined;
-    let intent = 'summary';
-    if (events.length === 1) { const g = resolveGesture(events); modes = g.output_modes; eventType = g.eventType; intent = g.intent; }
-    void commitDiscussion(events, performance.now(), discId, modes, eventType, intent);
+    // 重排面本轮 stub：中性提交（不分形状语义、不映射意图，语义全交模型）。待后续纳入 session 模型。
+    void commitDiscussion(events, performance.now(), discId, ['inspiration']);
   }
 }
 

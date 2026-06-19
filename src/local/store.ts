@@ -6,7 +6,7 @@
  */
 import type { NormBBox, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { PersistedDoc, PersistedMemory, PersistedPage, PersistedStroke } from '../core/store-format';
+import type { PersistedDoc, PersistedPage, PersistedStroke } from '../core/store-format';
 import { STORE_VERSION } from '../core/store-format';
 
 const DB_NAME = 'inkloop';
@@ -80,7 +80,6 @@ function page(i: number): PersistedPage | null {
   if (!current.pages[i]) {
     current.pages[i] = {
       page_index: i, reflow: null, reflow_engine: null, images: [],
-      memory: { content: null, activity: null, marks: [] },
       strokes: [], overlays: [], status: 'pending',
     };
   }
@@ -130,25 +129,6 @@ export function putImageExplain(i: number, bbox: NormBBox, explanation: string):
   const ex = p.images.find((im) => overlap(im.bbox, bbox) > 0.8);
   if (ex) ex.explanation = explanation; else p.images.push({ bbox, explanation });
   scheduleSave();
-}
-
-// ── 两段记忆 ──
-export function putMemory(i: number, mem: PersistedMemory): void {
-  const p = page(i);
-  if (!p) return;
-  p.memory = { content: mem.content, activity: mem.activity, marks: mem.marks.slice() };
-  scheduleSave();
-}
-/** 记忆A：内容解读（预处理写入）。 */
-export function putContent(i: number, content: string): void {
-  const p = page(i);
-  if (!p) return;
-  p.memory.content = content;
-  if (p.status !== 'done') p.status = 'done';
-  scheduleSave();
-}
-export function getContent(i: number): string | null {
-  return current?.pages[i]?.memory.content ?? null;
 }
 
 // ── 笔迹（每页全量存）──

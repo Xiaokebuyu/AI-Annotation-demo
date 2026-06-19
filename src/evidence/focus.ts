@@ -4,7 +4,7 @@
  *   pointInPolygon() —— 射线法"点在多边形内"；target.ts 的"圈住了什么"复用它。
  * 注：旧的 focusHint/enclosedBlocks（几何猜"圈住了什么"）已被 HMP 取证线取代、移除。
  */
-import type { StrokePoint } from '../core/contracts';
+import type { OcrTextBlock, StrokePoint } from '../core/contracts';
 import { state } from '../app/state';
 
 /** 射线投射 even-odd：点是否在闭合笔迹多边形内（归一化坐标；内/外是拓扑判定，与轴尺度无关）。 */
@@ -18,9 +18,9 @@ export function pointInPolygon(px: number, py: number, poly: StrokePoint[]): boo
   return inside;
 }
 
-/** 整页文字（按 y 聚行、阅读序）。截断防超长——一页通常远小于上限。 */
-export function pageText(maxChars = 3000): string {
-  const runs = state.textBlocks
+/** 一组文本块 → 按 y 聚行、阅读序拼出文字。任意页复用（当前页 / 前后页滑动窗）。 */
+export function blocksToText(blocks: OcrTextBlock[], maxChars = 3000): string {
+  const runs = blocks
     .filter((tb) => tb.text.trim())
     .map((tb) => ({ y: tb.bbox[1] + tb.bbox[3] / 2, h: tb.bbox[3], x: tb.bbox[0], text: tb.text }))
     .sort((a, b) => a.y - b.y || a.x - b.x);
@@ -32,4 +32,9 @@ export function pageText(maxChars = 3000): string {
   }
   const text = lines.map((ln) => { ln.runs.sort((a, b) => a.x - b.x); return ln.runs.map((r) => r.text).join(' '); }).join('\n');
   return text.length > maxChars ? text.slice(0, maxChars) + '…' : text;
+}
+
+/** 整页文字（当前页 state.textBlocks，按阅读序）。 */
+export function pageText(maxChars = 3000): string {
+  return blocksToText(state.textBlocks, maxChars);
 }

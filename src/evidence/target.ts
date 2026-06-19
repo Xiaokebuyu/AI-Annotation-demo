@@ -29,6 +29,16 @@ function overlapRatio(mark: NormBBox, obj: NormBBox): number {
 const median = (xs: number[]): number => xs.length ? [...xs].sort((a, b) => a - b)[xs.length >> 1] : 0;
 
 /**
+ * 局部正文字高（归一化）——笔迹特征分类器的"免费标尺"。
+ * 取页内文字对象 bbox 高度的中位数；无文字对象返回 0（分类器据此退化、降置信）。
+ */
+export function localCharHeight(index: SurfaceIndex | null): number {
+  if (!index) return 0;
+  const hs = index.objects.filter((o) => o.type === 'title' || o.type === 'text_block').map((o) => o.bbox[3]);
+  return median(hs);
+}
+
+/**
  * step①（PDF 路径）：用文本层 + 图像区构建**字母级** typed SurfaceIndex。
  * 把每个文本 run 按字符均分宽度拆成逐字对象——对象比任何标记都小，圈/划就能精确命中具体字（粒度=单字）。
  *  · 中日韩等宽字体：均分极准；西文比例字体：近似（够用，focus 仍能拼回 run）。

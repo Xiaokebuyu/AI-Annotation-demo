@@ -190,6 +190,8 @@ function initSettings(): void {
   const reflowModel = $id<HTMLSelectElement>('set-reflow-model');
   const sendImage = $id<HTMLInputElement>('set-send-image');
   const devOverlay = $id<HTMLInputElement>('set-dev-overlay');
+  const showRegion = $id<HTMLInputElement>('set-show-region');
+  const showRelations = $id<HTMLInputElement>('set-show-relations');
 
   // 从 settings 初始化控件
   placement.value = settings.placement;
@@ -208,6 +210,8 @@ function initSettings(): void {
   reflowModel.value = settings.reflowModel;
   sendImage.checked = settings.sendMarkImage;
   devOverlay.checked = settings.devOverlay;
+  showRegion.checked = settings.showRegion;
+  showRelations.checked = settings.showRelations;
 
   const changed = () => { bus.emit('settings:changed'); saveSettings(); };
   const clampPp = (el: HTMLInputElement, cur: number) => Math.min(100, Math.max(0, Number(el.value) || cur));
@@ -218,6 +222,8 @@ function initSettings(): void {
   ocrImage.addEventListener('change', () => { settings.ocr.image = ocrImage.value as OcrImageMode; changed(); });
   sendImage.addEventListener('change', () => { settings.sendMarkImage = sendImage.checked; changed(); });
   devOverlay.addEventListener('change', () => { settings.devOverlay = devOverlay.checked; changed(); });
+  showRegion.addEventListener('change', () => { settings.showRegion = showRegion.checked; changed(); });
+  showRelations.addEventListener('change', () => { settings.showRelations = showRelations.checked; changed(); });
   ppReflowOn.addEventListener('change', () => { settings.preprocess.reflowEnabled = ppReflowOn.checked; saveSettings(); });
   ppDigestOn.addEventListener('change', () => { settings.preprocess.digestEnabled = ppDigestOn.checked; saveSettings(); });
   ppReflow.addEventListener('change', () => { settings.preprocess.reflowPages = clampPp(ppReflow, settings.preprocess.reflowPages); ppReflow.value = String(settings.preprocess.reflowPages); saveSettings(); });

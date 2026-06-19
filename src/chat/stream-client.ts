@@ -8,10 +8,18 @@ import { appendMsg, bookMessages } from './buffer';
 export async function chatTurn(
   bookId: string,
   userContent: string,
-  opts: { system: string; model: string; maxTokens?: number; onDelta?: (full: string) => void; signal?: AbortSignal },
+  opts: { system: string; model: string; maxTokens?: number; onDelta?: (full: string) => void; signal?: AbortSignal; images?: Array<{ data: string }> },
 ): Promise<string> {
-  appendMsg(bookId, { role: 'user', content: userContent });
-  const messages = bookMessages(bookId).map((m) => ({ role: m.role, content: m.content }));
+  appendMsg(bookId, { role: 'user', content: userContent }); // 历史只存文字：图不进 buffer（避免每轮重发/滚雪球）
+  const messages: Array<{ role: string; content: unknown }> = bookMessages(bookId).map((m) => ({ role: m.role, content: m.content as unknown }));
+  // 仅本轮：若带图（被判需图片识别的内容），把最后一条 user 消息换成 [图块…, 文字]
+  if (opts.images?.length) {
+    const blocks = opts.images.map((im) => {
+      const m = /^data:(image\/[a-z]+);base64,(.+)$/.exec(im.data);
+      return m ? { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } } : null;
+    }).filter(Boolean);
+    if (blocks.length) messages[messages.length - 1] = { role: 'user', content: [...blocks, { type: 'text', text: userContent }] };
+  }
   const resp = await fetch('/api/chat', {
     method: 'POST', headers: { 'content-type': 'application/json' }, signal: opts.signal,
     body: JSON.stringify({ messages, system: opts.system, model: opts.model, maxTokens: opts.maxTokens ?? 500 }),

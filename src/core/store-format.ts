@@ -8,26 +8,13 @@
  */
 import type { NormBBox, ScreenOverlay, StrokePoint } from './contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { PageMark } from '../local/memory';
 
-export const STORE_VERSION = '0';
+export const STORE_VERSION = '1'; // bump：撤逐页记忆字段（旧 doc 缓存失效=重排一次再生）
 
 /** 一张图的解读：图本身可从 PDF 重渲，故只存 bbox + 文字解读。 */
 export interface PersistedImage {
   bbox: NormBBox;
   explanation: string;
-}
-
-/**
- * 两段记忆：
- *  - content  记忆A：本页**内容**解读（这页在讲什么）。预处理流水线填，本轮先占位 null。
- *  - activity 记忆B：用户**行为·理解**的一句概述（= 翻页摘要 summary）。
- *  - marks    记忆B 明细（手势 + 圈住原文 + AI 回应）。
- */
-export interface PersistedMemory {
-  content: string | null;
-  activity: string | null;
-  marks: PageMark[];
 }
 
 /** 一笔的低成本序列：源 stroke 无损留在 trace（ADR D3）；这里存归一化点串复原原貌。 */
@@ -41,7 +28,6 @@ export interface PersistedPage {
   reflow: ReflowBlock[] | null;   // 预排版结构（null = 未排版）
   reflow_engine: string | null;   // 产出该重排的引擎（local/hybrid/vision）—— 切引擎需重排
   images: PersistedImage[];
-  memory: PersistedMemory;
   strokes: PersistedStroke[];     // 原始笔迹（按页存，可视恢复）
   overlays: ScreenOverlay[];      // AI 卡片（按 overlay_id upsert 自带状态）
   status: 'pending' | 'reflowed' | 'done';

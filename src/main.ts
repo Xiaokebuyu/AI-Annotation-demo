@@ -1,15 +1,17 @@
 import './styles.css';
-import { recordEvent, commitDiscussion, summarizePage } from './core/pipeline';
-import { resolveGesture, isDeliberate, GESTURE_MIN_SCORE, GESTURES, INTENT_MODES, type Gesture } from './capture/gesture';
-import { classifyScored } from './capture/classify';
-import { grabRegion } from './evidence/ocr';
+import { recordEvent, captureMark, commitSessionDiscussion } from './core/pipeline';
+import { classifyScored, classifyStrokeFeature, bboxOf } from './capture/classify';
+import {
+  addMark, peekSession, clearSession, makeMark,
+  IDLE_COMMIT_MS, type Mark,
+} from './capture/session';
+import { localCharHeight } from './evidence/target';
 import { trace } from './core/trace';
 import { shortId } from './core/ids';
 import { bus, state, settings } from './app/state';
 import { getOverlays, getStrokes, removeOverlay, storedDoc, upsertOverlay } from './local/store';
-import { restorePage } from './local/memory';
 import type { ScreenOverlay } from './core/contracts';
-import type { AnnotationEvent, EventType, NormBBox, OutputMode } from './core/contracts';
+import type { AnnotationEvent, NormBBox } from './core/contracts';
 import { initRenderer, loadFile, gotoPage, setZoom, hasDocument } from './surface/renderer';
 import { renderChatSurface } from './surface/chat-surface';
 import { initInk, persistInk } from './capture/ink';
@@ -24,8 +26,6 @@ import { initDevOverlay } from './dev/dev-overlay';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
-const SESSION_WINDOW = 1200; // 手势组装窗：抬笔静默此窗即算一次手势完成（多笔合一）
-
 initRenderer({
   pageLayer: $<HTMLCanvasElement>('page-layer'),
   inkLayer: $<HTMLCanvasElement>('ink-layer'),
@@ -33,35 +33,57 @@ initRenderer({
   stageWrap: $('stage-wrap'),
 });
 
+// 区域组装（空间+时间连续）：同一小块区域里继续写的笔画并进一个 mark；附近无动作满 REGION_QUIET 才提交，
+// 最长挂 REGION_MAX_HOLD；笔落到远处=离开该区域 → 上一区域立刻收口。慢写汉字聚成一整团再识别（读得准、只回一条）。
+const REGION_QUIET_MS = 6000;     // 附近无动作多久 → 收口提交（dev 可调，按真实手速）
+const REGION_MAX_HOLD_MS = 15000; // 一个区域最长挂多久（连续涂写的安全上限）
+const REGION_NEAR = 0.06;         // "附近"：笔中心在区域 bbox 外扩此值内算同区（归一化）
+
 let sessionTrace: string | null = null;
-let pending: AnnotationEvent[] = [];
-let sessionTimer: number | undefined; // 组装一次手势（多笔合一）
-let pauseTimer: number | undefined;   // 停顿到点 → 聚类已识别手势、每簇一条讨论
+let idleTimer: number | undefined;     // 长停顿(~1–2min) → 对整段 session 综合回复
+const lastSig = new Map<string, string>(); // 防重复提交（按 book）
 
-// 本页"已识别手势会话"（过了形状门槛 或 VLM 视觉判定通过才进来）
-interface RecGesture { events: AnnotationEvent[]; gesture: Gesture; bbox: NormBBox; reading?: string; }
-const recByPage = new Map<string, RecGesture[]>();
-const recBucket = (pid: string): RecGesture[] => {
-  if (!recByPage.has(pid)) recByPage.set(pid, []);
-  return recByPage.get(pid)!;
-};
-const lastSig = new Map<string, string>(); // discId → 上轮成员签名，避免重复生成
+// 当前挂起的"区域"（单活跃区：写在一处会聚起来；落到远处则旧区先收口、此处另起）。
+let regEvents: AnnotationEvent[] = [];
+let regBbox: NormBBox | null = null;
+let regFirstAt = 0;
+let regTimer: number | undefined;
 
-function unionBBox(events: AnnotationEvent[]): NormBBox {
-  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
-  for (const e of events) {
-    const [x, y, w, h] = e.geometry.bbox;
-    x0 = Math.min(x0, x); y0 = Math.min(y0, y);
-    x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + h);
-  }
+function unionBb(a: NormBBox, b: NormBBox): NormBBox {
+  const x0 = Math.min(a[0], b[0]), y0 = Math.min(a[1], b[1]);
+  const x1 = Math.max(a[0] + a[2], b[0] + b[2]), y1 = Math.max(a[1] + a[3], b[1] + b[3]);
   return [x0, y0, x1 - x0, y1 - y0];
 }
+/** 笔中心是否落在当前区域（bbox 外扩 REGION_NEAR）内。 */
+function nearRegion(bb: NormBBox): boolean {
+  if (!regBbox) return false;
+  const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+  return cx >= regBbox[0] - REGION_NEAR && cx <= regBbox[0] + regBbox[2] + REGION_NEAR
+    && cy >= regBbox[1] - REGION_NEAR && cy <= regBbox[1] + regBbox[3] + REGION_NEAR;
+}
+/** 收口当前区域 → 解析成一个 mark（异步识别在 resolveRegion 内）。 */
+function flushRegion(): void {
+  window.clearTimeout(regTimer);
+  const events = regEvents;
+  regEvents = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
+  bus.emit('region:clear'); // dev 可视：区域收口 → 清叠层
+  if (events.length) void resolveRegion(events);
+}
 
+/** 翻页/缩放重渲：丢在途的笔（属旧页），但保留 session/idle（会话跨页、翻页不是边界事件）。 */
+function resetAssembly(): void {
+  window.clearTimeout(regTimer);
+  regEvents = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
+  bus.emit('region:clear');
+}
+
+/** 设置变更/换书：清计时 + 丢当前书 session（硬复位）。 */
 function cancelTimers(): void {
-  window.clearTimeout(sessionTimer);
-  window.clearTimeout(pauseTimer);
-  pending = [];
-  sessionTrace = null;
+  window.clearTimeout(regTimer);
+  window.clearTimeout(idleTimer);
+  regEvents = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
+  bus.emit('region:clear');
+  if (state.documentId) clearSession(state.documentId);
 }
 
 /** 手势决策 = trace + 镜像到 dev 通道（让"圈了几次/每笔判成什么/有没有被并/被丢"在通道里可见）。 */
@@ -73,146 +95,88 @@ function gtrace(o: Record<string, unknown>): void {
   }).catch(() => { /* 镜像失败不连累主链路 */ });
 }
 
-/** 按纵向邻近把已识别手势聚成"段落讨论"簇。 */
-function clusterByProximity(recs: RecGesture[]): RecGesture[][] {
-  const sorted = [...recs].sort((a, b) => a.bbox[1] - b.bbox[1]);
-  const clusters: RecGesture[][] = [];
-  const GAP = 0.06; // 纵向间隙阈值（页面归一化）
-  for (const r of sorted) {
-    const cur = clusters[clusters.length - 1];
-    const curBottom = cur ? Math.max(...cur.map((c) => c.bbox[1] + c.bbox[3])) : -1;
-    if (cur && r.bbox[1] - curBottom < GAP) cur.push(r);
-    else clusters.push([r]);
-  }
-  return clusters;
-}
+const diagOf = (scored: ReturnType<typeof classifyScored>[]) => scored.map((s) => ({ type: s.type, score: Number(s.score.toFixed(2)) }));
 
-/** VLM 视觉路径：截批次的 union bbox 局部图 → /api/interpret-gesture → 同构成 Gesture。 */
-async function resolveByVlm(batch: AnnotationEvent[]): Promise<{ gesture: Gesture; reading?: string } | null> {
-  const bb = unionBBox(batch);
-  const image = grabRegion(bb, 0.03);
-  if (!image) return null;
-  try {
-    const resp = await fetch('/api/interpret-gesture', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image, model: settings.inferModel }),
-    });
-    if (!resp.ok) return null;
-    const r = await resp.json() as { kind: string; intent: string; reading: string; confidence: number };
-    if (r.kind === 'nothing') return null;
-    // kind → 现有 GestureKind 的最贴映射（GestureKind 为 explain/emphasize/ask/note/relate）
-    const kindMap: Record<string, keyof typeof GESTURES> = {
-      circle: 'explain', underline: 'emphasize', arrow: 'relate', handwriting: 'note', abstract: 'note',
-    };
-    const baseKey = kindMap[r.kind] ?? 'note';
-    const base = GESTURES[baseKey];
-    // intent → output_modes：覆盖 baseKey 的默认（让 VLM 的 intent 起主导）
-    const im = (INTENT_MODES as Record<string, OutputMode[]>)[r.intent];
-    const gesture: Gesture = {
-      ...base,
-      label: `VLM·${r.kind}·${r.intent}`,
-      intent: (INTENTS_SET.has(r.intent) ? r.intent : base.intent) as Gesture['intent'],
-      output_modes: im ?? base.output_modes,
-    };
-    return { gesture, reading: r.reading || undefined };
-  } catch { return null; }
-}
-const INTENTS_SET = new Set(['what_is_this', 'key_point', 'question', 'relation', 'free_note', 'command']);
+/**
+ * 收口一个区域：把这团笔合成一个 mark → 落笔当时取证(captureMark) → 累积进 session。
+ * 关键：**每笔单独几何分类**后再判特征（不在合并乱线上重判——圈+划合并会毁掉干净的单笔模板信号）。
+ * 连续标注期间界面静默；语义全交模型；手写区域收口即走唯一早提交边界（区域冷却本身已是落定）。
+ */
+async function resolveRegion(batch: AnnotationEvent[]): Promise<void> {
+  const pid = batch[0].page_id;
+  const bookId = state.documentId ?? 'book';
 
-/** 组装窗结束：按 settings.gesture.routing 走 VLM 视觉判定 / 几何阈值。 */
-async function resolveAssemblyWindow(): Promise<void> {
-  const batch = pending;
-  pending = [];
-  sessionTrace = null;
-  if (!batch.length) return;
-  const bbox = unionBBox(batch);
-
-  // auto 门（P1/P2 收敛为单闸）：滤掉点按/误触；任何还剩真实笔画的簇 = 刻意 → 交 LLM。
-  // 语义（形状/圈住什么/手写/意图）全由 commitDiscussion 的合成图判，几何只给 tone gesture。
-  // 不再走 resolveByVlm 那条"判 nothing 就丢"——它会把手写整条吞掉（见 ses_d4b627a7：「她是谁」被丢）。
-  if (settings.gesture.routing === 'auto') {
-    const scoredFull = batch.map((e) => ({ e, s: classifyScored(e.stroke_points, e.geometry.bbox) }));
-    const real = scoredFull.filter((x) => x.s.type !== 'tap_region').map((x) => x.e);
-    const scored = scoredFull.map((x) => ({ type: x.s.type, score: Number(x.s.score.toFixed(2)), raw: x.s.raw }));
-    const pid = batch[0].page_id;
-    if (!real.length) {
-      gtrace({ page_id: pid, routing: 'auto', strokes: scored, resolved: '— 全是点按/误触，不触发' });
-      return;
-    }
-    const gesture = resolveGesture(real); // 几何只定 tone（圈/划/箭头/写字）；真正语义 LLM 看合成图再判
-    gtrace({ page_id: pid, routing: 'auto', strokes: scored, route: 'llm', resolved: `${gesture.label} (→ ${gesture.eventType} · ${gesture.intent}) · 交 LLM` });
-    recBucket(pid).push({ events: real, gesture, bbox: unionBBox(real) });
+  // 每笔单独分类 + 滤点按（per-stroke）
+  const scoredAll = batch.map((e) => classifyScored(e.stroke_points, e.geometry.bbox));
+  const keep = batch.map((e, i) => ({ e, s: scoredAll[i] })).filter((x) => x.s.type !== 'tap_region');
+  if (!keep.length) {
+    gtrace({ page_id: pid, strokes: diagOf(scoredAll), resolved: '— 点按/误触，不计入' });
     return;
   }
+  const realEvents = keep.map((x) => x.e);
+  const realScored = keep.map((x) => x.s);
+  const strokeBboxes = realEvents.map((e) => e.geometry.bbox);
+  const points = realEvents.flatMap((e) => e.stroke_points);
+  const bbox = bboxOf(points);
+  // 几何：判 markup（模板笔够大、跨内容），或给 freeform 标 ocrWorthy；handwriting/drawing 由 captureMark 识别定型。
+  const geom = classifyStrokeFeature(realScored, strokeBboxes, points, bbox, localCharHeight(state.surfaceIndex));
+  // 代表 event 的形状：markup 取最强模板笔（圈/划/箭头，带箭头方向）；否则按合并笔（自由笔=stroke）
+  const domScored = geom.type === 'markup' ? realScored.find((s) => s.type === geom.raw.templateType) : undefined;
+  const markScored = domScored ?? classifyScored(points, bbox);
+  const repr: AnnotationEvent = { ...realEvents[realEvents.length - 1], geometry: { bbox }, stroke_points: points, event_type: markScored.type };
+  const cap = await captureMark(repr, geom, markScored.score); // 识别定型 → cap.feature 是最终类型
+  const feature = cap.feature;
+  const mark = makeMark(repr, feature, markScored, cap.hmp, cap.markedText);
+  addMark(bookId, mark);
+  gtrace({ page_id: pid, strokes: diagOf(realScored), feature: feature.type, conf: Number(feature.confidence.toFixed(2)), shape: markScored.type, marked: cap.markedText.slice(0, 40), resolved: `mark·${feature.type}（累积静默）` });
 
-  if (settings.gesture.routing === 'vlm') {
-    const r = await resolveByVlm(batch);
-    gtrace({
-      page_id: batch[0].page_id,
-      routing: 'vlm',
-      resolved: r ? `${r.gesture.label} (→ ${r.gesture.eventType} · ${r.gesture.intent})${r.reading ? ' · 读到「' + r.reading.slice(0, 24) + '」' : ''}` : '— VLM 判 nothing，不触发',
-    });
-    if (r) recBucket(batch[0].page_id).push({ events: batch, gesture: r.gesture, bbox, reading: r.reading });
-    return;
-  }
-
-  // 几何路径：原有逻辑 + 诊断分数
-  const scored = batch.map((e) => {
-    const s = classifyScored(e.stroke_points, e.geometry.bbox);
-    return { type: s.type, score: Number(s.score.toFixed(2)), raw: s.raw };
-  });
-  const deliberate = isDeliberate(batch);
-  const gesture = deliberate ? resolveGesture(batch) : null;
-  gtrace({
-    page_id: batch[0].page_id,
-    routing: 'geometric',
-    strokes: scored,
-    threshold: GESTURE_MIN_SCORE,
-    deliberate,
-    resolved: gesture ? `${gesture.label} (→ ${gesture.eventType} · ${gesture.intent})` : '— 未过形状门槛 或 tap-only，不触发',
-  });
-  if (deliberate && gesture) recBucket(batch[0].page_id).push({ events: batch, gesture, bbox });
+  // 手写 = 唯一早提交边界事件（区域冷却已落定 + 识别已可靠定型，无需再额外等）
+  if (feature.type === 'handwriting') void commitSession(bookId, 'handwriting', mark);
 }
 
-/** 一簇手势 → 生成参数：单手势按其意图，多手势走综合，含提问则作答。VLM 路径的 reading 一并向下传。 */
-function clusterIntent(cluster: RecGesture[]): { modes: OutputMode[]; eventType?: EventType; intent: string; reading?: string } {
-  const reading = cluster.map((c) => c.reading).filter(Boolean).join(' ').trim() || undefined;
-  if (cluster.some((c) => c.gesture.kind === 'ask')) return { modes: ['question'], eventType: 'circle', intent: 'question', reading };
-  if (cluster.length === 1) return { modes: cluster[0].gesture.output_modes, eventType: cluster[0].gesture.eventType, intent: cluster[0].gesture.intent, reading };
-  return { modes: ['summary'], intent: 'summary', reading };
-}
-
-/** 停顿到点：聚类本页已识别手势，每簇一条讨论；成员没变则跳过（不重复生成）。 */
-function runDiscussions(pid: string): void {
-  const recs = recBucket(pid);
-  if (!recs.length) return;
-  for (const cluster of clusterByProximity(recs)) {
-    const events = cluster.flatMap((c) => c.events);
-    const ids = events.map((e) => e.event_id).sort();
-    const discId = 'disc_' + ids[0];
-    const sig = ids.join(',');
-    if (lastSig.get(discId) === sig) continue;
-    lastSig.set(discId, sig);
-    const { modes, eventType, intent, reading } = clusterIntent(cluster);
-    void commitDiscussion(events, performance.now(), discId, modes, eventType, intent, reading);
+/** 提交一段 session：建图 + 蒸馏 + 回应。committed 才清空 session（fold 不清、留作下次综合）。 */
+async function commitSession(bookId: string, reason: 'idle' | 'handwriting', triggerMark?: Mark): Promise<void> {
+  const session = peekSession(bookId);
+  if (!session) return;
+  // idle 综合要有实质：至少一笔手写、或锚到真实正文的标记。纯散笔/涂画（无锚内容）不触发，避免无关回复。
+  if (reason === 'idle') {
+    const substantial = session.marks.some((m) =>
+      m.feature.type === 'handwriting' || ((m.hmp?.mode === 'anchored' || m.hmp?.mode === 'mixed') && !!m.markedText.trim()));
+    if (!substantial) { clearSession(bookId); lastSig.delete('sess_' + bookId); return; }
   }
+  const sig = session.marks.map((m) => m.id).join(',') + ':' + reason + ':' + (triggerMark?.id ?? '');
+  if (lastSig.get('sess_' + bookId) === sig) return;
+  lastSig.set('sess_' + bookId, sig);
+  const discId = 'disc_' + (triggerMark?.id ?? session.marks[session.marks.length - 1].id);
+  const committed = await commitSessionDiscussion(session, reason, triggerMark, discId);
+  if (committed) { clearSession(bookId); lastSig.delete('sess_' + bookId); }
 }
 
 initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
   if (!sessionTrace) sessionTrace = shortId('trc');
   const evt = recordEvent(stroke, sessionTrace, pointerType, penUpAt);
   if (!evt) return;
-  pending.push(evt);
   persistInk(); // 每笔落盘（去抖在 store 内部）
 
-  // 1.2s：一次手势组装完 → 过形状门槛(画得像范例)才记为"已识别手势"，随手涂忽略
-  window.clearTimeout(sessionTimer);
-  sessionTimer = window.setTimeout(() => { void resolveAssemblyWindow(); }, SESSION_WINDOW);
+  // 空间连贯：挨着当前区域就并进去（重置冷却）；落到远处 → 旧区先收口、此处另起一个区域。
+  if (regBbox && !nearRegion(evt.geometry.bbox)) flushRegion();
+  regEvents.push(evt);
+  regBbox = regBbox ? unionBb(regBbox, evt.geometry.bbox) : evt.geometry.bbox;
+  if (!regFirstAt) regFirstAt = performance.now();
+  window.clearTimeout(regTimer);
+  // 附近无动作满 REGION_QUIET 才收口；连续涂写到 REGION_MAX_HOLD 强制收口。
+  if (performance.now() - regFirstAt >= REGION_MAX_HOLD_MS) flushRegion();
+  else {
+    regTimer = window.setTimeout(flushRegion, REGION_QUIET_MS);
+    bus.emit('region:update', { bbox: regBbox, near: REGION_NEAR }); // dev 可视：实时画当前组装区域
+  }
 
-  // 停顿窗：每次落笔重置；停笔 pauseSeconds 后才生成（避免打扰）
+  // 长停顿(~1–2min)无新笔 → 对整段 session 综合回复（连续标注期间界面静默）
   if (settings.gesture.enabled) {
-    const pid = evt.page_id;
-    window.clearTimeout(pauseTimer);
-    pauseTimer = window.setTimeout(() => runDiscussions(pid), settings.gesture.pauseSeconds * 1000);
+    const bookId = state.documentId ?? 'book';
+    const idleMs = (settings.gesture.idleSeconds ?? IDLE_COMMIT_MS / 1000) * 1000;
+    window.clearTimeout(idleTimer);
+    idleTimer = window.setTimeout(() => { void commitSession(bookId, 'idle'); }, idleMs);
   }
 });
 
@@ -299,7 +263,7 @@ bus.on('document:loaded', () => {
   state.overlays = [];
   for (const p of Object.values(doc.pages)) {
     const pid = `pg_${state.documentId.slice(4, 12)}_${p.page_index}`;
-    restorePage(pid, p.page_index, p.memory.content, p.memory.activity, p.memory.marks);
+    // 逐页记忆撤除（押后）：只恢复笔迹 + AI 卡片，不再 restorePage
     // 笔迹：填回 strokesByPage（按 page_id 索引）
     if (p.strokes?.length) state.strokesByPage.set(pid, p.strokes.map((s) => ({ tool: s.tool, points: s.points })));
     // 卡片：合到全局 overlays（whisper/reader 按当前 page_id 过滤显示）
@@ -311,12 +275,10 @@ let lastPageId: string | null = null;
 bus.on('page:rendered', () => {
   $('page-ind').textContent = `第 ${state.pageIndex + 1} / ${state.pageCount} 页`;
   $('zoom-ind').textContent = `${Math.round(state.zoom * 100)}%`;
-  // 翻页（非缩放重渲）：取消在途计时 + 总结上一页（喂跨页综合）
+  // 翻页（非缩放重渲）：丢在途的笔，但 session/idle 跨页保留（翻页不是边界事件）
   if (state.pageId !== lastPageId) {
-    const prev = lastPageId;
     lastPageId = state.pageId;
-    cancelTimers();
-    if (prev) void summarizePage(prev);
+    resetAssembly();
   }
 });
 

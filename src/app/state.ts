@@ -58,7 +58,8 @@ export interface Settings {
   //   routing: auto=三档自动门（记号→几何·手写→读字·拿不准→VLM 裁决，可回 nothing 不打扰）；
   //            geometric=只几何阈值（本地·0 token）；vlm=每次抬笔都截图给 VLM 判定
   //   contextLines: 手写批注的"最近正文"行数（按笔迹 y 距离取最近 N 行）
-  gesture: { enabled: boolean; pauseSeconds: number; routing: 'auto' | 'geometric' | 'vlm'; contextLines: number };
+  //   idleSeconds: 长停顿(无新笔)多少秒触发整段 session 综合回复（v3 主线，默认 90=~1.5min；可在 __inkloop.settings 调小做冒烟测试）
+  gesture: { enabled: boolean; pauseSeconds: number; routing: 'auto' | 'geometric' | 'vlm'; contextLines: number; idleSeconds?: number };
   // 推理模型：按前缀路由渠道——kimi*→moonshot；claude/gpt/gemini*→DMX。默认 gemini-3.1-flash-lite。
   // （Agent SDK 会话引擎已退役 P2；单线走无状态 /api/infer，跨标注连贯交 chat/ 每本书 buffer。）
   inferModel: string;
@@ -67,6 +68,10 @@ export interface Settings {
   sendMarkImage: boolean;
   // dev 可视化叠层：在页面上画 SurfaceIndex 对象 bbox + 命中高亮 + 右上角 HMP 浮窗（精度/粒度诊断）。默认关。
   devOverlay: boolean;
+  // dev：手写时实时画出当前"组装区域"——正在聚拢的那块(实框) + "附近"判定边界(虚框)。看连续手写聚成一团/何时另起。
+  showRegion: boolean;
+  // dev：会话提交后，把"内容关联的标注"（标注图里空间/语义相连的一组）用紫色虚框圈起来。看哪些标注被当成一组。
+  showRelations: boolean;
 }
 
 export const settings: Settings = {
@@ -76,11 +81,13 @@ export const settings: Settings = {
   reflowModel: 'gemini-3.1-flash-lite', // 重排走快模型（结构任务·延迟敏感·质量门槛低）。新字段→所有人即时生效。
   ocr: { textlayer: true, image: 'off' },
   preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
-  gesture: { enabled: true, pauseSeconds: 5, routing: 'auto', contextLines: 3 },
-  inferModel: 'gemini-3.1-flash-lite', // 默认快模型（≈端侧小模型体验·徐方向）；kimi 仍可在 dev 面板切回（中文手写更稳，待 A/B）。
-  //   注：旧用户 localStorage 里存了 kimi-k2.6 会覆盖此默认——要验证 gemini 需在 dev 面板手动选一次或清缓存。
+  gesture: { enabled: true, pauseSeconds: 5, routing: 'auto', contextLines: 3, idleSeconds: 90 },
+  inferModel: 'claude-sonnet-4-6', // 默认推理+识别模型：sonnet-4.6（DMX，中文手写实测准）。recognizeInk/chat 都随它。
+  //   注：旧用户 localStorage 里存了别的会覆盖此默认——要用 sonnet 需在 dev 面板「推理模型」选一次或清 inkloop.settings.v1。
   sendMarkImage: false, // 默认不送合成图：纯验证徐智强的取证路线（AI 只吃 HMP 事实+整页上下文）。
   devOverlay: false,    // dev bbox 叠层默认关。
+  showRegion: true,     // dev 组装区域实时可视：默认开（手写时看受影响区域）。
+  showRelations: true,  // dev 关联框：默认开（提交后看哪些标注被判为内容关联的一组）。
 };
 
 /** 持久化 dev 旋钮：刷新不丢（免每次手动重设）。模块加载即回填，故所有消费方从一开始就拿到持久值。 */

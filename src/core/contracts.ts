@@ -155,7 +155,7 @@ export const RESULT_TO_OVERLAY: Record<ResultType, OverlayType> = {
  * 等徐智强真机契约落地时再对齐字段并一起 bump。
  * ────────────────────────────────────────────────────────────────────────── */
 
-export const HMP_SCHEMA_VERSION = '1';
+export const HMP_SCHEMA_VERSION = '2';
 
 /** SurfaceObject 类型（徐智强 step①：App 渲染时提交的轻量对象表的成员）。 */
 export type SurfaceObjectType =
@@ -215,5 +215,73 @@ export interface HMP {
   crop_ref?: string;             // demo：区域/合成 crop 的 dataURL（将来换不透明 store key）
   vector_ref?: string;           // demo：白底纯笔迹图 dataURL（徐智强 evidence=vector_ref）
   confidence: number;
+  version: string;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * 标注图（mark graph）+ inference-view 契约
+ *   —— 把"一段 session 的多个 mark"建成带三类边（空间恒存/时间/语义）的图，
+ *   再蒸馏成只喂模型的精简 inference-view（丢坐标/stroke/分数）。
+ *   新增、不动冻结的 SCHEMA_VERSION='0'；HMP_SCHEMA_VERSION 已 bump 到 '2'。
+ * ────────────────────────────────────────────────────────────────────────── */
+
+export const INFERVIEW_SCHEMA_VERSION = '1';
+
+/** 笔迹特征型（正交于 EventType/MarkShape）：标记手势 / 手写文字 / 抽象画。由 stroke 特征判。 */
+export type MarkFeatureType = 'markup' | 'handwriting' | 'drawing';
+
+/** 标注图边的种类。 */
+export type MarkEdgeKind = 'spatial' | 'temporal' | 'semantic';
+
+/** 时间×空间四象限：近/近=一口气、近时远空=扫读、远时近空=回访、远/远=另起。 */
+export type QuadrantLabel = 'one_action' | 'sweep' | 'revisit' | 'separate';
+
+/** 标注图节点 = 一个 mark（1.2s 组装出的一次手势）的取证摘要。 */
+export interface MarkNode {
+  mark_id: string;
+  page_id: string;
+  shape: MarkShape;                 // 中性几何事实
+  feature_type: MarkFeatureType;
+  feature_confidence: number;
+  bbox: NormBBox;
+  t: number;                        // 组装时刻（performance.now ms）
+  mode: HmpMode;
+  object_hint: HmpObjectHint;
+  target_object_refs: string[];
+  text_hint?: string;
+  text?: string;                    // 落笔当时解析好的"所标内容"（结构原文+转写）；跨页 session 提交时不再依赖 live index
+}
+
+/** 标注图的边：两 mark 之间的关联（语义边可带方向）。 */
+export interface MarkEdge {
+  from: string;                     // mark_id
+  to: string;                       // mark_id
+  kind: MarkEdgeKind;
+  rel: string;                      // spatial:'proximity'|'containment'|'same_target'；temporal:'before'；semantic:'arrow'|'points_at'
+  weight: number;                   // 0–1
+  quadrant?: QuadrantLabel;         // 时间边携带的时空象限
+  direction?: 'a_to_b';             // 箭头方向
+}
+
+/** 标注图 = 一段 session 的 mark 节点 + 三类边（可跨页）。 */
+export interface MarkGraph {
+  surface_ids: string[];
+  nodes: MarkNode[];
+  edges: MarkEdge[];
+  version: string;
+}
+
+/** inference-view：标注图蒸馏成的精简推理载荷（确定性产出，丢坐标/stroke/分数）。 */
+export interface InferenceView {
+  view_id: string;
+  trigger: 'idle' | 'handwriting';
+  narrative: string;                // 有序关系叙事
+  marked: string;                   // 所标内容（结构原文 + 转写）
+  page_context?: string;            // 压短的整页上下文（仅消歧）
+  question?: string;                // handwriting 触发时用户写的那句
+  crop?: { role: 'ink' | 'composite'; data: string };  // 仅文字表达不了时
+  anchor_refs: string[];            // 回屏锚点对象（不给模型坐标）
+  anchor_bbox: NormBBox;            // 锚到哪（最近一笔）
+  page_id: string;
   version: string;
 }

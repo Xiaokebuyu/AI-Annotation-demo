@@ -9,9 +9,8 @@ import { setPageSize, GUTTER_W } from '../core/transform';
 import { trace } from '../core/trace';
 import { reflowLocal } from './reflow';
 import { wrapSurfaceIndex } from '../evidence/target';
-import { setContent } from '../local/memory';
 import { bus, settings, state } from '../app/state';
-import { getContent, getReflow, openDoc, putContent, putReflow } from '../local/store';
+import { getReflow, openDoc, putReflow } from '../local/store';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -184,19 +183,7 @@ export async function preprocess(reflowCap: number, digestCap: number): Promise<
             const rb = reflowLocal(blocks);
             if (rb.length) putReflow(i, 'local', rb);
           }
-          if (i < digestCap && !getContent(i)) {
-            const text = blocks.map((b) => b.text).join(' ').slice(0, 4000);
-            const resp = await fetch('/api/digest', {
-              method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }),
-            });
-            if (resp.ok) {
-              const d = await resp.json().catch(() => null);
-              if (d?.digest) {
-                setContent(`pg_${docId.slice(4, 12)}_${i}`, i, String(d.digest));
-                putContent(i, String(d.digest));
-              }
-            }
-          }
+          // 记忆A（digest 内容解读）撤除：逐页持久记忆押后，本轮不预处理。
         }
       } catch { /* 跳过该页 */ }
       bus.emit('preprocess:progress', i + 1, cap);
