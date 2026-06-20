@@ -45,12 +45,26 @@ function ensureEls(): void {
  * 提交后画"内容关联"：标注图里**非时间边（空间/语义，含 about）**所连的标注——
  * 每条关联标注一个小紫框 + 关联对之间一条紫虚线。近/远都清楚（远的不会糊成一整页大框）。
  */
+/** dev 诊断：把"为什么没画关联框"的判定每次发到 telemetry（仅 graph:built 那次记一条，避免刷屏）。 */
+let logNextRel = false;
+function mirrorRelViz(d: Record<string, unknown>): void {
+  if (!logNextRel) return;
+  logNextRel = false;
+  void fetch('/api/__debug/event', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ kind: 'relviz', ts: new Date().toISOString(), ...d }),
+  }).catch(() => { /* 诊断失败不连累 */ });
+}
+
 function drawRelations(): void {
   if (!relLayer) return;
   const W = pageCss.w, H = pageCss.h;
   relLayer.style.width = W + 'px';
   relLayer.style.height = H + 'px';
-  if (!settings.showRelations || !lastGraph) { relLayer.innerHTML = ''; return; }
+  if (!settings.showRelations || !lastGraph) {
+    mirrorRelViz({ bail: !settings.showRelations ? 'showRelations=off' : 'no-graph', showRelations: settings.showRelations });
+    relLayer.innerHTML = ''; return;
+  }
   // 当前页节点的中心/框（px）
   const pos = new Map<string, { cx: number; cy: number; x: number; y: number; w: number; h: number }>();
   for (const n of lastGraph.nodes) {
@@ -60,6 +74,14 @@ function drawRelations(): void {
   }
   // 关联 = 非 separate：空间/语义边恒算 + 时间边除"远时远空(separate)"外都算（一口气/扫读/回访）。
   const edges = lastGraph.edges.filter((e) => (e.kind !== 'temporal' || e.quadrant !== 'separate') && pos.has(e.from) && pos.has(e.to));
+  mirrorRelViz({
+    statePageId: state.pageId, pageCss: { w: Math.round(W), h: Math.round(H) },
+    nodes: lastGraph.nodes.length, nodesOnPage: pos.size,
+    nodePages: [...new Set(lastGraph.nodes.map((n) => n.page_id))],
+    allEdges: lastGraph.edges.map((e) => `${e.kind}/${e.quadrant ?? e.rel}`),
+    keptEdges: edges.length,
+    bail: !edges.length ? (pos.size < 2 ? 'no-nodes-on-page' : 'all-edges-separate-or-offpage') : 'drew',
+  });
   if (!edges.length) { relLayer.innerHTML = ''; return; }
   const involved = new Set<string>();
   let lines = '';
@@ -144,6 +166,6 @@ export function initDevOverlay(): void {
   bus.on('settings:changed', refresh);
   bus.on('region:update', (c) => { lastRegion = c as { bbox: number[]; near: number }; drawRegion(); });
   bus.on('region:clear', () => { lastRegion = null; drawRegion(); });
-  bus.on('graph:built', (g) => { lastGraph = g as MarkGraph; drawRelations(); });
+  bus.on('graph:built', (g) => { lastGraph = g as MarkGraph; logNextRel = true; drawRelations(); });
   refresh();
 }
