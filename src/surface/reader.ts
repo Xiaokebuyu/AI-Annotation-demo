@@ -1,4 +1,4 @@
-import type { AnnotationEvent, EventType, NormBBox, OutputMode, ScreenOverlay, StrokePoint } from '../core/contracts';
+import type { AnnotationEvent, EventType, NormBBox, ScreenOverlay, StrokePoint } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
 import type { ReflowBlock } from './reflow';
 import { bus, settings, state } from '../app/state';
@@ -8,7 +8,6 @@ import { extractPageBlocks } from './renderer';
 import { grabRegion } from '../evidence/ocr';
 import { getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
 import { bboxOf, classifyScored } from '../capture/classify';
-import { commitDiscussion } from '../core/pipeline';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
 
 /** 重排阅读流里的一项：重排出的文本块，或保留的原页图像（带 AI 解读）。 */
@@ -62,14 +61,8 @@ function nearestBlockByBbox(bb: NormBBox): BlockRef | null {
   return best;
 }
 
-interface RecStroke { event: AnnotationEvent; kind: EventType; score: number; }
-const pendingByBlock = new Map<string, RecStroke[]>();
-const lastSig = new Map<string, string>();
-let pauseTimer: number | undefined;
-
 const inkStrokes: { x: number; y: number }[][] = []; // 已落的笔迹（内容坐标）
 let live: { x: number; y: number }[] | null = null;
-const DISC = 'disc_r_';
 
 // ── 渲染 ──
 /** 把一个重排文本块建成 DOM 节点（标题/段落/列表）。流式追加与整页渲染共用，保证两条路样式一致。 */
@@ -402,36 +395,20 @@ function makeEvent(source: NormBBox, kind: EventType, pts: StrokePoint[]): Annot
 
 function onPenUp(raw: { x: number; y: number }[]): void {
   if (raw.length < 2) return;
-  const w = el.clientWidth || 1;
-  const h = el.clientHeight || 1;
-  const norm: StrokePoint[] = raw.map((p, i) => ({ x: p.x / w, y: p.y / h, t: i, pressure: 0.5 }));
-  const scored = classifyScored(norm, bboxOf(norm), w, h); // 用 reader 画布尺寸判形状
   const ref = hitBlock(raw);
-  if (!ref) return; // 没画在任何段上 → 不入讨论
-  const list = pendingByBlock.get(ref.id) ?? [];
-  list.push({ event: makeEvent(ref.source, scored.type, norm), kind: scored.type, score: scored.score });
-  pendingByBlock.set(ref.id, list);
+  if (!ref) return; // 没画在任何段上 → 不入
   if (!settings.gesture.enabled) return;
-  window.clearTimeout(pauseTimer);
-  pauseTimer = window.setTimeout(runReaderDiscussions, settings.gesture.pauseSeconds * 1000);
-}
-
-function deliberate(recs: RecStroke[]): boolean {
-  if (recs.some((r) => r.score >= 0.4)) return true;            // 有一笔像模板
-  return recs.filter((r) => r.kind === 'stroke').length >= 2;    // 或成段手写
-}
-
-function runReaderDiscussions(): void {
-  for (const [blockId, recs] of pendingByBlock) {
-    if (!deliberate(recs)) continue;
-    const sig = recs.map((r) => r.event.event_id).join(',');
-    const discId = DISC + blockId;
-    if (lastSig.get(discId) === sig) continue;
-    lastSig.set(discId, sig);
-    const events = recs.map((r) => r.event);
-    // 重排面本轮 stub：中性提交（不分形状语义、不映射意图，语义全交模型）。待后续纳入 session 模型。
-    void commitDiscussion(events, performance.now(), discId, ['inspiration']);
-  }
+  // 内容坐标 → 命中块的 PDF 归一化坐标（落进块 bbox，供 resolveTarget 命中该块的字符对象）
+  const top = ref.el.offsetTop, bh = ref.el.offsetHeight || 1;
+  const c01 = (v: number) => Math.max(0, Math.min(1, v));
+  const pts: StrokePoint[] = raw.map((p, i) => ({
+    x: ref.source[0] + c01(p.x / (el.clientWidth || 1)) * ref.source[2],
+    y: ref.source[1] + c01((p.y - top) / bh) * ref.source[3],
+    t: i, pressure: 0.5,
+  }));
+  const scored = classifyScored(pts, bboxOf(pts));
+  // 当正常 page-ledger mark：发 bus 给 main 走 resolveRegion（落账本 + 跨视图 + 持久 + 同享 session/idle）
+  bus.emit('reader:gesture', { event: makeEvent(ref.source, scored.type, pts), stroke: { tool: 'pen', points: pts } });
 }
 
 export function initReader(readerEl: HTMLElement): void {

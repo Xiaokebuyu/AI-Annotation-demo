@@ -25,6 +25,7 @@ import { initInsightPanel } from './surface/insight-panel';
 import { initToolbar } from './surface/toolbar';
 import { initDevDrawer, toggleDrawer } from './dev/dev-drawer';
 import { initDevOverlay } from './dev/dev-overlay';
+import { initConsole } from './dev/console';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -35,10 +36,9 @@ initRenderer({
   stageWrap: $('stage-wrap'),
 });
 
-// 区域组装（空间+时间连续）：同一小块区域里继续写的笔画并进一个 mark；附近无动作满 REGION_QUIET 才提交，
-// 最长挂 REGION_MAX_HOLD；笔落到远处=离开该区域 → 上一区域立刻收口。慢写汉字聚成一整团再识别（读得准、只回一条）。
+// 区域组装（空间+时间连续）：同一小块区域里继续写的笔画并进一个 mark；附近无动作满 REGION_QUIET 才提交；
+// 笔落到远处=离开该区域 → 上一区域立刻收口。无书写时长上限——慢写整段保持静默、聚成一整团再识别（读得准、只回一条）。
 const REGION_QUIET_MS = 6000;     // 附近无动作多久 → 收口提交（dev 可调，按真实手速）
-const REGION_MAX_HOLD_MS = 15000; // 一个区域最长挂多久（连续涂写的安全上限）
 const REGION_NEAR = 0.06;         // "附近"：笔中心在区域 bbox 外扩此值内算同区（归一化）
 
 let sessionTrace: string | null = null;
@@ -77,7 +77,7 @@ function nearDiag(bb: NormBBox): Record<string, number> {
 }
 
 /** 区域收口的原因（进 dev 通道，定位"连续书写被切到新区"）。 */
-type FlushReason = 'far-stroke' | 'quiet-6s' | 'max-hold' | 'manual';
+type FlushReason = 'far-stroke' | 'quiet-6s' | 'manual';
 
 /** 收口当前区域 → 解析成一个 mark（异步识别在 resolveRegion 内）。reason/diag 镜像到遥测。 */
 function flushRegion(reason: FlushReason = 'manual', diag: Record<string, number> | null = null): void {
@@ -198,12 +198,9 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
   regBbox = regBbox ? unionBb(regBbox, evt.geometry.bbox) : evt.geometry.bbox;
   if (!regFirstAt) regFirstAt = performance.now();
   window.clearTimeout(regTimer);
-  // 附近无动作满 REGION_QUIET 才收口；连续涂写到 REGION_MAX_HOLD 强制收口。
-  if (performance.now() - regFirstAt >= REGION_MAX_HOLD_MS) flushRegion('max-hold');
-  else {
-    regTimer = window.setTimeout(() => flushRegion('quiet-6s'), REGION_QUIET_MS);
-    bus.emit('region:update', { bbox: regBbox, near: REGION_NEAR }); // dev 可视：实时画当前组装区域
-  }
+  // 收口只靠两个真实信号：走到别处(far-stroke) 或 停笔满 REGION_QUIET。不设书写时长上限——慢写整段保持静默。
+  regTimer = window.setTimeout(() => flushRegion('quiet-6s'), REGION_QUIET_MS);
+  bus.emit('region:update', { bbox: regBbox, near: REGION_NEAR }); // dev 可视：实时画当前组装区域
 
   // 长停顿(~1–2min)无新笔 → 对整段 session 综合回复（连续标注期间界面静默）
   if (settings.gesture.enabled) {
@@ -216,6 +213,17 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
 
 // 设置变化时取消在途计时（避免旧设置下的延迟触发）
 bus.on('settings:changed', cancelTimers);
+
+// 重排面手势 = 正常 page-ledger mark：reader 把命中块的 PDF-norm 事件发来，走与原版页同一条
+// resolveRegion（落账本 + 跨视图渲染 + 持久 + 同享 session/idle 综合）。坐标已在 reader 侧映回原页。
+bus.on('reader:gesture', (p) => {
+  const { event, stroke } = p as { event: AnnotationEvent; stroke: Stroke };
+  // 笔迹即时进 PDF 页 strokesByPage（原版页 redraw 用它）→ 切回原版立刻可见；reload 由 mark 账本重建。
+  const arr = state.strokesByPage.get(event.page_id) ?? [];
+  arr.push(stroke);
+  state.strokesByPage.set(event.page_id, arr);
+  void resolveRegion([event], [stroke], { reason: 'reader' }); // 内含 strokeMarkIds.set → 擦/撤可定位
+});
 
 // page_id 形如 pg_{hash8}_{idx} → 取末段为页号
 function pageIdxOf(pageId: string): number {
@@ -261,6 +269,7 @@ initDevDrawer({
   closeBtn: $('drawer-close'),
 });
 initDevOverlay();
+initConsole();
 
 const fileIn = $<HTMLInputElement>('file-in');
 fileIn.addEventListener('change', () => {
@@ -386,6 +395,7 @@ async function restoreFromLedger(): Promise<void> {
   state.overlays = [];
   for (const t of turns) {
     if (t.overlay_state === 'dismissed') continue;
+    t.overlay.object_refs = t.anchor.object_refs; // 跨视图锚（兼容早于 object_refs 的旧快照）
     state.overlays.push(t.overlay);
     appendMsg(docId, { role: 'user', content: t.prompt_snapshot });
     appendMsg(docId, { role: 'assistant', content: t.ai_reply });
