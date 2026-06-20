@@ -138,6 +138,7 @@ export interface ScreenOverlay {
   created_at: string;
   state: OverlayState;
   result_type: ResultType;
+  object_refs?: string[];  // 锚的字符对象 id（= HMP target_object_refs / view.anchor_refs）；跨视图按 ref 定位
 }
 
 export const RESULT_TO_OVERLAY: Record<ResultType, OverlayType> = {

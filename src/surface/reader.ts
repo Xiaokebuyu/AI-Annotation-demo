@@ -6,7 +6,7 @@ import { reflowProviders, reflowAiStream } from './reflow-provider';
 import { reflowLocal } from './reflow';
 import { extractPageBlocks } from './renderer';
 import { grabRegion } from '../evidence/ocr';
-import { getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
+import { getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
 import { bboxOf, classifyScored } from '../capture/classify';
 import { commitDiscussion } from '../core/pipeline';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
@@ -42,6 +42,25 @@ function buildIndex(blocks: ReflowBlock[]): void {
 }
 /** 字符对象 id → 重排块 id（B 阶段按 ref 在重排视图定位 marks/旁注用）。 */
 export function getCharToBlock(): Map<string, string> { return charToBlock; }
+
+/** 一组对象 ref → 它们所在的重排块（取第一个命中的块）。 */
+function resolveBlockForRefs(refs: string[]): BlockRef | null {
+  for (const r of refs) {
+    const bid = charToBlock.get(r);
+    if (bid) { const ref = blockRefs.find((b) => b.id === bid); if (ref) return ref; }
+  }
+  return null;
+}
+/** 几何就近兜底：ref 空/未命中（如空白手写、旧缓存、VLM）时，取 source bbox y 中心最近的块。 */
+function nearestBlockByBbox(bb: NormBBox): BlockRef | null {
+  const aMid = bb[1] + bb[3] / 2;
+  let best: BlockRef | null = null, bestD = Infinity;
+  for (const ref of blockRefs) {
+    const d = Math.abs((ref.source[1] + ref.source[3] / 2) - aMid);
+    if (d < bestD) { bestD = d; best = ref; }
+  }
+  return best;
+}
 
 interface RecStroke { event: AnnotationEvent; kind: EventType; score: number; }
 const pendingByBlock = new Map<string, RecStroke[]>();
@@ -127,8 +146,7 @@ function render(items: RenderItem[], warn: string = ''): void {
   wrap.appendChild(col);
   el.insertBefore(wrap, inkCv);
   pageWrap = wrap;
-  // 把已有的本页讨论注重新贴回（切引擎/重渲后不丢）
-  state.overlays.filter((o) => o.overlay_id.startsWith(DISC) && o.page_id === state.pageId).forEach(renderNote);
+  // 旁注重贴移到 renderFinal（须在 buildIndex 之后，renderNote 才解析得出块）
   resizeInk();
 }
 
@@ -190,6 +208,20 @@ function renderFinal(blocks: ReflowBlock[], provisional = false): void {
   const items: RenderItem[] = [...blocks, ...figures].sort((a, b) => a.source[1] - b.source[1]);
   render(items, provisional ? '' : unreliableWarn());
   buildIndex(blocks); // 重建 字符对象→块 映射（跨视图锚）
+  void highlightMarks(); // 高亮被标注过的块
+  state.overlays.filter((o) => o.page_id === state.pageId).forEach(renderNote); // 本页所有旁注按 ref 贴回（在 buildIndex 之后）
+}
+
+/** 在重排视图里高亮"被标注过"的块（mark 锚的对象 → 块；ref 空走几何就近）。 */
+async function highlightMarks(): Promise<void> {
+  const docId = state.documentId;
+  if (!docId) return;
+  const marks = await getFoldedMarks(docId);
+  for (const m of marks) {
+    if (m.page_id !== state.pageId) continue;
+    const ref = resolveBlockForRefs(m.hmp?.target_object_refs ?? []) ?? nearestBlockByBbox(m.bbox);
+    if (ref) ref.el.classList.add('reader-mark-highlight');
+  }
 }
 
 // 流式渲染：首块到达时清占位、起空列；逐段 append（不插图，收尾 renderFinal 再按 y 插图 + 建 refs）。
@@ -288,15 +320,16 @@ async function prewarmNext(provider: string): Promise<void> {
 }
 
 // ── 行内 AI 注 ──
+/** 任意 overlay（不限来源）→ 按对象 ref 定位到所属重排块、贴行内注；ref 空/未命中走几何就近兜底。 */
 function renderNote(o: ScreenOverlay): void {
-  const blockId = o.overlay_id.slice(DISC.length);
   el.querySelector(`.reader-note[data-for="${o.overlay_id}"]`)?.remove();
-  const ref = blockRefs.find((b) => b.id === blockId);
-  if (!ref || o.state === 'dismissed') { layoutNotes(); return; }
+  if (o.state === 'dismissed') { layoutNotes(); return; }
+  const ref = resolveBlockForRefs(o.object_refs ?? []) ?? nearestBlockByBbox(o.geometry.anchor_bbox);
+  if (!ref) { layoutNotes(); return; }
   const note = document.createElement('div');
   note.className = 'reader-note';
   note.dataset.for = o.overlay_id;
-  note.dataset.block = blockId;
+  note.dataset.block = ref.id;
   note.textContent = o.display_text;
   (pageWrap ?? el).appendChild(note); // 绝对定位进右侧留白，不进文档流 → 不扰乱正文排版
   layoutNotes();
@@ -432,8 +465,8 @@ export function initReader(readerEl: HTMLElement): void {
   bus.on('view:changed', rebuild);
   bus.on('page:rendered', rebuild);
   bus.on('settings:changed', rebuild);
-  bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; if (ov.overlay_id.startsWith(DISC)) renderNote(ov); });
+  bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode === 'reader' && ov.page_id === state.pageId) renderNote(ov); });
   bus.on('overlay:remove', (id) => el.querySelector(`.reader-note[data-for="${id as string}"]`)?.remove());
-  bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; if (ov.overlay_id.startsWith(DISC)) renderNote(ov); });
+  bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode === 'reader' && ov.page_id === state.pageId) renderNote(ov); });
   window.addEventListener('resize', () => { if (settings.viewMode === 'reader') { resizeInk(); layoutNotes(); } });
 }

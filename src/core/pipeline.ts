@@ -1,5 +1,5 @@
 import type { AnnotationEvent, EventType, HMP, InferenceRequest, InferenceResult, InferenceView, MarkFeatureType, MarkShape, NormBBox, OCRResult, OutputMode, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
-import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
+import { RESULT_TO_OVERLAY, SCHEMA_VERSION, INFERVIEW_SCHEMA_VERSION } from './contracts';
 import { DEVICE_ID, SESSION_ID, shortId, sha256Hex } from './ids';
 import { appendAiTurnEntry, getReflow, setSynthesisWatermark } from '../local/store';
 import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
@@ -283,6 +283,8 @@ export async function commitDiscussion(
   let result: InferenceResult;
   let memoryPages = 0;
   let hasImage = false;
+  let anchorRefs: string[] = []; // 提升出 try：落账本(B0)在 try 外要用
+  let userContent = '';
   const bookId = state.documentId ?? 'book';
   try {
     // v3 合龙①②：理解走每本书有状态 chat buffer（流式），回应实时落 anchor-layer（页内按 HMP 锚点）。
@@ -296,8 +298,8 @@ export async function commitDiscussion(
       : '解释所标处是什么、关键在哪，或顺着它点一句——但始终扣住所标这几个字。';
     // 先把"所标处"摆在最前、最重；整页文字仅作消歧上下文放在后面、压短，免得模型跑题到整页主题。
     const ctx = pgText ? `\n\n（仅供消歧的本页上下文，别据此跑题到整页主题）：${pgText.slice(0, 700)}` : '';
-    const userContent = `读者在原文上${verb}了这一处：「${marked}」。${ask}${ctx}`;
-    const anchorRefs = hmp?.target_object_refs ?? [];
+    userContent = `读者在原文上${verb}了这一处：「${marked}」。${ask}${ctx}`;
+    anchorRefs = hmp?.target_object_refs ?? [];
     trace('InferenceRequest(disc)', { mode: 'chat-buffer', page_id: evt.page_id, gesture: evt.event_type, intent: finalIntent, marked: marked.slice(0, 60), buffer_turns: bookMessages(bookId).length } as unknown as Record<string, unknown>);
     const full = await chatTurn(bookId, userContent, {
       system: CHAT_SYSTEM, model: settings.inferModel,
@@ -352,9 +354,23 @@ export async function commitDiscussion(
   const overlay = buildOverlay(result, evt);
   overlay.overlay_id = discId;
   overlay.geometry = { anchor_bbox: evt.geometry.bbox }; // 锚到这簇手势，留白里按其 y 对齐
+  overlay.object_refs = anchorRefs; // 跨视图锚：旁注锚在对象上 → 原版/重排都解析得出
   trace('ScreenOverlay(disc)', overlay as unknown as Record<string, unknown>);
   state.overlays.push(overlay);
   bus.emit('overlay:add', overlay);
+
+  // 落账本：reader/段落讨论的回复也进书日志（此前只有 PDF 主路落账）→ reader 旁注持久 + 跨视图
+  void appendAiTurnEntry({
+    document_id: bookId, page_id: evt.page_id, page_index: state.pageIndex,
+    overlay_id: discId, overlay, overlay_state: 'shown', user_edited_text: null,
+    ai_reply: result.content,
+    anchor: { surface_id: evt.page_id, mark_ids: [], object_refs: anchorRefs },
+    inference_view: { view_id: shortId('view'), trigger: 'idle', narrative: '', marked: (hmp?.text_hint || focusStr || ''), anchor_refs: anchorRefs, anchor_bbox: evt.geometry.bbox, page_id: evt.page_id, version: INFERVIEW_SCHEMA_VERSION },
+    prompt_snapshot: userContent,
+    system_prompt_hash: await SYS_HASH_P,
+    settings_snapshot: { inferModel: settings.inferModel, reflowProvider: settings.reflowProvider },
+    trigger: 'discussion', model: result.model_name, supersedes: null,
+  });
   mark('total', performance.now() - penUpAt);
 }
 
@@ -580,6 +596,7 @@ export async function commitSessionDiscussion(
   const overlay = buildOverlay(result, anchorMark.event);
   overlay.overlay_id = discId;
   overlay.geometry = { anchor_bbox: view.anchor_bbox };
+  overlay.object_refs = view.anchor_refs; // 跨视图锚
   state.overlays.push(overlay);
   bus.emit('overlay:add', overlay);
 
