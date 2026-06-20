@@ -9,10 +9,10 @@ import { localCharHeight } from './evidence/target';
 import { trace } from './core/trace';
 import { shortId } from './core/ids';
 import { bus, state, settings } from './app/state';
-import { getOverlays, getStrokes, removeOverlay, storedDoc, upsertOverlay } from './local/store';
+import { getOverlays, getStrokes, listBooks, removeOverlay, setLastReadPage, storedDoc, upsertOverlay } from './local/store';
 import type { ScreenOverlay } from './core/contracts';
 import type { AnnotationEvent, NormBBox } from './core/contracts';
-import { initRenderer, loadFile, gotoPage, setZoom, hasDocument } from './surface/renderer';
+import { initRenderer, loadFile, reopenBook, gotoPage, setZoom, hasDocument } from './surface/renderer';
 import { renderChatSurface } from './surface/chat-surface';
 import { initInk, persistInk } from './capture/ink';
 import { initWhisper } from './surface/whisper';
@@ -221,6 +221,63 @@ fileIn.addEventListener('change', () => {
   if (file) void loadFile(file);
 });
 
+// ── 书架：列出已持久存储的书，点击免重导打开（阶段一）──
+const recentBooks = $('recent-books');
+const recentPanel = $('recent-panel');
+const recentToggle = $<HTMLButtonElement>('recent-toggle');
+
+function fmtWhen(iso: string): string {
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d.getTime())) return '';
+  const p = (n: number) => `${n}`.padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+async function renderRecent(container: HTMLElement, opts?: { withCap?: boolean; emptyHint?: boolean }): Promise<void> {
+  const books = await listBooks();
+  container.innerHTML = '';
+  if (!books.length) {
+    if (opts?.emptyHint) {
+      const e = document.createElement('div');
+      e.className = 'recent-empty';
+      e.textContent = '还没有已保存的书';
+      container.appendChild(e);
+    }
+    return;
+  }
+  if (opts?.withCap) {
+    const cap = document.createElement('p');
+    cap.className = 'recent-cap';
+    cap.textContent = '最近打开（已保存，免重导）';
+    container.appendChild(cap);
+  }
+  for (const b of books) {
+    const item = document.createElement('div');
+    item.className = 'recent-item';
+    item.title = `${b.filename}（${b.page_count} 页）`;
+    const name = document.createElement('span');
+    name.className = 'ri-name';
+    name.textContent = b.filename || '(未命名)';
+    const meta = document.createElement('span');
+    meta.className = 'ri-meta';
+    meta.textContent = `${b.page_count}页 · ${fmtWhen(b.saved_at)}`;
+    item.append(name, meta);
+    item.addEventListener('click', () => { recentPanel.hidden = true; void reopenBook(b.document_id, b.filename); });
+    container.appendChild(item);
+  }
+}
+
+void renderRecent(recentBooks, { withCap: true }); // 启动即在空状态屏列出
+
+recentToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (recentPanel.hidden) { void renderRecent(recentPanel, { emptyHint: true }); recentPanel.hidden = false; }
+  else recentPanel.hidden = true;
+});
+document.addEventListener('click', (e) => {
+  if (!recentPanel.hidden && !recentPanel.contains(e.target as Node) && e.target !== recentToggle) recentPanel.hidden = true;
+});
+
 // 载入合成聊天 surface（徐智强 step① App-agnostic 验证：原生吐 SurfaceIndex）
 $('load-chat').addEventListener('click', () => renderChatSurface());
 
@@ -256,6 +313,7 @@ bus.on('document:loaded', () => {
   document.body.classList.add('doc-loaded');
   $('empty-state').style.display = 'none';
   $('doc-name').textContent = state.fileName;
+  void renderRecent(recentBooks, { withCap: true }); // 刷新书架（新导入的书下次回到空屏即可见）
   if (state.documentId) openBook(state.documentId); // 开书非阻塞预热每本书对话 buffer（≈0ms，纯建数组）
   // 从持久化恢复：两段记忆、原始笔迹、AI 卡片（重排/图解缓存由 reader 按需读 store）
   const doc = storedDoc();
@@ -279,6 +337,7 @@ bus.on('page:rendered', () => {
   if (state.pageId !== lastPageId) {
     lastPageId = state.pageId;
     resetAssembly();
+    setLastReadPage(state.pageIndex); // 记阅读位置（去抖落盘），重开跳回
   }
 });
 

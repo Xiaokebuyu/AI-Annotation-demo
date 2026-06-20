@@ -217,6 +217,56 @@ body.doc-loaded #stage::after {
 }
 .primary-btn:hover { background: #403a31; }
 
+/* 书架 / 最近打开（持久存储的书，免重导） */
+.recent-books {
+  margin-top: 20px;
+  width: min(440px, 90%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+.recent-books:empty { display: none; }
+.recent-books .recent-cap { font-size: 12px; color: var(--hint); margin: 0 2px 2px; }
+.recent-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--page);
+  cursor: pointer;
+  font: 13px var(--sans);
+  color: var(--ink);
+}
+.recent-item:hover { background: #efece4; border-color: var(--ai-line); }
+.recent-item .ri-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-item .ri-meta { font: 11px var(--mono); color: var(--hint); white-space: nowrap; flex-shrink: 0; }
+
+/* topbar「最近」下拉（已开文档时切换用） */
+#topbar { position: relative; }
+.recent-panel {
+  position: absolute;
+  top: 100%;
+  right: 12px;
+  z-index: 30;
+  width: min(420px, 80vw);
+  max-height: 60vh;
+  overflow-y: auto;
+  margin-top: 4px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+}
+.recent-panel .recent-empty { font-size: 12px; color: var(--hint); padding: 6px 8px; }
+
 /* ═══ 底部工具栏：规范 §4.4 — 48px 触控目标，选中反色 ═══ */
 #toolbar {
   position: absolute;

@@ -17,6 +17,18 @@ export interface PersistedImage {
   explanation: string;
 }
 
+/**
+ * 书籍持久化（阶段一）：导入的 PDF 原始字节落库，重开即免重导。
+ * 存 Blob（IndexedDB 原生支持），键 document_id（= 'doc_'+sha256[:12]，重复导入稳定）。
+ * 与"语义蒸馏只存文字级"的原则不冲突——这是另一个 store（pdf_blobs），独立于 docs 的轻量蒸馏。
+ */
+export interface PersistedPdfBlob {
+  document_id: string;
+  blob: Blob;
+  stored_at: string;
+  size_bytes: number;
+}
+
 /** 一笔的低成本序列：源 stroke 无损留在 trace（ADR D3）；这里存归一化点串复原原貌。 */
 export interface PersistedStroke {
   tool: 'pen' | 'highlighter' | 'eraser' | 'hand';
@@ -40,5 +52,6 @@ export interface PersistedDoc {
   page_count: number;
   saved_at: string;
   version: string;
+  last_read_page?: number;        // 阅读位置：重开跳回（老格式缺 = 0）
   pages: Record<number, PersistedPage>;
 }

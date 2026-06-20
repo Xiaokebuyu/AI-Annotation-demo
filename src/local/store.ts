@@ -6,21 +6,23 @@
  */
 import type { NormBBox, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { PersistedDoc, PersistedPage, PersistedStroke } from '../core/store-format';
+import type { PersistedDoc, PersistedPage, PersistedPdfBlob, PersistedStroke } from '../core/store-format';
 import { STORE_VERSION } from '../core/store-format';
 
 const DB_NAME = 'inkloop';
 const STORE = 'docs';
+const PDF_STORE = 'pdf_blobs'; // 阶段一：原始 PDF 字节（重开免重导），键 document_id
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 function openDB(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve) => {
     try {
-      const req = indexedDB.open(DB_NAME, 1);
+      const req = indexedDB.open(DB_NAME, 2); // v1→v2：新增 pdf_blobs（保留 docs 不动）
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'document_id' });
+        if (!db.objectStoreNames.contains(PDF_STORE)) db.createObjectStore(PDF_STORE, { keyPath: 'document_id' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -70,9 +72,82 @@ export function storedDoc(): PersistedDoc | null {
 /** 打开文档：从 IndexedDB 载入已存的语义蒸馏（没有则新建）。返回 true=命中缓存。 */
 export async function openDoc(meta: { document_id: string; file_hash: string; filename: string; page_count: number }): Promise<boolean> {
   const saved = await idbGet(meta.document_id);
-  if (saved && saved.version === STORE_VERSION) { current = saved; return true; }
+  if (saved && saved.version === STORE_VERSION) {
+    current = saved;
+    current.page_count = meta.page_count; // 元信息以本次打开为准
+    scheduleSave();
+    return true;
+  }
   current = { ...meta, saved_at: new Date().toISOString(), version: STORE_VERSION, pages: {} };
+  scheduleSave(); // 即便不标注也落库（否则导入后直接刷新会丢书目、重开列不出）
   return false;
+}
+
+// ── 书籍持久化（阶段一）：PDF 原始字节 + 书目列表 + 阅读位置 ──
+
+/** 存 PDF 原始字节（重开免重导）。幂等 put，导入路径调用一次。 */
+export async function storePdfBlob(documentId: string, blob: Blob): Promise<void> {
+  const db = await openDB();
+  if (!db) return;
+  const rec: PersistedPdfBlob = { document_id: documentId, blob, stored_at: new Date().toISOString(), size_bytes: blob.size };
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(PDF_STORE, 'readwrite');
+      tx.objectStore(PDF_STORE).put(rec);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch { resolve(); }
+  });
+}
+
+/** 取 PDF 字节（无则 null）。 */
+export async function loadPdfBlob(documentId: string): Promise<Blob | null> {
+  const db = await openDB();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const r = db.transaction(PDF_STORE, 'readonly').objectStore(PDF_STORE).get(documentId);
+      r.onsuccess = () => resolve((r.result as PersistedPdfBlob | undefined)?.blob ?? null);
+      r.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+}
+
+/** 列出已存的书（按最近保存倒序），供书架/最近列表。仅返回有 PDF 字节、能重开的书。 */
+export async function listBooks(): Promise<PersistedDoc[]> {
+  const db = await openDB();
+  if (!db) return [];
+  const [docs, blobIds] = await Promise.all([
+    new Promise<PersistedDoc[]>((resolve) => {
+      try {
+        const r = db.transaction(STORE, 'readonly').objectStore(STORE).getAll();
+        r.onsuccess = () => resolve((r.result as PersistedDoc[]) ?? []);
+        r.onerror = () => resolve([]);
+      } catch { resolve([]); }
+    }),
+    new Promise<Set<string>>((resolve) => {
+      try {
+        const r = db.transaction(PDF_STORE, 'readonly').objectStore(PDF_STORE).getAllKeys();
+        r.onsuccess = () => resolve(new Set((r.result as string[]) ?? []));
+        r.onerror = () => resolve(new Set());
+      } catch { resolve(new Set()); }
+    }),
+  ]);
+  return docs
+    .filter((d) => blobIds.has(d.document_id)) // 无字节的旧书重开不了，不列
+    .sort((a, b) => (b.saved_at || '').localeCompare(a.saved_at || ''));
+}
+
+/** 记阅读位置（去抖落盘）。 */
+export function setLastReadPage(page: number): void {
+  if (!current || current.last_read_page === page) return;
+  current.last_read_page = page;
+  scheduleSave();
+}
+
+/** 当前文档已存的阅读位置（无则 0）。 */
+export function lastReadPage(): number {
+  return current?.last_read_page ?? 0;
 }
 
 function page(i: number): PersistedPage | null {

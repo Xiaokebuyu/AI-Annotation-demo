@@ -22,11 +22,13 @@
       <span class="vsep"></span>
       <label for="file-in" class="ghost import-label">导入 PDF</label>
       <input type="file" id="file-in" accept="application/pdf" hidden />
+      <button id="recent-toggle" class="ghost" title="最近打开的书（持久存储 · 免重导）">最近</button>
       <button id="load-chat" class="ghost" title="载入合成聊天 surface（验证 App-agnostic）">示例聊天</button>
       <button id="view-toggle" class="ghost" title="重排（AI 结构重建 · 保 bbox 可圈画）">重排</button>
       <button id="insight-toggle" class="ghost" title="本页洞察">洞察</button>
       <button id="dev-toggle" class="ghost" title="开发面板（d）">⋯</button>
     </div>
+    <div id="recent-panel" class="recent-panel" hidden></div>
   </header>
 
   <main>
@@ -41,6 +43,7 @@
             <p class="es-title">把 PDF 拖到这里，或点击导入</p>
             <p class="es-sub">在原文上圈、划、写 —— 每一次标注，都是一次思考的起点</p>
             <label for="file-in" class="primary-btn">导入 PDF</label>
+            <div id="recent-books" class="recent-books"></div>
           </div>
         </div>
       </div>

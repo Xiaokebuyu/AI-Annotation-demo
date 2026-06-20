@@ -10,7 +10,7 @@ import { trace } from '../core/trace';
 import { reflowLocal } from './reflow';
 import { wrapSurfaceIndex } from '../evidence/target';
 import { bus, settings, state } from '../app/state';
-import { getReflow, openDoc, putReflow } from '../local/store';
+import { getReflow, openDoc, putReflow, storePdfBlob, loadPdfBlob, lastReadPage } from '../local/store';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -83,11 +83,16 @@ async function extractImageRegions(page: PDFPageProxy, vp: PageViewport): Promis
   }
 }
 
-export async function loadFile(file: File): Promise<void> {
-  const buf = await file.arrayBuffer();
+/**
+ * 把一段 PDF 字节装进阅读态（导入与重开共用）。
+ *  · persist 非空 → 导入路径：把 PDF 字节落库（重开免重导）。reopen 路径传 null（库里已有）。
+ *  · 阅读位置：openDoc 后从 last_read_page 恢复（新书=0）。
+ * 注意 getDocument({data}) 可能 detach buf，故 Blob 拷贝在调用前由 loadFile 先建好。
+ */
+async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob | null): Promise<void> {
   state.fileHash = await sha256Hex(buf);
   state.documentId = 'doc_' + state.fileHash.slice(0, 12); // hash 派生，重复导入 id 稳定
-  state.fileName = file.name;
+  state.fileName = filename;
   state.surfaceType = 'pdf';
   // cMapUrl/standardFontDataUrl：救老中文 PDF —— 非嵌入 CID 字体 + 预定义 CJK CMap（如 GBK-EUC-H）
   // 需要 CMap 表才能把字符码映射成字形，否则中文画布渲染与 getTextContent 都出空白/乱码。
@@ -99,20 +104,21 @@ export async function loadFile(file: File): Promise<void> {
     standardFontDataUrl: '/standard_fonts/',
   }).promise;
   state.pageCount = pdf.numPages;
-  state.pageIndex = 0;
   state.strokesByPage.clear();
   // 文档级元信息：Info 字典(Title/Author/Producer/CreationDate…) + 大纲目录。真书常有，喂重排/AI 排版。
   try { const m = await pdf.getMetadata(); state.docMeta = (m && m.info) ? m.info as Record<string, unknown> : null; } catch { state.docMeta = null; }
   try { state.outline = await pdf.getOutline(); } catch { state.outline = null; }
   // 载入本地已存的语义蒸馏（重排/记忆/图解缓存）；没有则新建。重开同一文档即恢复。
-  await openDoc({ document_id: state.documentId, file_hash: state.fileHash, filename: file.name, page_count: state.pageCount });
+  await openDoc({ document_id: state.documentId, file_hash: state.fileHash, filename, page_count: state.pageCount });
+  state.pageIndex = Math.min(Math.max(lastReadPage(), 0), Math.max(0, state.pageCount - 1)); // 重开跳回阅读位置
+  if (persist) await storePdfBlob(state.documentId, persist); // 导入：PDF 字节落库（重开免重导）
   trace('PDFDocument', {
     document_id: state.documentId,
     file_hash: state.fileHash,
-    filename: file.name,
+    filename,
     page_count: state.pageCount,
     uploaded_at: new Date().toISOString(),
-    source_type: 'upload',
+    source_type: persist ? 'upload' : 'reopen',
     local_original_path: '(browser memory ref)',
     version: SCHEMA_VERSION,
   });
@@ -123,6 +129,22 @@ export async function loadFile(file: File): Promise<void> {
   const reflowCap = pp.reflowEnabled ? pp.reflowPages : 0;
   const digestCap = pp.digestEnabled ? pp.digestPages : 0;
   if (reflowCap > 0 || digestCap > 0) void preprocess(reflowCap, digestCap);
+}
+
+/** 导入新 PDF（文件选择/拖拽）。 */
+export async function loadFile(file: File): Promise<void> {
+  const buf = await file.arrayBuffer();
+  const blob = new Blob([buf], { type: 'application/pdf' }); // 先拷贝：getDocument 可能 detach buf
+  await loadIntoState(buf, file.name, blob);
+}
+
+/** 从持久库重开一本已存的书（免重新选文件）。无字节返回 false。 */
+export async function reopenBook(documentId: string, filename: string): Promise<boolean> {
+  const blob = await loadPdfBlob(documentId);
+  if (!blob) return false;
+  const buf = await blob.arrayBuffer();
+  await loadIntoState(buf, filename, null);
+  return true;
 }
 
 /** 抽取一页的文本块（归一化 bbox，zoom/rotation 无关）。渲染与预处理共用。 */
