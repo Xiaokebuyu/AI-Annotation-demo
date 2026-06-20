@@ -188,6 +188,7 @@ function initSettings(): void {
   const pauseSec = $id<HTMLInputElement>('set-pause-sec');
   const inferModel = $id<HTMLSelectElement>('set-infer-model');
   const reflowModel = $id<HTMLSelectElement>('set-reflow-model');
+  const reflowEager = $id<HTMLInputElement>('set-reflow-eager');
   const sendImage = $id<HTMLInputElement>('set-send-image');
   const devOverlay = $id<HTMLInputElement>('set-dev-overlay');
   const showRegion = $id<HTMLInputElement>('set-show-region');
@@ -208,6 +209,7 @@ function initSettings(): void {
   pauseSec.value = String(settings.gesture.pauseSeconds);
   inferModel.value = settings.inferModel;
   reflowModel.value = settings.reflowModel;
+  reflowEager.checked = settings.reflowEager;
   sendImage.checked = settings.sendMarkImage;
   devOverlay.checked = settings.devOverlay;
   showRegion.checked = settings.showRegion;
@@ -218,6 +220,7 @@ function initSettings(): void {
   placement.addEventListener('change', () => { settings.placement = placement.value as Placement; changed(); });
   reflow.addEventListener('change', () => { settings.reflowProvider = reflow.value; changed(); });
   reflowModel.addEventListener('change', () => { settings.reflowModel = reflowModel.value; changed(); }); // 换重排模型 → engineKey 变 → 当前页重排刷新（可 A/B）
+  reflowEager.addEventListener('change', () => { settings.reflowEager = reflowEager.checked; saveSettings(); }); // 急算开关（留给端侧）
   textlayer.addEventListener('change', () => { settings.ocr.textlayer = textlayer.checked; changed(); });
   ocrImage.addEventListener('change', () => { settings.ocr.image = ocrImage.value as OcrImageMode; changed(); });
   sendImage.addEventListener('change', () => { settings.sendMarkImage = sendImage.checked; changed(); });

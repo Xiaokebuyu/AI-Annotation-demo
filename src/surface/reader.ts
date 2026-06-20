@@ -29,6 +29,20 @@ let inkCtx: CanvasRenderingContext2D | null = null;
 interface BlockRef { id: string; el: HTMLElement; source: NormBBox; }
 let blockRefs: BlockRef[] = [];
 
+// 字符对象 id → 所属重排块 id（跨视图锚：标注锚在字符对象上 → 解析到当前重排布局的块）。renderFinal 时重建。
+let charToBlock = new Map<string, string>();
+function buildIndex(blocks: ReflowBlock[]): void {
+  charToBlock = new Map();
+  const runToBlock = new Map<string, string>();        // run id → block id
+  for (const b of blocks) for (const runId of b.sourceRunIds ?? []) runToBlock.set(runId, b.id);
+  for (const o of state.surfaceIndex?.objects ?? []) { // 对象 id = `${runId}_${charIdx}` → 取末 _ 前为 runId
+    const bid = runToBlock.get(o.id.slice(0, o.id.lastIndexOf('_')));
+    if (bid) charToBlock.set(o.id, bid);
+  }
+}
+/** 字符对象 id → 重排块 id（B 阶段按 ref 在重排视图定位 marks/旁注用）。 */
+export function getCharToBlock(): Map<string, string> { return charToBlock; }
+
 interface RecStroke { event: AnnotationEvent; kind: EventType; score: number; }
 const pendingByBlock = new Map<string, RecStroke[]>();
 const lastSig = new Map<string, string>();
@@ -155,7 +169,7 @@ let reflowSeq = 0;    // 防并发：快速翻页/切引擎时只让最新一次
 let reflowAbort: AbortController | null = null; // 取消上一次未完的流式请求（快速翻页）
 
 /** 缓存/重排身份键：ai 引擎把模型并入（换重排模型 → 独立缓存、可 A/B），其余引擎用引擎名。 */
-function engineKey(provider: string): string {
+export function engineKey(provider: string): string {
   return provider === 'ai' ? `ai@${settings.reflowModel}` : provider;
 }
 
@@ -175,6 +189,7 @@ function renderFinal(blocks: ReflowBlock[], provisional = false): void {
   const figures: FigureItem[] = state.imageRegions.map((bb, i) => ({ kind: 'figure', id: `fig_${state.pageIndex}_${i}`, source: bb }));
   const items: RenderItem[] = [...blocks, ...figures].sort((a, b) => a.source[1] - b.source[1]);
   render(items, provisional ? '' : unreliableWarn());
+  buildIndex(blocks); // 重建 字符对象→块 映射（跨视图锚）
 }
 
 // 流式渲染：首块到达时清占位、起空列；逐段 append（不插图，收尾 renderFinal 再按 y 插图 + 建 refs）。

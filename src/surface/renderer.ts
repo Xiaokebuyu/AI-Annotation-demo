@@ -8,6 +8,7 @@ import { sha256Hex } from '../core/ids';
 import { setPageSize, GUTTER_W } from '../core/transform';
 import { trace } from '../core/trace';
 import { reflowLocal } from './reflow';
+import { reflowProviders } from './reflow-provider';
 import { wrapSurfaceIndex } from '../evidence/target';
 import { bus, settings, state } from '../app/state';
 import { getReflow, openDoc, putReflow, storePdfBlob, loadPdfBlob, lastReadPage } from '../local/store';
@@ -277,6 +278,16 @@ export async function renderPage(): Promise<void> {
   // 徐智强 step①：把本页结构（文本层 + 图像区）包成显式 SurfaceIndex（复用 reflowLocal 分 title/text_block）。
   state.surfaceIndex = wrapSurfaceIndex(state.pageId!, state.pageIndex, state.textBlocks, state.imageRegions);
   bus.emit('surface:indexed', state.surfaceIndex);
+
+  // 急算开关（默认关·留给端侧）：渲染即后台跑当前引擎重排并缓存，让 AI 上下文用真实阅读序（"重排前置"）。
+  if (settings.reflowEager) {
+    const ekey = settings.reflowProvider === 'ai' ? `ai@${settings.reflowModel}` : settings.reflowProvider;
+    const prov = reflowProviders[settings.reflowProvider];
+    if (prov && state.textBlocks.length > 1 && !getReflow(state.pageIndex, ekey)) {
+      const pi = state.pageIndex, blocks = state.textBlocks;
+      void prov(blocks).then((r) => { if (r.length && !getReflow(pi, ekey)) putReflow(pi, ekey, r); }).catch(() => { /* 急算失败不影响阅读 */ });
+    }
+  }
 
   bus.emit('page:rendered');
 }

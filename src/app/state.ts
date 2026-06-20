@@ -49,6 +49,7 @@ export interface Settings {
   viewMode: ViewMode;                            // 阅读面：原版 PDF / 重排
   reflowProvider: string;                        // 重排引擎：local / llm
   reflowModel: string;                           // 重排专用模型（快·结构任务）：默认 gemini-3.1-flash-lite，独立于 inferModel
+  reflowEager: boolean;                          // 急算开关(默认关·留给端侧)：渲染即后台 AI 重排缓存 → AI 上下文用真实阅读序("重排前置")
   // 文字识别：textlayer 数字版文本层（开关）+ 图像 OCR（关闭/局部图/整页图，给扫描·手写·图表）
   ocr: { textlayer: boolean; image: OcrImageMode };
   // 预处理：导入后台预排版前 reflowPages 页 + 预解读（记忆A）前 digestPages 页（封顶，喂推理更准）
@@ -79,6 +80,7 @@ export const settings: Settings = {
   viewMode: 'page',
   reflowProvider: 'ai', // 主线：AI 结构重建（文本驱动·保 bbox）
   reflowModel: 'gemini-3.1-flash-lite', // 重排走快模型（结构任务·延迟敏感·质量门槛低）。新字段→所有人即时生效。
+  reflowEager: false,   // 默认关：现在不为 AI 上下文烧 token；端侧重排模型上了再默认开 = 真"重排前置"。
   ocr: { textlayer: true, image: 'off' },
   preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
   gesture: { enabled: true, pauseSeconds: 5, routing: 'auto', contextLines: 3, idleSeconds: 90 },

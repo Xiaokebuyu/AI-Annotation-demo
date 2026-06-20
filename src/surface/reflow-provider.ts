@@ -64,6 +64,7 @@ async function refine(base: ReflowBlock[], image?: string): Promise<ReflowBlock[
       level: r.type === 'heading' ? (r.level || 1) : 0,
       text: r.text || src.text,
       source: src.source, // 原页 bbox 原样保留
+      sourceRunIds: src.sourceRunIds, // 桥随块走（精修只改文字/角色，不动源 run）
     });
     byId.delete(r.id);
   }
@@ -106,6 +107,7 @@ const rewrite: ReflowProvider = async () => {
       level: type === 'heading' ? (b.level || 1) : 0,
       text,
       source: bbox,
+      anchorUnsafe: true, sourceRunIds: [], // VLM 重写：bbox 估算、无源 run → 跨视图映射不可靠，走几何兜底
       ...(type === 'list' ? { items: b.items ?? [], ordered: !!b.ordered } : {}),
     };
   }).filter((b) => b.text.trim().length > 0 || (b.items?.length ?? 0) > 0);
@@ -129,6 +131,7 @@ function groupToBlock(g: Group, byId: Map<string, ReflowLine>, index: number): R
     id: blockId(text, index), type,
     level: type === 'heading' ? (g.level || 1) : 0,
     text, source: unionLines(gls),
+    sourceRunIds: [...new Set(gls.flatMap((l) => l.runIds))], // 跨视图桥：本块的源 run id
     ...(type === 'list' ? { items: gls.map((l) => l.text), ordered: false } : {}),
   };
 }
@@ -169,7 +172,7 @@ const ai: ReflowProvider = async (blocks) => {
     (g.lineIds ?? []).forEach((id) => used.add(id));
     out.push(b);
   }
-  for (const l of lines) if (!used.has(l.id)) out.push({ id: blockId(l.text, out.length + 1000), type: 'para', level: 0, text: l.text, source: l.bbox }); // 漏掉的行补回，别丢字
+  for (const l of lines) if (!used.has(l.id)) out.push({ id: blockId(l.text, out.length + 1000), type: 'para', level: 0, text: l.text, source: l.bbox, sourceRunIds: l.runIds }); // 漏掉的行补回，别丢字
   out.sort((a, b) => a.source[1] - b.source[1]);
   return out.length ? out : reflowLocal(blocks);
 };
@@ -220,7 +223,7 @@ export async function reflowAiStream(
   const tail = buf.trim();
   if (tail) { try { take(JSON.parse(tail)); } catch { /* noop */ } }
 
-  for (const l of lines) if (!used.has(l.id)) { const b: ReflowBlock = { id: blockId(l.text, out.length + 1000), type: 'para', level: 0, text: l.text, source: l.bbox }; out.push(b); onBlock(b, out); }
+  for (const l of lines) if (!used.has(l.id)) { const b: ReflowBlock = { id: blockId(l.text, out.length + 1000), type: 'para', level: 0, text: l.text, source: l.bbox, sourceRunIds: l.runIds }; out.push(b); onBlock(b, out); }
   out.sort((a, b) => a.source[1] - b.source[1]);
   return out.length ? out : reflowLocal(blocks);
 }

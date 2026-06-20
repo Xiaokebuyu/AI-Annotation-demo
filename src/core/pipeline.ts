@@ -1,7 +1,7 @@
 import type { AnnotationEvent, EventType, HMP, InferenceRequest, InferenceResult, InferenceView, MarkFeatureType, MarkShape, NormBBox, OCRResult, OutputMode, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
 import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
 import { DEVICE_ID, SESSION_ID, shortId, sha256Hex } from './ids';
-import { appendAiTurnEntry, setSynthesisWatermark } from '../local/store';
+import { appendAiTurnEntry, getReflow, setSynthesisWatermark } from '../local/store';
 import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
 import { resolveTarget, buildHmp } from '../evidence/target';
 import { buildMarkGraph } from '../evidence/mark-graph';
@@ -481,8 +481,16 @@ async function pageTextAt(i: number): Promise<string> {
   catch { return ''; }
 }
 /** 以当前页为中心、向前向后凑总长 ~maxChars 的滑动内容窗口（喂模型作上下文）。 */
+/** 本页上下文文本：重排已缓存 → 用真实阅读序(多栏更准)；否则退回 PDF 文本层顺序。纯机会式、不触发任何重排计算。 */
+function pageTextFromReflow(maxChars: number): string {
+  const ekey = settings.reflowProvider === 'ai' ? `ai@${settings.reflowModel}` : settings.reflowProvider;
+  const blocks = getReflow(state.pageIndex, ekey);
+  if (!blocks?.length) return pageText(maxChars);
+  return blocks.map((b) => (b.type === 'list' ? (b.items ?? []).join('\n') : b.text)).join('\n').slice(0, maxChars);
+}
+
 async function slidingContext(maxChars = 3000): Promise<string> {
-  const cur = pageText(maxChars); // 当前页全文（已渲染的 state.textBlocks）
+  const cur = pageTextFromReflow(maxChars); // 当前页：重排已缓存用阅读序，否则 PDF 文本层序
   if (cur.length >= maxChars) return cur;
   const budget = maxChars - cur.length;
   const i = state.pageIndex;

@@ -27,6 +27,10 @@ export interface ReflowBlock {
   source: NormBBox;    // 原页归一化 bbox 并集
   items?: string[];    // list：各列表项文本（已去掉前缀符号）
   ordered?: boolean;   // list：有序(1.2.3 / 一二三)还是无序(•-*)
+  // 跨视图对象桥：构成本块的 run id（OcrTextBlock.id，如 tl_3）。字符对象 = 各 run 的 ${runId}_*。
+  // 标注锚在字符对象上 → 经此把"在哪个块"算出来，原版页/重排页共用一套锚。可选=兼容旧缓存。
+  sourceRunIds?: string[];
+  anchorUnsafe?: boolean; // true=bbox 系模型估算(VLM 重写)，非文本层，跨视图映射不可靠
 }
 
 /** 列表项前缀：项目符号 / 数字 / 圆圈数字 / 中文数字（行首 + 其后空白）。 */
@@ -72,7 +76,7 @@ function unionBBox(runs: OcrTextBlock[]): NormBBox {
 }
 
 /** 一"行"：聚合后的 run 行（保 bbox），供 AI 结构重建按行分组、再用 bbox 映射回原页。 */
-export interface ReflowLine { id: string; text: string; size: number; bbox: NormBBox; }
+export interface ReflowLine { id: string; text: string; size: number; bbox: NormBBox; runIds: string[]; }
 
 /**
  * 把 run 聚成行（剥页眉页脚、按 y 聚行、行内按 x 排）。
@@ -97,7 +101,7 @@ export function groupLines(blocks: OcrTextBlock[]): ReflowLine[] {
   }
   return groups.map((g, i) => {
     g.sort((a, b) => a.bbox[0] - b.bbox[0]);
-    return { id: 'ln_' + i, text: joinRuns(g.map((r) => r.text)), size: median(g.map((r) => r.bbox[3])), bbox: unionBBox(g) };
+    return { id: 'ln_' + i, text: joinRuns(g.map((r) => r.text)), size: median(g.map((r) => r.bbox[3])), bbox: unionBBox(g), runIds: g.map((r) => r.id) };
   });
 }
 
@@ -149,13 +153,15 @@ export function reflowLocal(blocks: OcrTextBlock[]): ReflowBlock[] {
   const flushPara = () => {
     if (!para.length) return;
     const text = joinRuns(para.map((l) => joinRuns(l.runs.map((r) => r.text))));
-    out.push({ id: blockId(text, out.length), type: 'para', level: 0, text, source: unionBBox(para.flatMap((l) => l.runs)) });
+    const runs = para.flatMap((l) => l.runs);
+    out.push({ id: blockId(text, out.length), type: 'para', level: 0, text, source: unionBBox(runs), sourceRunIds: runs.map((r) => r.id) });
     para = [];
   };
   const flushList = () => {
     if (!listItems.length) return;
     const text = listItems.join('\n');
-    out.push({ id: blockId(text, out.length), type: 'list', level: 0, text, items: listItems.slice(), ordered: listOrdered, source: unionBBox(listLines.flatMap((l) => l.runs)) });
+    const runs = listLines.flatMap((l) => l.runs);
+    out.push({ id: blockId(text, out.length), type: 'list', level: 0, text, items: listItems.slice(), ordered: listOrdered, source: unionBBox(runs), sourceRunIds: runs.map((r) => r.id) });
     listItems = []; listLines = []; listOrdered = false;
   };
   const flushAll = () => { flushPara(); flushList(); };
@@ -168,7 +174,7 @@ export function reflowLocal(blocks: OcrTextBlock[]): ReflowBlock[] {
     if (isHeading) {
       flushAll();
       const level = ratio >= 1.7 ? 1 : ratio >= 1.4 ? 2 : 3;
-      out.push({ id: blockId(lineText, out.length), type: 'heading', level, text: lineText, source: unionBBox(ln.runs) });
+      out.push({ id: blockId(lineText, out.length), type: 'heading', level, text: lineText, source: unionBBox(ln.runs), sourceRunIds: ln.runs.map((r) => r.id) });
       continue;
     }
     // 列表项：行首是项目符号/编号
