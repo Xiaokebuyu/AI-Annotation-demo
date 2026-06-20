@@ -64,13 +64,30 @@ function nearRegion(bb: NormBBox): boolean {
   return cx >= regBbox[0] - REGION_NEAR && cx <= regBbox[0] + regBbox[2] + REGION_NEAR
     && cy >= regBbox[1] - REGION_NEAR && cy <= regBbox[1] + regBbox[3] + REGION_NEAR;
 }
-/** 收口当前区域 → 解析成一个 mark（异步识别在 resolveRegion 内）。 */
-function flushRegion(): void {
+/**
+ * 诊断：远笔触发收口时，记下新笔中心相对"区域外扩框"的越界量（>0=越界多少，<0=其实还在框内）。
+ * overX/overY 哪个为正就是被哪个轴甩出去的；越界量很小（如 0.01–0.03）= 阈值偏紧把连续书写切碎。
+ */
+function nearDiag(bb: NormBBox): Record<string, number> {
+  if (!regBbox) return {};
+  const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+  const overR = cx - (regBbox[0] + regBbox[2] + REGION_NEAR), overL = (regBbox[0] - REGION_NEAR) - cx;
+  const overB = cy - (regBbox[1] + regBbox[3] + REGION_NEAR), overT = (regBbox[1] - REGION_NEAR) - cy;
+  return { cx: +cx.toFixed(4), cy: +cy.toFixed(4), overX: +Math.max(overL, overR).toFixed(4), overY: +Math.max(overT, overB).toFixed(4) };
+}
+
+/** 区域收口的原因（进 dev 通道，定位"连续书写被切到新区"）。 */
+type FlushReason = 'far-stroke' | 'quiet-6s' | 'max-hold' | 'manual';
+
+/** 收口当前区域 → 解析成一个 mark（异步识别在 resolveRegion 内）。reason/diag 镜像到遥测。 */
+function flushRegion(reason: FlushReason = 'manual', diag: Record<string, number> | null = null): void {
   window.clearTimeout(regTimer);
   const events = regEvents, strokes = regStrokes;
+  const heldMs = regFirstAt ? Math.round(performance.now() - regFirstAt) : 0;
+  const regAt = regBbox ? regBbox.map((n) => +n.toFixed(4)) : null;
   regEvents = []; regStrokes = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
   bus.emit('region:clear'); // dev 可视：区域收口 → 清叠层
-  if (events.length) void resolveRegion(events, strokes);
+  if (events.length) void resolveRegion(events, strokes, { reason, heldMs, regBbox: regAt, ...(diag ?? {}) });
 }
 
 /** 翻页/缩放重渲：丢在途的笔（属旧页），但保留 session/idle（会话跨页、翻页不是边界事件）。 */
@@ -105,7 +122,7 @@ const diagOf = (scored: ReturnType<typeof classifyScored>[]) => scored.map((s) =
  * 关键：**每笔单独几何分类**后再判特征（不在合并乱线上重判——圈+划合并会毁掉干净的单笔模板信号）。
  * 连续标注期间界面静默；语义全交模型；手写区域收口即走唯一早提交边界（区域冷却本身已是落定）。
  */
-async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[]): Promise<void> {
+async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushInfo: Record<string, unknown> = {}): Promise<void> {
   const pid = batch[0].page_id;
   const bookId = state.documentId ?? 'book';
 
@@ -113,7 +130,7 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[]): Promi
   const scoredAll = batch.map((e) => classifyScored(e.stroke_points, e.geometry.bbox));
   const keep = batch.map((e, i) => ({ e, s: scoredAll[i], st: strokes[i] })).filter((x) => x.s.type !== 'tap_region');
   if (!keep.length) {
-    gtrace({ page_id: pid, strokes: diagOf(scoredAll), resolved: '— 点按/误触，不计入' });
+    gtrace({ page_id: pid, strokes: diagOf(scoredAll), resolved: '— 点按/误触，不计入', flush: flushInfo });
     return;
   }
   const realEvents = keep.map((x) => x.e);
@@ -145,7 +162,7 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[]): Promi
     hmp: cap.hmp ? { ...cap.hmp, crop_ref: undefined, vector_ref: undefined } : null,
     marked_text: cap.markedText, is_tombstone: false,
   });
-  gtrace({ page_id: pid, strokes: diagOf(realScored), feature: feature.type, conf: Number(feature.confidence.toFixed(2)), shape: markScored.type, marked: cap.markedText.slice(0, 40), resolved: `mark·${feature.type}（累积静默）` });
+  gtrace({ page_id: pid, strokes: diagOf(realScored), feature: feature.type, conf: Number(feature.confidence.toFixed(2)), shape: markScored.type, marked: cap.markedText.slice(0, 40), resolved: `mark·${feature.type}（累积静默）`, flush: flushInfo });
 
   // 手写 = 唯一早提交边界事件（区域冷却已落定 + 识别已可靠定型，无需再额外等）
   if (feature.type === 'handwriting') void commitSession(bookId, 'handwriting', mark);
@@ -175,16 +192,16 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
   if (!evt) return;
 
   // 空间连贯：挨着当前区域就并进去（重置冷却）；落到远处 → 旧区先收口、此处另起一个区域。
-  if (regBbox && !nearRegion(evt.geometry.bbox)) flushRegion();
+  if (regBbox && !nearRegion(evt.geometry.bbox)) flushRegion('far-stroke', nearDiag(evt.geometry.bbox));
   regEvents.push(evt);
   regStrokes.push(stroke); // 与 regEvents 对齐（落账本时取构成笔）
   regBbox = regBbox ? unionBb(regBbox, evt.geometry.bbox) : evt.geometry.bbox;
   if (!regFirstAt) regFirstAt = performance.now();
   window.clearTimeout(regTimer);
   // 附近无动作满 REGION_QUIET 才收口；连续涂写到 REGION_MAX_HOLD 强制收口。
-  if (performance.now() - regFirstAt >= REGION_MAX_HOLD_MS) flushRegion();
+  if (performance.now() - regFirstAt >= REGION_MAX_HOLD_MS) flushRegion('max-hold');
   else {
-    regTimer = window.setTimeout(flushRegion, REGION_QUIET_MS);
+    regTimer = window.setTimeout(() => flushRegion('quiet-6s'), REGION_QUIET_MS);
     bus.emit('region:update', { bbox: regBbox, near: REGION_NEAR }); // dev 可视：实时画当前组装区域
   }
 
