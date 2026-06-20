@@ -1,28 +1,35 @@
 /**
- * 本地持久化存储（IndexedDB）—— 把每个文档的语义蒸馏存下来，重开即恢复。
- * 一个文档一条记录（PersistedDoc，含各页蒸馏），按 document_id 主键。
- * 内存里持有当前文档 `current`（同步读写），改动去抖后异步落 IndexedDB。
- * 全程 try/catch：IDB 不可用（隐私模式等）则退化为「仅内存」，不影响主流程。
+ * 本地持久化存储（IndexedDB）—— SSoT 账本。
+ *   · docs       书目元信息 + 页内容缓存（reflow/图解/阅读位置/水位线），按 document_id；内存 current 去抖落盘。
+ *   · pdf_blobs  原始 PDF 字节（重开免重导）。
+ *   · marks      页账本：组装手势条目（append-only，擦除=tombstone），index by_doc。
+ *   · ai_turns   书日志：AI 回复条目（append-only，改/忽略=supersedes），index by_doc。
+ * 全程 try/catch：IDB 不可用（隐私模式等）退化为「仅内存」，不影响主流程。
  */
-import type { NormBBox, ScreenOverlay } from '../core/contracts';
+import type { NormBBox, OverlayState, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { PersistedDoc, PersistedPage, PersistedPdfBlob, PersistedStroke } from '../core/store-format';
-import { STORE_VERSION } from '../core/store-format';
+import type { PersistedAiTurn, PersistedDoc, PersistedMark, PersistedPage, PersistedPdfBlob } from '../core/store-format';
+import { DB_VERSION, STORE_VERSION } from '../core/store-format';
+import { shortId } from '../core/ids';
 
 const DB_NAME = 'inkloop';
 const STORE = 'docs';
-const PDF_STORE = 'pdf_blobs'; // 阶段一：原始 PDF 字节（重开免重导），键 document_id
+const PDF_STORE = 'pdf_blobs';   // PDF 原始字节（重开免重导）
+const MARKS = 'marks';           // 页账本条目
+const TURNS = 'ai_turns';        // 书日志条目
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 function openDB(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve) => {
     try {
-      const req = indexedDB.open(DB_NAME, 2); // v1→v2：新增 pdf_blobs（保留 docs 不动）
+      const req = indexedDB.open(DB_NAME, DB_VERSION); // v3：docs + pdf_blobs + marks + ai_turns
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'document_id' });
         if (!db.objectStoreNames.contains(PDF_STORE)) db.createObjectStore(PDF_STORE, { keyPath: 'document_id' });
+        if (!db.objectStoreNames.contains(MARKS)) db.createObjectStore(MARKS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
+        if (!db.objectStoreNames.contains(TURNS)) db.createObjectStore(TURNS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -41,9 +48,7 @@ async function idbGet(id: string): Promise<PersistedDoc | null> {
       const r = db.transaction(STORE, 'readonly').objectStore(STORE).get(id);
       r.onsuccess = () => resolve((r.result as PersistedDoc) ?? null);
       r.onerror = () => resolve(null);
-    } catch {
-      resolve(null);
-    }
+    } catch { resolve(null); }
   });
 }
 
@@ -56,34 +61,34 @@ async function idbPut(doc: PersistedDoc): Promise<void> {
       tx.objectStore(STORE).put(doc);
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
-    } catch {
-      resolve();
-    }
+    } catch { resolve(); }
   });
 }
 
 let current: PersistedDoc | null = null;
 let saveTimer: number | undefined;
 
-export function storedDoc(): PersistedDoc | null {
-  return current;
-}
+/** 每书单调递增 seq（Date.now() 起跳，跨 reload 仍增），驱动折叠顺序 + 综合水位线。 */
+let seqCounter = 0;
+function nextSeq(): number { seqCounter = Math.max(seqCounter + 1, Date.now()); return seqCounter; }
 
 /** 打开文档：从 IndexedDB 载入已存的语义蒸馏（没有则新建）。返回 true=命中缓存。 */
 export async function openDoc(meta: { document_id: string; file_hash: string; filename: string; page_count: number }): Promise<boolean> {
   const saved = await idbGet(meta.document_id);
-  if (saved && saved.version === STORE_VERSION) {
-    current = saved;
+  const hit = !!(saved && saved.version === STORE_VERSION);
+  if (hit) {
+    current = saved!;
     current.page_count = meta.page_count; // 元信息以本次打开为准
-    scheduleSave();
-    return true;
+  } else {
+    current = { ...meta, saved_at: new Date().toISOString(), version: STORE_VERSION, pages: {} };
   }
-  current = { ...meta, saved_at: new Date().toISOString(), version: STORE_VERSION, pages: {} };
-  scheduleSave(); // 即便不标注也落库（否则导入后直接刷新会丢书目、重开列不出）
-  return false;
+  // seq 不回退：新 seq 必超过本书历史（含 reload 前），避免与旧条目冲突
+  seqCounter = Math.max(seqCounter, Date.now(), current.synthesis_watermark_seq ?? 0);
+  scheduleSave(); // 即便不标注也落库（导入后直接刷新也能在书架列出）
+  return hit;
 }
 
-// ── 书籍持久化（阶段一）：PDF 原始字节 + 书目列表 + 阅读位置 ──
+// ── 书籍持久化：PDF 原始字节 + 书目列表 + 阅读位置 ──
 
 /** 存 PDF 原始字节（重开免重导）。幂等 put，导入路径调用一次。 */
 export async function storePdfBlob(documentId: string, blob: Blob): Promise<void> {
@@ -113,7 +118,7 @@ export async function loadPdfBlob(documentId: string): Promise<Blob | null> {
   });
 }
 
-/** 列出已存的书（按最近保存倒序），供书架/最近列表。仅返回有 PDF 字节、能重开的书。 */
+/** 列出已存的书（按最近保存倒序）。仅返回有 PDF 字节、能重开的书。 */
 export async function listBooks(): Promise<PersistedDoc[]> {
   const db = await openDB();
   if (!db) return [];
@@ -134,7 +139,7 @@ export async function listBooks(): Promise<PersistedDoc[]> {
     }),
   ]);
   return docs
-    .filter((d) => blobIds.has(d.document_id)) // 无字节的旧书重开不了，不列
+    .filter((d) => blobIds.has(d.document_id))
     .sort((a, b) => (b.saved_at || '').localeCompare(a.saved_at || ''));
 }
 
@@ -150,18 +155,102 @@ export function lastReadPage(): number {
   return current?.last_read_page ?? 0;
 }
 
+// ── 账本：marks / ai_turns（append-only，每条独立记录）──
+
+function appendEntry(storeName: string, rec: object): Promise<void> {
+  return openDB().then((db) => {
+    if (!db) return;
+    return new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).add(rec); // add：新记录（entry_id 唯一），不就地改
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch { resolve(); }
+    });
+  });
+}
+
+function entriesByDoc<T extends { seq: number }>(storeName: string, documentId: string): Promise<T[]> {
+  return openDB().then((db) => {
+    if (!db) return [] as T[];
+    return new Promise<T[]>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).index('by_doc').getAll(IDBKeyRange.only(documentId));
+        r.onsuccess = () => resolve(((r.result as T[]) ?? []).sort((a, b) => a.seq - b.seq));
+        r.onerror = () => resolve([] as T[]);
+      } catch { resolve([] as T[]); }
+    });
+  });
+}
+
+/** 追加一条 mark 条目（含 tombstone）。store 填 entry_id/seq/created_at。 */
+export function appendMarkEntry(m: Omit<PersistedMark, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
+  const rec: PersistedMark = { ...m, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
+  return appendEntry(MARKS, rec);
+}
+
+/** 追加一条 ai_turn 条目。 */
+export function appendAiTurnEntry(t: Omit<PersistedAiTurn, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
+  const rec: PersistedAiTurn = { ...t, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
+  return appendEntry(TURNS, rec);
+}
+
+/** 折叠 mark：去掉被 tombstone 的 mark_id，每 mark_id 取最新非墓碑条目。 */
+export async function getFoldedMarks(documentId: string): Promise<PersistedMark[]> {
+  const all = await entriesByDoc<PersistedMark>(MARKS, documentId);
+  const dead = new Set<string>();
+  for (const e of all) if (e.is_tombstone) dead.add(e.mark_id);
+  const live = new Map<string, PersistedMark>();
+  for (const e of all) if (!e.is_tombstone && !dead.has(e.mark_id)) live.set(e.mark_id, e);
+  return [...live.values()].sort((a, b) => a.seq - b.seq);
+}
+
+/** 未综合的 mark（seq > 当前书水位线）：reload 重建 pending session。 */
+export async function getPendingMarks(documentId: string): Promise<PersistedMark[]> {
+  const wm = current?.synthesis_watermark_seq ?? -1;
+  return (await getFoldedMarks(documentId)).filter((m) => m.seq > wm);
+}
+
+/** 折叠 ai_turn：每 overlay_id 取最新（最高 seq）条目（含 dismissed，由调用方决定显示）。 */
+export async function getBookAiTurns(documentId: string): Promise<PersistedAiTurn[]> {
+  const all = await entriesByDoc<PersistedAiTurn>(TURNS, documentId);
+  const latest = new Map<string, PersistedAiTurn>();
+  for (const e of all) latest.set(e.overlay_id, e); // 已按 seq 升序 → 末者最新
+  return [...latest.values()].sort((a, b) => a.seq - b.seq);
+}
+
+/** overlay 状态变化（接受/编辑/忽略）：追加一条 supersedes 上一轮的 ai_turn，记新状态/改写文本。 */
+export async function updateOverlayState(documentId: string, overlay: ScreenOverlay): Promise<void> {
+  const turns = await entriesByDoc<PersistedAiTurn>(TURNS, documentId);
+  const prior = turns.filter((t) => t.overlay_id === overlay.overlay_id).pop();
+  if (!prior) return; // 无原始轮（理论不该发生）
+  const st: OverlayState = overlay.state;
+  await appendAiTurnEntry({
+    ...prior,
+    overlay,
+    overlay_state: st,
+    user_edited_text: st === 'edited' ? overlay.display_text : prior.user_edited_text,
+    supersedes: prior.entry_id,
+  });
+}
+
+/** 综合提交成功后：把水位线推到当前最大 seq（此前所有 mark 记为已综合）。 */
+export function setSynthesisWatermark(): void {
+  if (!current) return;
+  current.synthesis_watermark_seq = seqCounter;
+  scheduleSave();
+}
+
+// ── docs 内部：页缓存（reflow/图解）──
+
 function page(i: number): PersistedPage | null {
   if (!current) return null;
   if (!current.pages[i]) {
-    current.pages[i] = {
-      page_index: i, reflow: null, reflow_engine: null, images: [],
-      strokes: [], overlays: [], status: 'pending',
-    };
+    current.pages[i] = { page_index: i, reflow: null, reflow_engine: null, images: [], status: 'pending' };
   }
-  // 老格式兼容：恢复旧文档时补字段
   const p = current.pages[i];
-  if (!p.strokes) p.strokes = [];
-  if (!p.overlays) p.overlays = [];
+  if (!p.images) p.images = []; // 老格式兼容
   return p;
 }
 
@@ -204,33 +293,4 @@ export function putImageExplain(i: number, bbox: NormBBox, explanation: string):
   const ex = p.images.find((im) => overlap(im.bbox, bbox) > 0.8);
   if (ex) ex.explanation = explanation; else p.images.push({ bbox, explanation });
   scheduleSave();
-}
-
-// ── 笔迹（每页全量存）──
-export function putStrokes(i: number, strokes: PersistedStroke[]): void {
-  const p = page(i);
-  if (!p) return;
-  p.strokes = strokes.slice();
-  scheduleSave();
-}
-export function getStrokes(i: number): PersistedStroke[] {
-  return current?.pages[i]?.strokes ?? [];
-}
-
-// ── AI 卡片（按 overlay_id upsert）──
-export function upsertOverlay(i: number, o: ScreenOverlay): void {
-  const p = page(i);
-  if (!p) return;
-  const idx = p.overlays.findIndex((x) => x.overlay_id === o.overlay_id);
-  if (idx >= 0) p.overlays[idx] = o; else p.overlays.push(o);
-  scheduleSave();
-}
-export function removeOverlay(i: number, id: string): void {
-  const p = page(i);
-  if (!p) return;
-  p.overlays = p.overlays.filter((x) => x.overlay_id !== id);
-  scheduleSave();
-}
-export function getOverlays(i: number): ScreenOverlay[] {
-  return current?.pages[i]?.overlays ?? [];
 }

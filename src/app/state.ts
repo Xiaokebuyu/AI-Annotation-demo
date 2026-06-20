@@ -138,6 +138,9 @@ export function currentStrokes(): Stroke[] {
   return state.strokesByPage.get(state.pageId)!;
 }
 
+/** 笔 → 它所属 mark 的 id（组装时 main.ts 填）。擦/撤一笔时据此给整 mark 落 tombstone。 */
+export const strokeMarkIds = new WeakMap<Stroke, string>();
+
 export function setTool(tool: Tool): void {
   state.tool = tool;
   bus.emit('tool', tool);

@@ -1,24 +1,26 @@
 import './styles.css';
 import { recordEvent, captureMark, commitSessionDiscussion } from './core/pipeline';
-import { classifyScored, classifyStrokeFeature, bboxOf } from './capture/classify';
+import { classifyScored, classifyStrokeFeature, bboxOf, type ScoredGesture, type StrokeFeature } from './capture/classify';
 import {
-  addMark, peekSession, clearSession, makeMark,
+  addMark, peekSession, clearSession, makeMark, removeMark,
   IDLE_COMMIT_MS, type Mark,
 } from './capture/session';
 import { localCharHeight } from './evidence/target';
 import { trace } from './core/trace';
-import { shortId } from './core/ids';
-import { bus, state, settings } from './app/state';
-import { getOverlays, getStrokes, listBooks, removeOverlay, setLastReadPage, storedDoc, upsertOverlay } from './local/store';
+import { shortId, DEVICE_ID } from './core/ids';
+import { bus, state, settings, strokeMarkIds, type Stroke, type Tool } from './app/state';
+import { appendMarkEntry, getBookAiTurns, getFoldedMarks, getPendingMarks, listBooks, setLastReadPage, updateOverlayState } from './local/store';
+import type { PersistedMark } from './core/store-format';
 import type { ScreenOverlay } from './core/contracts';
-import type { AnnotationEvent, NormBBox } from './core/contracts';
+import type { AnnotationEvent, EventType, NormBBox } from './core/contracts';
+import { SCHEMA_VERSION } from './core/contracts';
 import { initRenderer, loadFile, reopenBook, gotoPage, setZoom, hasDocument } from './surface/renderer';
 import { renderChatSurface } from './surface/chat-surface';
-import { initInk, persistInk } from './capture/ink';
+import { initInk } from './capture/ink';
 import { initWhisper } from './surface/whisper';
 import { initReader } from './surface/reader';
 import { initAnchorLayer } from './surface/anchor-layer';
-import { openBook } from './chat/buffer';
+import { openBook, appendMsg } from './chat/buffer';
 import { initInsightPanel } from './surface/insight-panel';
 import { initToolbar } from './surface/toolbar';
 import { initDevDrawer, toggleDrawer } from './dev/dev-drawer';
@@ -45,6 +47,7 @@ const lastSig = new Map<string, string>(); // 防重复提交（按 book）
 
 // 当前挂起的"区域"（单活跃区：写在一处会聚起来；落到远处则旧区先收口、此处另起）。
 let regEvents: AnnotationEvent[] = [];
+let regStrokes: Stroke[] = []; // 与 regEvents 对齐：组装时给每构成笔建 笔→mark 映射（擦/撤定位整 mark）
 let regBbox: NormBBox | null = null;
 let regFirstAt = 0;
 let regTimer: number | undefined;
@@ -64,16 +67,16 @@ function nearRegion(bb: NormBBox): boolean {
 /** 收口当前区域 → 解析成一个 mark（异步识别在 resolveRegion 内）。 */
 function flushRegion(): void {
   window.clearTimeout(regTimer);
-  const events = regEvents;
-  regEvents = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
+  const events = regEvents, strokes = regStrokes;
+  regEvents = []; regStrokes = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
   bus.emit('region:clear'); // dev 可视：区域收口 → 清叠层
-  if (events.length) void resolveRegion(events);
+  if (events.length) void resolveRegion(events, strokes);
 }
 
 /** 翻页/缩放重渲：丢在途的笔（属旧页），但保留 session/idle（会话跨页、翻页不是边界事件）。 */
 function resetAssembly(): void {
   window.clearTimeout(regTimer);
-  regEvents = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
+  regEvents = []; regStrokes = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
   bus.emit('region:clear');
 }
 
@@ -81,7 +84,7 @@ function resetAssembly(): void {
 function cancelTimers(): void {
   window.clearTimeout(regTimer);
   window.clearTimeout(idleTimer);
-  regEvents = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
+  regEvents = []; regStrokes = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
   bus.emit('region:clear');
   if (state.documentId) clearSession(state.documentId);
 }
@@ -102,19 +105,20 @@ const diagOf = (scored: ReturnType<typeof classifyScored>[]) => scored.map((s) =
  * 关键：**每笔单独几何分类**后再判特征（不在合并乱线上重判——圈+划合并会毁掉干净的单笔模板信号）。
  * 连续标注期间界面静默；语义全交模型；手写区域收口即走唯一早提交边界（区域冷却本身已是落定）。
  */
-async function resolveRegion(batch: AnnotationEvent[]): Promise<void> {
+async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[]): Promise<void> {
   const pid = batch[0].page_id;
   const bookId = state.documentId ?? 'book';
 
   // 每笔单独分类 + 滤点按（per-stroke）
   const scoredAll = batch.map((e) => classifyScored(e.stroke_points, e.geometry.bbox));
-  const keep = batch.map((e, i) => ({ e, s: scoredAll[i] })).filter((x) => x.s.type !== 'tap_region');
+  const keep = batch.map((e, i) => ({ e, s: scoredAll[i], st: strokes[i] })).filter((x) => x.s.type !== 'tap_region');
   if (!keep.length) {
     gtrace({ page_id: pid, strokes: diagOf(scoredAll), resolved: '— 点按/误触，不计入' });
     return;
   }
   const realEvents = keep.map((x) => x.e);
   const realScored = keep.map((x) => x.s);
+  const realStrokes = keep.map((x) => x.st);
   const strokeBboxes = realEvents.map((e) => e.geometry.bbox);
   const points = realEvents.flatMap((e) => e.stroke_points);
   const bbox = bboxOf(points);
@@ -128,6 +132,19 @@ async function resolveRegion(batch: AnnotationEvent[]): Promise<void> {
   const feature = cap.feature;
   const mark = makeMark(repr, feature, markScored, cap.hmp, cap.markedText);
   addMark(bookId, mark);
+  // 落账本（页账本 mark 条目）+ 建 笔→mark 映射（擦/撤时给整 mark 落 tombstone）
+  for (const s of realStrokes) strokeMarkIds.set(s, mark.id);
+  const tool: 'pen' | 'highlighter' = realStrokes.some((s) => s.tool === 'highlighter') ? 'highlighter' : 'pen';
+  void appendMarkEntry({
+    document_id: bookId, page_id: pid, page_index: pageIdxOf(pid), mark_id: mark.id,
+    strokes: realStrokes.map((s) => ({ tool: s.tool, points: s.points })),
+    bbox, tool, color: tool === 'highlighter' ? 'rgba(212,207,202,0.85)' : '#1A1A1A',
+    pointer_type: repr.pointer_type, device_id: repr.device_id, abs_timestamp: Date.now(),
+    feature_type: feature.type, feature_confidence: feature.confidence,
+    scored_type: markScored.type, scored_score: markScored.score,
+    hmp: cap.hmp ? { ...cap.hmp, crop_ref: undefined, vector_ref: undefined } : null,
+    marked_text: cap.markedText, is_tombstone: false,
+  });
   gtrace({ page_id: pid, strokes: diagOf(realScored), feature: feature.type, conf: Number(feature.confidence.toFixed(2)), shape: markScored.type, marked: cap.markedText.slice(0, 40), resolved: `mark·${feature.type}（累积静默）` });
 
   // 手写 = 唯一早提交边界事件（区域冷却已落定 + 识别已可靠定型，无需再额外等）
@@ -156,11 +173,11 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
   if (!sessionTrace) sessionTrace = shortId('trc');
   const evt = recordEvent(stroke, sessionTrace, pointerType, penUpAt);
   if (!evt) return;
-  persistInk(); // 每笔落盘（去抖在 store 内部）
 
   // 空间连贯：挨着当前区域就并进去（重置冷却）；落到远处 → 旧区先收口、此处另起一个区域。
   if (regBbox && !nearRegion(evt.geometry.bbox)) flushRegion();
   regEvents.push(evt);
+  regStrokes.push(stroke); // 与 regEvents 对齐（落账本时取构成笔）
   regBbox = regBbox ? unionBb(regBbox, evt.geometry.bbox) : evt.geometry.bbox;
   if (!regFirstAt) regFirstAt = performance.now();
   window.clearTimeout(regTimer);
@@ -183,16 +200,29 @@ initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
 // 设置变化时取消在途计时（避免旧设置下的延迟触发）
 bus.on('settings:changed', cancelTimers);
 
-// AI 卡片持久化：page_id 形如 pg_{hash8}_{idx} → 取末段为页号
+// page_id 形如 pg_{hash8}_{idx} → 取末段为页号
 function pageIdxOf(pageId: string): number {
   const m = pageId.match(/_(\d+)$/);
   return m ? Number(m[1]) : state.pageIndex;
 }
-bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; upsertOverlay(pageIdxOf(ov.page_id), ov); });
-bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; upsertOverlay(pageIdxOf(ov.page_id), ov); });
-bus.on('overlay:remove', (id) => {
-  const ov = state.overlays.find((x) => x.overlay_id === (id as string));
-  if (ov) removeOverlay(pageIdxOf(ov.page_id), ov.overlay_id);
+// AI 旁注持久化在书日志：新轮由 pipeline 提交时 append ai_turn；替换由同 overlay_id 的新条目折叠覆盖。
+// 这里只处理用户对卡片的状态变化（接受/编辑/忽略）→ 追加 supersedes 的新 ai_turn 记新状态/改写文本。
+bus.on('overlay:state', (o) => {
+  const ov = o as ScreenOverlay;
+  if (state.documentId) void updateOverlayState(state.documentId, ov);
+});
+// 擦/撤一笔 → 给整 mark 落 tombstone（append-only）+ 从 pending session 移除（别再进下次综合）
+bus.on('mark:erase', (mid) => {
+  const markId = mid as string;
+  const bookId = state.documentId ?? 'book';
+  removeMark(bookId, markId);
+  void appendMarkEntry({
+    document_id: bookId, page_id: state.pageId ?? '', page_index: state.pageIndex, mark_id: markId,
+    strokes: [], bbox: [0, 0, 0, 0], tool: 'pen', color: '',
+    pointer_type: 'unknown', device_id: DEVICE_ID, abs_timestamp: Date.now(),
+    feature_type: 'drawing', feature_confidence: 0, scored_type: 'stroke', scored_score: 0,
+    hmp: null, marked_text: '', is_tombstone: true,
+  });
 });
 
 initWhisper($('whisper-layer'));
@@ -309,25 +339,67 @@ reading.addEventListener('drop', (e) => {
   if (file) void loadFile(file);
 });
 
-bus.on('document:loaded', () => {
+bus.on('document:loaded', () => { void restoreFromLedger(); });
+
+/** reload/重开后从账本重建：笔迹(folded marks) + AI 旁注/对话 buffer(book log) + pending session(水位线后)。 */
+async function restoreFromLedger(): Promise<void> {
   document.body.classList.add('doc-loaded');
   $('empty-state').style.display = 'none';
   $('doc-name').textContent = state.fileName;
   void renderRecent(recentBooks, { withCap: true }); // 刷新书架（新导入的书下次回到空屏即可见）
-  if (state.documentId) openBook(state.documentId); // 开书非阻塞预热每本书对话 buffer（≈0ms，纯建数组）
-  // 从持久化恢复：两段记忆、原始笔迹、AI 卡片（重排/图解缓存由 reader 按需读 store）
-  const doc = storedDoc();
-  if (!doc || !state.documentId) return;
-  state.overlays = [];
-  for (const p of Object.values(doc.pages)) {
-    const pid = `pg_${state.documentId.slice(4, 12)}_${p.page_index}`;
-    // 逐页记忆撤除（押后）：只恢复笔迹 + AI 卡片，不再 restorePage
-    // 笔迹：填回 strokesByPage（按 page_id 索引）
-    if (p.strokes?.length) state.strokesByPage.set(pid, p.strokes.map((s) => ({ tool: s.tool, points: s.points })));
-    // 卡片：合到全局 overlays（whisper/reader 按当前 page_id 过滤显示）
-    if (p.overlays?.length) state.overlays.push(...p.overlays);
+  const docId = state.documentId;
+  if (!docId) return;
+  openBook(docId); // 非阻塞预热每本书对话 buffer
+
+  // 1) 笔迹：折叠后的 mark → strokesByPage（按 page_id）+ 回填 strokeMarkIds（擦/撤仍能定位整 mark）
+  const marks = await getFoldedMarks(docId);
+  state.strokesByPage.clear();
+  for (const m of marks) {
+    const arr = state.strokesByPage.get(m.page_id) ?? [];
+    for (const ps of m.strokes) {
+      const st: Stroke = { tool: ps.tool as Tool, points: ps.points };
+      strokeMarkIds.set(st, m.mark_id);
+      arr.push(st);
+    }
+    state.strokesByPage.set(m.page_id, arr);
   }
-});
+
+  // 2) AI 旁注 + 对话 buffer：书日志折叠（每 overlay_id 取最新；dismissed 不显示）
+  const turns = await getBookAiTurns(docId);
+  state.overlays = [];
+  for (const t of turns) {
+    if (t.overlay_state === 'dismissed') continue;
+    state.overlays.push(t.overlay);
+    appendMsg(docId, { role: 'user', content: t.prompt_snapshot });
+    appendMsg(docId, { role: 'assistant', content: t.ai_reply });
+  }
+
+  // 3) pending session：水位线之后未综合的 mark 重建进内存 session（下次 idle 仍能综合）
+  const pending = await getPendingMarks(docId);
+  if (pending.length) {
+    const baseT = performance.now(), wall = Date.now();
+    for (const pm of pending) addMark(docId, persistedToMark(pm, baseT, wall));
+  }
+
+  bus.emit('page:rendered'); // 补一次重绘：renderPage 早于本异步恢复完成，此处让 redrawInk/whisper 拿到恢复后的数据
+}
+
+/** 持久 mark → 内存 Mark（仅 pending session 重建用）。t 由 abs_timestamp 折回 performance.now 时间线（保关系 gap）。 */
+function persistedToMark(pm: PersistedMark, baseT: number, wall: number): Mark {
+  const points = pm.strokes.flatMap((s) => s.points);
+  const event: AnnotationEvent = {
+    event_id: pm.mark_id, trace_id: '', document_id: pm.document_id, page_id: pm.page_id,
+    event_type: pm.scored_type as EventType, geometry: { bbox: pm.bbox }, stroke_points: points,
+    text_note: null, created_at: pm.created_at, device_id: pm.device_id, session_id: '',
+    pointer_type: pm.pointer_type, version: SCHEMA_VERSION,
+  };
+  const feature: StrokeFeature = {
+    type: pm.feature_type, confidence: pm.feature_confidence, scaleRatio: NaN,
+    raw: { strokeCount: pm.strokes.length, templateScore: 0, templateType: pm.scored_type as EventType, scaleRatio: NaN, complexity: 0, ocrWorthy: false, tplSpan: 0 },
+  };
+  const scored: ScoredGesture = { type: pm.scored_type as EventType, score: pm.scored_score };
+  return { id: pm.mark_id, event, feature, scored, t: baseT - (wall - pm.abs_timestamp), hmp: pm.hmp, markedText: pm.marked_text };
+}
 
 let lastPageId: string | null = null;
 bus.on('page:rendered', () => {

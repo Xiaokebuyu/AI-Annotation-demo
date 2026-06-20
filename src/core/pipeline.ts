@@ -1,6 +1,7 @@
 import type { AnnotationEvent, EventType, HMP, InferenceRequest, InferenceResult, InferenceView, MarkFeatureType, MarkShape, NormBBox, OCRResult, OutputMode, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
 import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
-import { DEVICE_ID, SESSION_ID, shortId } from './ids';
+import { DEVICE_ID, SESSION_ID, shortId, sha256Hex } from './ids';
+import { appendAiTurnEntry, setSynthesisWatermark } from '../local/store';
 import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
 import { resolveTarget, buildHmp } from '../evidence/target';
 import { buildMarkGraph } from '../evidence/mark-graph';
@@ -28,6 +29,10 @@ const CHAT_SYSTEM =
 const GVERB: Record<string, string> = {
   circle: '圈选', underline: '划线', highlight: '高亮', arrow: '画箭头标', margin_note: '手写批注', tap_region: '点选', stroke: '标记',
 };
+
+/** CHAT_SYSTEM 指纹（ai_turn 存 system_prompt_hash，便于日后 prompt 变更后审计/复现）。模块加载即算。 */
+const SYS_HASH_P: Promise<string> = sha256Hex(new TextEncoder().encode(CHAT_SYSTEM).buffer as ArrayBuffer)
+  .then((h) => h.slice(0, 8)).catch(() => '');
 
 /** 单笔封装为契约 shape。会话内多笔共享一个 trace_id（决策：停笔会话）。 */
 export function makeEvent(stroke: Stroke, traceId: string): AnnotationEvent | null {
@@ -569,5 +574,19 @@ export async function commitSessionDiscussion(
   overlay.geometry = { anchor_bbox: view.anchor_bbox };
   state.overlays.push(overlay);
   bus.emit('overlay:add', overlay);
+
+  // 落账本：ai_turn 进书日志（显示快照 + 锚点 + view 快照[crop 剥] + provenance）；并推综合水位线
+  await appendAiTurnEntry({
+    document_id: bookId, page_id: pageId, page_index: state.pageIndex,
+    overlay_id: discId, overlay, overlay_state: 'shown', user_edited_text: null,
+    ai_reply: result.content,
+    anchor: { surface_id: view.page_id, mark_ids: marks.map((m) => m.id), object_refs: view.anchor_refs },
+    inference_view: { ...view, crop: undefined }, // 存料不存图：crop 落库前剥掉
+    prompt_snapshot: userContent,
+    system_prompt_hash: await SYS_HASH_P,
+    settings_snapshot: { inferModel: settings.inferModel, reflowProvider: settings.reflowProvider },
+    trigger: reason, model: result.model_name, supersedes: null,
+  });
+  setSynthesisWatermark(); // 此前所有 mark 记为已综合；之后的新 mark = pending
   return true;
 }

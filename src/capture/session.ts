@@ -69,6 +69,13 @@ export function clearSession(bookId: string): void {
   sessions.delete(bookId);
 }
 
+/** 从 session 移除一个 mark（擦除/撤销一笔时，别让它再进下次综合）。 */
+export function removeMark(bookId: string, markId: string): void {
+  const s = sessions.get(bookId);
+  if (!s) return;
+  s.marks = s.marks.filter((m) => m.id !== markId);
+}
+
 /** 打包一个 mark（纯组装；代表 event 与 HMP/markedText 由调用方先算好）。 */
 export function makeMark(
   event: AnnotationEvent,

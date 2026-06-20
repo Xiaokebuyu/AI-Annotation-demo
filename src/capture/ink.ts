@@ -1,13 +1,7 @@
 import type { StrokePoint } from '../core/contracts';
 import { normToPx, pxToNorm, pageCss } from '../core/transform';
 import { trace } from '../core/trace';
-import { bus, currentStrokes, state, type Stroke, type Tool } from '../app/state';
-import { putStrokes } from '../local/store';
-
-/** 把当前页笔迹落盘（每次抬笔/擦除/撤销都调一次，去抖在 store 内部）。 */
-export function persistInk(): void {
-  putStrokes(state.pageIndex, currentStrokes().map((s) => ({ tool: s.tool, points: s.points })));
-}
+import { bus, currentStrokes, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
 
 let cv: HTMLCanvasElement;
 let ctx: CanvasRenderingContext2D;
@@ -86,23 +80,32 @@ function eraseAt(e: PointerEvent): void {
   const hitRadius = 10 / Math.max(pageCss.w, 1); // ~10px
   for (let i = strokes.length - 1; i >= 0; i--) {
     const hit = strokes[i].points.some((pt) => Math.hypot(pt.x - p.x, (pt.y - p.y) * (pageCss.h / pageCss.w)) < hitRadius);
-    if (hit) {
-      const [removed] = strokes.splice(i, 1);
-      trace('StrokeErased', { page_id: state.pageId ?? '', points: removed.points.length });
-      persistInk();
-      redrawInk();
-      return;
-    }
+    if (hit) { eraseStroke(strokes[i], 'erase'); return; }
   }
+}
+
+/**
+ * 擦/撤一笔：若该笔已属于某 mark（组装过、已落账本）→ 擦掉整 mark（移除其全部笔 + 发 mark:erase
+ * 让 main 落 tombstone）；否则（尚未组装的在途笔）只移这一笔，无需 tombstone（它还没持久化）。
+ */
+function eraseStroke(stroke: Stroke, reason: 'erase' | 'undo'): void {
+  const strokes = currentStrokes();
+  const mid = strokeMarkIds.get(stroke);
+  if (mid) {
+    for (let k = strokes.length - 1; k >= 0; k--) if (strokeMarkIds.get(strokes[k]) === mid) strokes.splice(k, 1);
+    bus.emit('mark:erase', mid); // → main: 落 mark tombstone + 从 session 移除
+  } else {
+    const k = strokes.indexOf(stroke);
+    if (k >= 0) strokes.splice(k, 1);
+  }
+  trace(reason === 'undo' ? 'StrokeUndone' : 'StrokeErased', { page_id: state.pageId ?? '', mark_id: mid ?? '' });
+  redrawInk();
 }
 
 export function undoStroke(): void {
   const strokes = currentStrokes();
   if (!strokes.length) return;
-  strokes.pop();
-  trace('StrokeUndone', { page_id: state.pageId ?? '' });
-  persistInk();
-  redrawInk();
+  eraseStroke(strokes[strokes.length - 1], 'undo');
 }
 
 export function initInk(
