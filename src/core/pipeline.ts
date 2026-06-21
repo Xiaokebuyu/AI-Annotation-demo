@@ -5,6 +5,7 @@ import { appendAiTurnEntry, getReflow, setSynthesisWatermark } from '../local/st
 import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
 import { resolveTarget, buildHmp } from '../evidence/target';
 import { buildMarkGraph } from '../evidence/mark-graph';
+import { findSpatialRecall } from '../evidence/recall';
 import { projectInferenceView } from '../evidence/inference-view';
 import type { Mark, Session } from '../capture/session';
 import { mark } from './metrics';
@@ -636,12 +637,18 @@ export async function commitSessionDiscussion(
     else if (ah?.crop_ref) crop = { role: 'composite', data: ah.crop_ref };
   }
 
+  // 空间召回（治本·根因 A）与滑窗上下文并发取，省 commit 路径串行延迟
+  const [priorNeighbors, pageCtx] = await Promise.all([
+    findSpatialRecall(session.bookId, marks), // 账本捞回同页邻近旧标注（不进 graph.nodes）
+    slidingContext(3000),                     // 以当前页为中心、前后共 ~3000 字滑动窗
+  ]);
   const view = projectInferenceView(graph, {
     trigger: reason,
-    pageText: await slidingContext(3000), // 以当前页为中心、前后共 ~3000 字滑动窗
+    pageText: pageCtx,
     question: reason === 'handwriting' ? (triggerMark?.markedText || '') : undefined,
     crop,
     anchorMarkId: anchorMark.id,
+    priorNeighbors,
   });
   mirrorView(view, reason, discId); // dev 通道：喂模型前的精简载荷可离线核对
 
@@ -737,6 +744,20 @@ export async function commitSessionDiscussion(
         ...(quads.length ? [{ k: '时间四象限', v: quads.join(' · ') }] : []),
       ],
     });
+    // ②.5 空间召回（治本·根因 A）：建图视野只到"上次回复以来"，这步从持久账本按 bbox 邻近
+    // 捞回墙上画着、但已被清出 session 的同页旧标注，作回访上下文（不进 graph.nodes）
+    const recallPages = [...new Set(marks.map((m) => m.event.page_id))].length;
+    pl.push({
+      stage: 'recall', label: '空间召回（账本·同页 bbox 邻近）', status: priorNeighbors.length ? 'ran' : 'skipped',
+      note: '建图只看本段 session；这步把"空间临近但已被上一次回复清出 session"的旧标注从账本捞回',
+      input: [{ k: '范围', v: `本书同页已落库标注（涉及 ${recallPages} 页）` }],
+      output: [{
+        k: '召回',
+        v: priorNeighbors.length
+          ? priorNeighbors.map((r) => `${r.rel === 'containment' ? '圈住' : '邻近'}「${r.text}」`).join(' / ')
+          : '无（附近无已落库旧标注）',
+      }],
+    });
     // ③ inference-view 蒸馏（确定性·无模型）
     const cropThumb = view.crop ? await thumb(view.crop.data) : '';
     pl.push({
@@ -745,12 +766,14 @@ export async function commitSessionDiscussion(
       input: [
         { k: '触发', v: reason === 'idle' ? '长停顿综合' : '手写定向' },
         { k: '图', v: `${graph.nodes.length} 节点 / ${graph.edges.length} 边` },
+        { k: '召回', v: `${priorNeighbors.length} 条邻近旧标注` },
       ],
       output: [
         { k: '关系叙事 narrative', v: view.narrative || '—' },
         { k: '所标内容 marked', v: view.marked || '（未提取到文字）' },
         ...(view.question ? [{ k: '手写问 question', v: view.question }] : []),
         { k: '滑窗上下文', v: `${view.page_context?.length ?? 0} 字` },
+        { k: '回访 recall', v: view.recall?.length ? view.recall.map((r) => `「${r.text}」`).join('、') : '无' },
         { k: '锚点', v: `${view.anchor_refs.length} 对象` },
         { k: '随图 crop', v: view.crop ? `有（${view.crop.role}）` : '无' },
       ],

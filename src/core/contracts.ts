@@ -272,6 +272,16 @@ export interface MarkGraph {
   version: string;
 }
 
+/**
+ * 空间召回：建图视野只到"上次回复以来"，回复一次 session 即清空——墙上画着的旧标注对建图不存在。
+ * 提交时从持久账本按 bbox 邻近捞回同页的旧 mark（已综合的），作"回访"上下文喂进这一轮（非当前动作）。
+ * 只带文字事实 + 与新标注的几何关系；不进 graph.nodes（避免污染 marked/anchor/temporal 主链）。
+ */
+export interface PriorNeighbor {
+  text: string;                     // 旧标注的 marked_text（空则"（无字）"）
+  rel: 'proximity' | 'containment'; // 与当前这段标注的几何关系（紧邻 / 当前标注圈住了它）
+}
+
 /** inference-view：标注图蒸馏成的精简推理载荷（确定性产出，丢坐标/stroke/分数）。 */
 export interface InferenceView {
   view_id: string;
@@ -284,6 +294,7 @@ export interface InferenceView {
   anchor_refs: string[];            // 回屏锚点对象（不给模型坐标）
   anchor_bbox: NormBBox;            // 锚到哪（最近一笔）
   page_id: string;
+  recall?: PriorNeighbor[];         // 这附近先前标过的旧标注（空间召回；调试/账本可见）
   version: string;
 }
 

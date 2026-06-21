@@ -8,7 +8,7 @@
  *
  * 这层是"采集 ↔ 推理"的合同面，泛化了旧的 pipeline.hmpFocus（单笔取文字）。
  */
-import type { InferenceView, MarkGraph, MarkNode, QuadrantLabel } from '../core/contracts';
+import type { InferenceView, MarkGraph, MarkNode, PriorNeighbor, QuadrantLabel } from '../core/contracts';
 import { INFERVIEW_SCHEMA_VERSION } from '../core/contracts';
 import { shortId } from '../core/ids';
 
@@ -33,6 +33,16 @@ function phraseFor(node: MarkNode, text: string): string {
   return text ? `${verb}「${text}」` : `${verb}了一处`;
 }
 
+/** 空间子句里对一个 mark 的简短指代：有字用「字」，无字退回动词短语。 */
+function refOf(node: MarkNode, text: string): string {
+  if (text) return `「${text}」`;
+  if (isWriting(node)) return '手写那段';
+  return `${VERB[node.shape] ?? '标注'}的那处`;
+}
+
+/** 空间关系强弱：同一对 mark 取最强的一类，避免重复子句。 */
+const SPATIAL_RANK: Record<string, number> = { containment: 3, same_target: 2, proximity: 1 };
+
 /** 相邻节点的连接词，按时间×空间四象限。 */
 function connector(quad: QuadrantLabel | undefined, gapMs: number): string {
   switch (quad) {
@@ -52,6 +62,7 @@ export function projectInferenceView(
     question?: string;
     crop?: { role: 'ink' | 'composite'; data: string };
     anchorMarkId?: string;
+    priorNeighbors?: PriorNeighbor[]; // 空间召回回来的同页邻近旧标注（回访子句用；不进 graph.nodes）
   },
 ): InferenceView {
   const { trigger, pageText } = opts;
@@ -80,6 +91,36 @@ export function projectInferenceView(
     if (from && to) narrative += `；并用箭头把「${nodeText(from) || '前者'}」指向「${nodeText(to) || '后者'}」`;
   }
 
+  // 空间子句（根因 B）：把同段内**非时间相邻**的空间关系写进叙事——这些边 buildMarkGraph 恒算，
+  // 但此前只走时间链、从不读它。相邻对已由四象限连接词表达，故跳过，避免重复；有界封顶 3 条。
+  const adjacent = new Set<string>();
+  for (let i = 1; i < nodes.length; i++) adjacent.add(`${nodes[i - 1].mark_id}|${nodes[i].mark_id}`);
+  const pairBest = new Map<string, { from: string; to: string; rel: string }>();
+  for (const e of graph.edges) {
+    if (e.kind !== 'spatial') continue;
+    if (adjacent.has(`${e.from}|${e.to}`) || adjacent.has(`${e.to}|${e.from}`)) continue; // 相邻对：连接词已表达
+    const key = [e.from, e.to].sort().join('|');
+    const prev = pairBest.get(key);
+    if (!prev || (SPATIAL_RANK[e.rel] ?? 0) > (SPATIAL_RANK[prev.rel] ?? 0)) pairBest.set(key, { from: e.from, to: e.to, rel: e.rel });
+  }
+  const nodeById = new Map(nodes.map((n) => [n.mark_id, n] as const));
+  const refText = (id: string): string => { const n = nodeById.get(id); return n ? refOf(n, nodeText(n)) : '某处'; };
+  const spatialClauses: string[] = [];
+  for (const { from, to, rel } of pairBest.values()) {
+    if (spatialClauses.length >= 3) break;
+    const a = refText(from), b = refText(to);
+    spatialClauses.push(
+      rel === 'containment' ? `${a}圈住了${b}`
+        : rel === 'same_target' ? `${a}、${b}落在同一处文字上`
+          : `${a}与${b}紧挨在一处`,
+    );
+  }
+  if (spatialClauses.length) narrative += `；位置关系上，${spatialClauses.join('；')}`;
+
+  // 回访子句（根因 A）：这附近先前已标过的旧标注（空间召回·账本捞回，**非当前动作**，清晰区隔）。
+  const recall = opts.priorNeighbors ?? [];
+  if (recall.length) narrative += `（这附近你先前标过：${recall.map((r) => `「${r.text}」`).join('、')}）`;
+
   const marked = texts.filter(Boolean).join(' / ');
   const anchor = (opts.anchorMarkId ? nodes.find((n) => n.mark_id === opts.anchorMarkId) : null) ?? nodes[nodes.length - 1] ?? null;
 
@@ -94,6 +135,7 @@ export function projectInferenceView(
     anchor_refs: anchor?.target_object_refs ?? [],
     anchor_bbox: anchor?.bbox ?? [0, 0, 0, 0],
     page_id: anchor?.page_id ?? '',
+    recall: recall.length ? recall : undefined,
     version: INFERVIEW_SCHEMA_VERSION,
   };
 }

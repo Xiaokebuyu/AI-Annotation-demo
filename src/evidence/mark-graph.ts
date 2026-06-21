@@ -16,12 +16,13 @@ import { BURST_GAP_MS } from '../capture/session';
 import { markShapeOf } from '../capture/classify';
 import { pointInPolygon } from './focus';
 
-/** 两 mark 中心被视为"空间近"的归一化距离阈值。 */
-const SPATIAL_NEAR = 0.12;
+/** 两 mark 中心被视为"空间近"的归一化距离阈值。导出供空间召回(recall.ts)复用——阈值单一真源。 */
+export const SPATIAL_NEAR = 0.12;
 
 const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));
 const centerOf = (b: NormBBox): [number, number] => [b[0] + b[2] / 2, b[1] + b[3] / 2];
-const centerDist = (a: NormBBox, b: NormBBox): number => {
+/** 两 bbox 中心的归一化距离。导出供 recall.ts 复用。 */
+export const centerDist = (a: NormBBox, b: NormBBox): number => {
   const [ax, ay] = centerOf(a), [bx, by] = centerOf(b);
   return Math.hypot(ax - bx, ay - by);
 };
