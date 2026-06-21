@@ -7,8 +7,10 @@
  *   · AI 会话：ChatGPT 式对话流 + 每轮「处理流水线」逐组件时间线（收到→产出+图）+ 思考过程。【已实现】
  *     —— 它已**取代**旧「上下文监控」面板（那面板的"喂了什么/回了什么/看到的图"被流水线全覆盖且更细、可持久，
  *        故不再单列入口；旧 inspect 面板仍留在 #dev 供直达，离线 dev-telemetry 镜像也照旧）。
- *   · 标注取证 HMP：逐 mark 的 HMP 取证记录——命中了哪个对象 / 读出转写了什么 / 归到哪种 mode / 取证图截对没，看"感知对不对"（AI 会话的姊妹镜）。【已实现】
- *   · SurfaceIndex 对象 / 设置：迁移中，暂跳旧 dev 页(#dev)，逐步搬进来后退役它。
+ *   · 采集取证（感知层）：一页两段、深度联动——「HMP 取证（全书逐笔）」+「SurfaceIndex 对象（本页对象表）」；
+ *     二者是同一批对象 id 的消费者/生产者（HMP.target_object_refs 指进对象表），命中 ref ↔ 对象行互跳。
+ *     看"感知对不对"，是 AI 会话的姊妹镜。【已实现】
+ *   · 设置：迁移中，暂跳旧 dev 页(#dev)，逐步搬进来后退役它。
  *
  * 非「阅读」的页面渲染进 #app-pages（覆盖正文区、不挡侧栏）。侧栏可折叠（键 m / 折叠钮），折叠时正文占满。
  */
@@ -20,12 +22,11 @@ import type { HMP, PipelineStage, PipelineStageIO, SurfaceObject } from '../core
 
 const esc = (s: string): string => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
 
-type PageId = 'reader' | 'chat' | 'hmp' | 'objects' | 'settings';
+type PageId = 'reader' | 'chat' | 'hmp' | 'settings';
 const PAGES: Array<{ id: PageId; icon: string; label: string; ready: boolean }> = [
   { id: 'reader', icon: '📖', label: '阅读', ready: true },
   { id: 'chat', icon: '💬', label: 'AI 会话', ready: true }, // 含逐组件处理流水线，已取代旧「上下文监控」
-  { id: 'hmp', icon: '🔖', label: '标注取证 HMP', ready: true }, // 采集取证镜：逐 mark 命中/读出/取证图
-  { id: 'objects', icon: '▦', label: 'SurfaceIndex 对象', ready: false },
+  { id: 'hmp', icon: '🔬', label: '采集取证', ready: true }, // 合并 HMP 取证 + SurfaceIndex 对象，深度联动
   { id: 'settings', icon: '⚙', label: '设置', ready: false },
 ];
 
@@ -183,6 +184,29 @@ function injectStyle(): void {
   .hmp-fields .cns-kv { margin: 3px 0; }
   .hmp-miss { color: var(--bad); font-weight: 600; }
   .hmp-xpage { color: var(--hint); }
+
+  /* 采集取证页：分段切换 + 对象表 + ref↔对象 互跳 */
+  #cap-seg { display: flex; gap: 4px; margin-left: 14px; background: var(--hl); border-radius: 9px; padding: 3px; }
+  .cap-segbtn { border: 0; background: transparent; color: var(--mut); font: 600 12.5px var(--sans); padding: 5px 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
+  .cap-segbtn.active { background: var(--page); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+  .cap-pane { display: none; }
+  #cap-wrap[data-seg="hmp"] .cap-hmp { display: block; }
+  #cap-wrap[data-seg="objects"] .cap-obj { display: block; }
+  .obj-inner { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  .cap-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .cap-tbl th, .cap-tbl td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .cap-tbl th { color: var(--mut); font-weight: 600; position: sticky; top: 0; background: var(--paper); z-index: 1; }
+  .cap-tbl tr[data-objid]:hover { background: var(--hl); }
+  .cap-mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--mut); word-break: break-all; }
+  .cap-dim { color: var(--hint); }
+  .cap-link { color: #3b6fb3; text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
+  .cap-link:hover { color: #2a5894; background: var(--hl); border-radius: 4px; }
+  .cap-markchip { display: inline-block; font-size: 11px; background: var(--hl); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; margin: 1px 4px 1px 0; cursor: pointer; color: var(--mut); }
+  .cap-markchip:hover { background: var(--page); color: var(--ink); }
+  .cap-tbl tr.cap-flash { animation: capflashbg 1.4s ease; }
+  .hmp-card.cap-flash { animation: capflashcard 1.4s ease; }
+  @keyframes capflashbg { 0%, 28% { background: #fde68a; } 100% { background: transparent; } }
+  @keyframes capflashcard { 0%, 28% { background: #fde68a; } 100% { background: var(--page); } }
   `;
   document.head.appendChild(s);
 }
@@ -262,7 +286,7 @@ function showPage(id: PageId): void {
 
 function renderPage(id: PageId, content: HTMLDivElement): void {
   if (id === 'chat') { renderChat(content); return; }
-  if (id === 'hmp') { renderHmp(content); return; }
+  if (id === 'hmp') { renderCapture(content); return; }
   const label = PAGES.find((p) => p.id === id)?.label ?? '';
   content.innerHTML = `<div class="cns-placeholder"><div style="font-size:15px">「${esc(label)}」迁移中</div>`
     + `<div style="font-size:12.5px;margin-top:6px">暂时还在旧 dev 页，稍后搬进来。</div>`
@@ -413,10 +437,15 @@ function turnBlock(t: PersistedAiTurn, idx: number, markMap: Map<string, Persist
     + `</div>`;
 }
 
-/* ── 标注取证 HMP 页（采集取证镜：逐 mark 命中/读出/取证图）──────────────────────
- * 骨架 = 每本书折叠 mark 账本（getFoldedMarks，持久·全量·跨 reload），叠上本会话 state.lastHmps
- * 的取证图（落库剥 crop/ink，仅本会话标注带图）+ 未落库的最新一笔即时占位。命中对象→原文解析
- * 按当前页（state.surfaceIndex 只有当前页）：非当前页的 mark 只显条数、不误报"缺"。 */
+/* ── 采集取证 / 感知层页（合并 HMP 取证 + SurfaceIndex 对象，深度联动）────────────────
+ * 一页两段：① HMP 取证（全书逐笔，新→旧）② SurfaceIndex 对象（本页对象表，refs 的字典）。
+ * 二者是同一批对象 id 的消费者/生产者——HMP.target_object_refs 指进对象表。互跳：点 HMP 命中
+ * 对象 ref → 跳对象段高亮那行；对象行「被命中」chip → 跳 HMP 段高亮那张卡。
+ * 对象 id 是页内的，故互跳/原文解析天然只对当前页成立（state.surfaceIndex 只有当前页）。
+ * HMP 段骨架=每本书折叠 mark 账本（getFoldedMarks，持久·全量·跨 reload），叠本会话 state.lastHmps
+ * 的取证图（落库剥 crop/ink，仅本会话标注带图）+ 未落库最新一笔即时占位。 */
+
+let captureSeg: 'hmp' | 'objects' = 'hmp';
 
 const HMP_MODE: Record<string, { t: string; c: string }> = {
   anchored: { t: '锚定原文', c: '#22c55e' }, self_content: { t: '自身内容', c: '#f59e0b' },
@@ -470,25 +499,33 @@ function hmpShots(hmp: HMP): string {
     : `<div class="hmp-noshot">无取证图<br>（历史标注落库已剥图）</div>`;
 }
 
-/** 命中对象行：当前页才解析回原文；非当前页只显条数（不误报"缺"）。 */
+/** 一笔的短 chip 标签（对象段「被命中」用）。 */
+function markChipLabel(feature: string, marked: string): string {
+  const t = (marked || '').replace(/\s+/g, ' ').slice(0, 10);
+  return `${HMP_FEAT[feature] ?? feature}${t ? `「${t}」` : ''}`;
+}
+
+/** 命中对象行：当前页→每 ref 渲成可跳 cap-link（解析回原文，dangling 标红）；非当前页只显条数（不误报"缺"）。 */
 function hmpTargetRow(row: HmpRow, objMap: Map<string, SurfaceObject> | null): string {
   const refs = row.hmp.target_object_refs;
   if (!refs.length) return `<div class="cns-kv"><span class="k">命中对象：</span><span class="hmp-xpage">空（未命中 / 自身内容）</span></div>`;
   if (objMap) {
     const parts = refs.map((id) => {
       const o = objMap.get(id);
-      return o ? `${esc(o.id)}「${esc((o.text || '·' + o.type).slice(0, 24))}」` : `${esc(id)}<span class="hmp-miss">(缺)</span>`;
+      return o
+        ? `<span class="cap-link" data-ref="${esc(id)}" title="跳到对象表这一行">${esc(id)}「${esc((o.text || '·' + o.type).slice(0, 24))}」</span>`
+        : `${esc(id)}<span class="hmp-miss">(缺)</span>`;
     });
     return `<div class="cns-kv"><span class="k">命中对象（${refs.length}）：</span>${parts.join('　')}</div>`;
   }
-  return `<div class="cns-kv"><span class="k">命中对象：</span><span class="hmp-xpage">${refs.length} 个（在第 ${row.page_index + 1} 页，切到该页可解析回原文）</span></div>`;
+  return `<div class="cns-kv"><span class="k">命中对象：</span><span class="hmp-xpage">${refs.length} 个（在第 ${row.page_index + 1} 页，切到该页可解析回原文 + 互跳）</span></div>`;
 }
 
 function hmpCard(row: HmpRow, objMap: Map<string, SurfaceObject> | null): string {
   const h = row.hmp;
   const mode = HMP_MODE[h.mode] ?? { t: h.mode, c: '#8a877f' };
   const region = `[${h.target_region.map((n) => n.toFixed(3)).join(', ')}]`;
-  return `<div class="hmp-card">`
+  return `<div class="hmp-card" data-mark="${esc(row.key)}">`
     + `<div class="hmp-chead">`
     + `<span class="hmp-mode" style="background:${mode.c}">${esc(mode.t)}</span>`
     + `<span class="hmp-act">${esc(HMP_ACTION[h.action] ?? h.action)}</span>`
@@ -504,33 +541,88 @@ function hmpCard(row: HmpRow, objMap: Map<string, SurfaceObject> | null): string
     + `</div></div></div>`;
 }
 
-async function renderHmpList(): Promise<void> {
-  const inner = document.getElementById('hmp-inner');
-  if (!inner) return;
-  if (!selectedBook) { inner.innerHTML = `<p class="cns-empty">还没有书籍。导入一本 PDF、圈/划/写一处，取证记录会出现在这里。</p>`; return; }
-  const rows = await buildHmpRows(selectedBook);
-  if (!rows.length) {
-    inner.innerHTML = `<p class="cns-empty">这本书还没有标注取证记录。<br>圈/划/写一处、停笔，每一笔的 HMP（命中了什么 / 读出什么 / 取证图）会在这里出现。</p>`;
-    return;
-  }
-  const si = state.surfaceIndex; // 仅当前页对象表 → 只有当前页的 mark 能解析回原文
-  const objMap = si ? new Map(si.objects.map((o) => [o.id, o])) : null;
-  inner.innerHTML = `<p class="hmp-note">采集取证镜：逐笔看 HMP——命中了哪个对象、读出/转写了什么、归到哪种 mode、取证图截对没。和「AI 会话」是姊妹镜——那个看"推理对不对"，这个看"感知对不对"。共 ${rows.length} 笔，新→旧。</p>`
-    + rows.map((r) => hmpCard(r, (objMap && si && r.page_id === si.surface_id) ? objMap : null)).join('');
+/** SurfaceIndex 对象段：本页对象表（step① 源头）+ 每行「被命中」的笔 chip（可跳 HMP 卡）。 */
+function renderObjTable(objMarks: Map<string, Array<{ id: string; label: string }>>): string {
+  const si = state.surfaceIndex;
+  if (!si || !si.objects.length) return `<p class="cns-empty">本页无 SurfaceIndex 对象。<br>打开一本 PDF、翻到某页——这里显示该页被解析出的对象表（HMP 的 refs 就指向它们）。</p>`;
+  const CAP = 150;
+  const shown = si.objects.slice(0, CAP);
+  const dist: Record<string, number> = {};
+  for (const o of si.objects) dist[o.type] = (dist[o.type] ?? 0) + 1;
+  const distStr = Object.entries(dist).map(([k, n]) => `${k} ${n}`).join(' · ');
+  const body = shown.map((o) => {
+    const hits = objMarks.get(o.id) ?? [];
+    const chips = hits.length
+      ? hits.map((h) => `<span class="cap-markchip" data-mark="${esc(h.id)}" title="跳到 HMP 这张卡">${esc(h.label)}</span>`).join('')
+      : '<span class="cap-dim">—</span>';
+    return `<tr data-objid="${esc(o.id)}"><td class="cap-mono">${esc(o.id)}</td><td>${esc(o.type)}</td><td>${esc(o.role || '—')}</td><td class="cap-mono">${o.bbox.map((n) => n.toFixed(3)).join(',')}</td><td>${esc((o.text || '').slice(0, 40) || '—')}</td><td>${esc(o.source)}</td><td>${chips}</td></tr>`;
+  }).join('');
+  return `<p class="hmp-note">本页 SurfaceIndex 对象表（step①：页被解析成什么）——HMP 的 target_object_refs 指向这些 id。surface=${esc(si.surface_type)} · 共 ${si.objects.length} 个 · ${esc(distStr)}${si.objects.length > CAP ? ` · 仅显前 ${CAP}` : ''}。「被命中」可点回 HMP 卡。</p>`
+    + `<table class="cap-tbl"><thead><tr><th>id</th><th>type</th><th>role</th><th>bbox</th><th>text</th><th>src</th><th>被命中</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
-function renderHmp(c: HTMLDivElement): void {
+/** 渲染两段内容（HMP 取证 + 对象表），并备好 ref↔对象 互跳所需的映射。 */
+async function renderCaptureContent(): Promise<void> {
+  const hmpInner = document.getElementById('hmp-inner');
+  const objInner = document.getElementById('obj-inner');
+  if (!hmpInner || !objInner) return;
+  if (!selectedBook) {
+    hmpInner.innerHTML = `<p class="cns-empty">还没有书籍。导入一本 PDF、圈/划/写一处，取证记录会出现在这里。</p>`;
+    objInner.innerHTML = renderObjTable(new Map());
+    return;
+  }
+  const rows = await buildHmpRows(selectedBook);
+  const si = state.surfaceIndex; // 仅当前页对象表 → 只有当前页的 mark 能解析回原文/互跳
+  const objMap = si ? new Map(si.objects.map((o) => [o.id, o])) : null;
+  // 对象→命中它的笔（仅当前页：对象 id 是页内的）。从已合并的 rows 派生，含未落库的本会话笔。
+  const objMarks = new Map<string, Array<{ id: string; label: string }>>();
+  if (si) for (const r of rows) {
+    if (r.page_id !== si.surface_id) continue;
+    for (const ref of r.hmp.target_object_refs) {
+      const arr = objMarks.get(ref) ?? [];
+      arr.push({ id: r.key, label: markChipLabel(r.feature, r.marked) });
+      objMarks.set(ref, arr);
+    }
+  }
+  hmpInner.innerHTML = rows.length
+    ? `<p class="hmp-note">逐笔 HMP 取证——命中了哪个对象、读出/转写了什么、归到哪种 mode、取证图截对没。点蓝色「命中对象」可跳到对象表对照。共 ${rows.length} 笔，新→旧。</p>`
+      + rows.map((r) => hmpCard(r, (objMap && si && r.page_id === si.surface_id) ? objMap : null)).join('')
+    : `<p class="cns-empty">这本书还没有标注取证记录。<br>圈/划/写一处、停笔，每一笔的 HMP（命中了什么 / 读出什么 / 取证图）会在这里出现。</p>`;
+  objInner.innerHTML = renderObjTable(objMarks);
+}
+
+/** 切段（HMP 取证 ↔ SurfaceIndex 对象）。 */
+function setSeg(seg: 'hmp' | 'objects'): void {
+  captureSeg = seg;
+  document.getElementById('cap-wrap')?.setAttribute('data-seg', seg);
+  document.querySelectorAll<HTMLButtonElement>('#cap-seg .cap-segbtn').forEach((b) => b.classList.toggle('active', b.dataset.seg === seg));
+}
+
+/** 滚到目标元素并闪一下高亮（互跳定位）。 */
+function flashTarget(sel: string): void {
+  const el = document.querySelector(sel) as HTMLElement | null;
+  if (!el) return;
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.remove('cap-flash'); void el.offsetWidth; el.classList.add('cap-flash');
+  window.setTimeout(() => el.classList.remove('cap-flash'), 1500);
+}
+
+function renderCapture(c: HTMLDivElement): void {
   if (!selectedBook) selectedBook = state.documentId ?? null;
   c.innerHTML =
-    `<div class="cns-head"><h2>🔖 标注取证 HMP</h2><div class="cns-head-ctl">`
-    + `<select id="hmp-book-sel"></select>`
-    + `<button class="cns-btn" id="hmp-refresh">⟳ 刷新</button>`
-    + `</div></div>`
-    + `<div class="cns-thread"><div class="hmp-inner" id="hmp-inner"></div></div>`;
-  const sel = c.querySelector<HTMLSelectElement>('#hmp-book-sel');
-  sel?.addEventListener('change', () => { selectedBook = sel.value; void renderHmpList(); });
-  c.querySelector('#hmp-refresh')?.addEventListener('click', () => { void fillBookSelect('hmp-book-sel').then(() => renderHmpList()); });
-  void fillBookSelect('hmp-book-sel').then(() => renderHmpList());
+    `<div class="cns-head"><h2>🔬 采集取证</h2>`
+    + `<div id="cap-seg"><button class="cap-segbtn" data-seg="hmp">HMP 取证</button><button class="cap-segbtn" data-seg="objects">SurfaceIndex 对象</button></div>`
+    + `<div class="cns-head-ctl"><select id="cap-book-sel"></select><button class="cns-btn" id="cap-refresh">⟳ 刷新</button></div></div>`
+    + `<div class="cns-thread"><div id="cap-wrap" data-seg="${captureSeg}">`
+    + `<div class="cap-pane cap-hmp"><div class="hmp-inner" id="hmp-inner"></div></div>`
+    + `<div class="cap-pane cap-obj"><div class="obj-inner" id="obj-inner"></div></div>`
+    + `</div></div>`;
+  const sel = c.querySelector<HTMLSelectElement>('#cap-book-sel');
+  sel?.addEventListener('change', () => { selectedBook = sel.value; void renderCaptureContent(); });
+  c.querySelector('#cap-refresh')?.addEventListener('click', () => { void fillBookSelect('cap-book-sel').then(() => renderCaptureContent()); });
+  c.querySelectorAll<HTMLButtonElement>('#cap-seg .cap-segbtn').forEach((b) => b.addEventListener('click', () => setSeg(b.dataset.seg as 'hmp' | 'objects')));
+  setSeg(captureSeg);
+  void fillBookSelect('cap-book-sel').then(() => renderCaptureContent());
 }
 
 /* ── 路由 / 初始化 ───────────────────────────────────────────────────────── */
@@ -547,13 +639,22 @@ export function initNavShell(): void {
 
   try { if (localStorage.getItem('inkloop.rail.collapsed') === '1') document.body.classList.add('rail-collapsed'); } catch { /* ignore */ }
 
-  // 流水线缩略图 → 点开放大（事件委托，thread 重渲后仍生效）
+  // 流水线/取证缩略图 → 点开放大（事件委托，重渲后仍生效）
   document.addEventListener('click', (e) => {
     const tgt = e.target as HTMLElement;
     if (!tgt?.classList?.contains('cns-zoom')) return;
     const lb = document.getElementById('cns-lightbox');
     const img = lb?.querySelector('img');
     if (lb && img) { img.setAttribute('src', (tgt as HTMLImageElement).src); lb.classList.add('show'); }
+  });
+
+  // 采集取证页互跳：HMP 命中对象 ref ↔ 对象表行（对象 id 页内唯一，互跳只对当前页成立）
+  document.addEventListener('click', (e) => {
+    const tgt = e.target as HTMLElement;
+    const refEl = tgt?.closest?.('.cap-link') as HTMLElement | null;
+    if (refEl?.dataset.ref) { setSeg('objects'); flashTarget(`#obj-inner tr[data-objid="${CSS.escape(refEl.dataset.ref)}"]`); return; }
+    const markEl = tgt?.closest?.('.cap-markchip') as HTMLElement | null;
+    if (markEl?.dataset.mark) { setSeg('hmp'); flashTarget(`#hmp-inner .hmp-card[data-mark="${CSS.escape(markEl.dataset.mark)}"]`); }
   });
 
   // 键 m：折叠/展开侧栏（输入框内不触发）
@@ -568,15 +669,15 @@ export function initNavShell(): void {
   const live = () => { if (activePage === 'chat') void renderConversation(); };
   bus.on('aiturn:appended', live);
   bus.on('inspect', live);
-  // 新 HMP 取证 / 翻页换页对象表 → HMP 页开着就刷新（surface:indexed 让非当前页的命中解析在切到该页后补上）
-  const liveHmp = () => { if (activePage === 'hmp') void renderHmpList(); };
+  // 新 HMP 取证 / 翻页换页对象表 → 采集取证页开着就刷新两段（surface:indexed 让命中解析/互跳在切到该页后补上）
+  const liveHmp = () => { if (activePage === 'hmp') void renderCaptureContent(); };
   bus.on('hmp:updated', liveHmp);
   bus.on('surface:indexed', liveHmp);
   // 切书后默认跟随当前书
   bus.on('document:loaded', () => {
     selectedBook = state.documentId ?? selectedBook;
     if (activePage === 'chat') { void fillBookSelect(); void renderConversation(); }
-    if (activePage === 'hmp') { void fillBookSelect('hmp-book-sel').then(() => renderHmpList()); }
+    if (activePage === 'hmp') { void fillBookSelect('cap-book-sel').then(() => renderCaptureContent()); }
   });
 
   window.addEventListener('hashchange', syncFromHash);
