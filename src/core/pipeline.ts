@@ -650,9 +650,12 @@ export async function commitSessionDiscussion(
   // fold = 写给自己的笔记 → 静默、不落 overlay、mark 留 session（计入下次综合）。
   let classifyDiag: { respond: boolean; reason: string } | null = null; // 存进账本 diag，供会话页"分类展示"
   let classifyConvoLen = 0; // 分类器看到的对话历史条数（流水线展示用）
+  let classifyMs = 0;
   if (reason === 'handwriting') {
     classifyConvoLen = bookMessages(bookId).length;
+    const tCls0 = performance.now();
     const decision = await classifyContext(view, bookMessages(bookId));
+    classifyMs = Math.round(performance.now() - tCls0);
     classifyDiag = { respond: decision.respond, reason: decision.reason };
     trace('ClassifyContext', { respond: decision.respond, reason: decision.reason, question: view.question ?? '' });
     mirrorClassify({ respond: decision.respond, reason: decision.reason, question: view.question ?? '', discId });
@@ -665,7 +668,9 @@ export async function commitSessionDiscussion(
 
   let result: InferenceResult;
   let thinking = '';
+  let modelMs = 0;
   const bufBefore = bookMessages(bookId).length; // 主模型这轮看到的滑窗上下文条数（发送前）
+  const tModel0 = performance.now();
   try {
     const { text: full, thinking: tk } = await chatTurn(bookId, userContent, {
       system: CHAT_SYSTEM, model: settings.inferModel,
@@ -673,6 +678,7 @@ export async function commitSessionDiscussion(
       images: view.crop ? [{ data: view.crop.data }] : [], // 被判需图片识别的内容：把合成图/笔迹图送进主推理
       onDelta: (t) => bus.emit('anchor:place', { id: discId, pageId, anchorRefs, bbox: view.anchor_bbox, text: t, kind: 'note' }),
     });
+    modelMs = Math.round(performance.now() - tModel0); // 主模型流式往返耗时（取代 上下文监控 的 ms）
     thinking = tk; // 思考过程不进 buffer，只随账本存、供调试页展示
     bus.emit('anchor:clear', discId);
     result = {
@@ -764,6 +770,7 @@ export async function commitSessionDiscussion(
       output: [
         { k: '判定', v: classifyDiag.respond ? '回应 respond ✓' : '折叠 fold ✗' },
         { k: '理由', v: classifyDiag.reason || '—' },
+        { k: '延迟', v: `${classifyMs} ms` },
       ],
     });
     // ⑤ 主模型（流式）——产出即下方那条回复气泡 + 思考过程
@@ -779,6 +786,7 @@ export async function commitSessionDiscussion(
       output: [
         { k: '回复', v: result.content },
         { k: '思考过程', v: thinking ? `${thinking.length} 字（见下方气泡）` : '（当前模型未回传）' },
+        { k: '延迟', v: `${modelMs} ms` },
       ],
       images: cropThumb ? [{ role: `${view.crop!.role}（送入主模型）`, thumb: cropThumb }] : [],
     });

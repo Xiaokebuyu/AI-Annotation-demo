@@ -4,8 +4,10 @@
  * 形态参照桌面端：侧栏常驻在最左、正文整体右移给它让位（body padding-left，非浮层覆盖）。
  * 侧栏列出**所有可用页面**，「阅读」是第一个、默认目的地，其余是平级目的地：
  *   · 阅读：主业务页（PDF 阅读 + 标注），其实是 body 原有的 topbar/main，侧栏只把它右移。
- *   · AI 会话：ChatGPT 式对话流——每轮「发送给 AI 的内容」(prompt_snapshot) + AI 回复 + 可折叠「思考过程」(thinking)。【已实现】
- *   · 上下文监控 / 标注取证 HMP / SurfaceIndex 对象 / 设置：迁移中，暂跳旧 dev 页(#dev)，逐步搬进来后退役它。
+ *   · AI 会话：ChatGPT 式对话流 + 每轮「处理流水线」逐组件时间线（收到→产出+图）+ 思考过程。【已实现】
+ *     —— 它已**取代**旧「上下文监控」面板（那面板的"喂了什么/回了什么/看到的图"被流水线全覆盖且更细、可持久，
+ *        故不再单列入口；旧 inspect 面板仍留在 #dev 供直达，离线 dev-telemetry 镜像也照旧）。
+ *   · 标注取证 HMP / SurfaceIndex 对象 / 设置：迁移中，暂跳旧 dev 页(#dev)，逐步搬进来后退役它。
  *
  * 非「阅读」的页面渲染进 #app-pages（覆盖正文区、不挡侧栏）。侧栏可折叠（键 m / 折叠钮），折叠时正文占满。
  */
@@ -17,11 +19,10 @@ import type { PipelineStage, PipelineStageIO } from '../core/contracts';
 
 const esc = (s: string): string => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
 
-type PageId = 'reader' | 'chat' | 'inspect' | 'hmp' | 'objects' | 'settings';
+type PageId = 'reader' | 'chat' | 'hmp' | 'objects' | 'settings';
 const PAGES: Array<{ id: PageId; icon: string; label: string; ready: boolean }> = [
   { id: 'reader', icon: '📖', label: '阅读', ready: true },
-  { id: 'chat', icon: '💬', label: 'AI 会话', ready: true },
-  { id: 'inspect', icon: '📡', label: '上下文监控', ready: false },
+  { id: 'chat', icon: '💬', label: 'AI 会话', ready: true }, // 含逐组件处理流水线，已取代旧「上下文监控」
   { id: 'hmp', icon: '🔖', label: '标注取证 HMP', ready: false },
   { id: 'objects', icon: '▦', label: 'SurfaceIndex 对象', ready: false },
   { id: 'settings', icon: '⚙', label: '设置', ready: false },
