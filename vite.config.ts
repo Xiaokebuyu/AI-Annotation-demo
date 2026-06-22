@@ -1,9 +1,9 @@
 import { defineConfig, loadEnv } from 'vite';
 import type { Plugin } from 'vite';
-import { runInference, runReflow, runReflowAi, reflowAiStream, chatStream, runSummarize, runOcrVlm, runExplainImage, runDigest, runInterpret, runInterpretGesture, runClassifyContext, runReflowVlm } from './server/infer';
+import { runReflow, runReflowAi, reflowAiStream, chatStream, runOcrVlm, runExplainImage, runInterpret, runClassifyContext, runReflowVlm } from './server/infer';
 import { debugEvent, debugSnapshot } from './server/debug.mjs';
 
-/** dev-only 推理代理：浏览器 POST /api/infer → 网关 → InferenceResult。Key 留服务端。 */
+/** dev-only AI 代理：浏览器 POST /api/* → 网关 → 各识别/重排/对话端点。Key 留服务端。 */
 function inferenceProxy(env: Record<string, string>): Plugin {
   return {
     name: 'inkloop-inference-proxy',
@@ -37,7 +37,6 @@ function inferenceProxy(env: Record<string, string>): Plugin {
         } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: String((e as Error)?.message || e) })); }
       });
 
-      post('/api/infer', runInference);
       post('/api/reflow', runReflow);
       post('/api/reflow-ai', runReflowAi);
       // 流式重排：NDJSON chunked——边收模型分组边写回，前端按段渲染。非流式端点(/api/reflow-ai)留给预热/兜底。
@@ -60,12 +59,9 @@ function inferenceProxy(env: Record<string, string>): Plugin {
           }
         });
       });
-      post('/api/summarize', runSummarize);
       post('/api/ocr-vlm', runOcrVlm);
       post('/api/explain-image', runExplainImage);
-      post('/api/digest', runDigest);
       post('/api/interpret', runInterpret);
-      post('/api/interpret-gesture', runInterpretGesture);
       post('/api/classify-context', runClassifyContext);
       post('/api/reflow-vlm', runReflowVlm);
 

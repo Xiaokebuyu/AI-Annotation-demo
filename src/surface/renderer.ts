@@ -128,8 +128,7 @@ async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob |
   // 后台预处理（默认关，dev 面板开关）：预排版 + 内容解读，不阻塞首屏
   const pp = settings.preprocess;
   const reflowCap = pp.reflowEnabled ? pp.reflowPages : 0;
-  const digestCap = pp.digestEnabled ? pp.digestPages : 0;
-  if (reflowCap > 0 || digestCap > 0) void preprocess(reflowCap, digestCap);
+  if (reflowCap > 0) void preprocess(reflowCap);
 }
 
 /** 导入新 PDF（文件选择/拖拽）。 */
@@ -186,14 +185,13 @@ let preprocessing = false;
 /**
  * 预处理流水线（后台、顺序、可中断）：导入后封顶若干页——
  *  - 前 reflowCap 页：预排版（local 引擎）写入缓存 → 进重排面即时。
- *  - 前 digestCap 页：内容解读（记忆A）→ 喂跨页推理更准。
  * 只取文本层、不渲染画布，省性能（墨水屏友好）；已缓存的页跳过。
  */
-export async function preprocess(reflowCap: number, digestCap: number): Promise<void> {
+export async function preprocess(reflowCap: number): Promise<void> {
   if (!pdf || !state.documentId || preprocessing) return;
   preprocessing = true;
   const docId = state.documentId;
-  const cap = Math.min(pdf.numPages, Math.max(reflowCap, digestCap));
+  const cap = Math.min(pdf.numPages, reflowCap);
   try {
     for (let i = 0; i < cap; i++) {
       if (!pdf || state.documentId !== docId) break; // 文档换了 → 停
@@ -206,7 +204,6 @@ export async function preprocess(reflowCap: number, digestCap: number): Promise<
             const rb = reflowLocal(blocks);
             if (rb.length) putReflow(i, 'local', rb);
           }
-          // 记忆A（digest 内容解读）撤除：逐页持久记忆押后，本轮不预处理。
         }
       } catch { /* 跳过该页 */ }
       bus.emit('preprocess:progress', i + 1, cap);

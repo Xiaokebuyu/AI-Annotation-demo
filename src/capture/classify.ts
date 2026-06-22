@@ -115,21 +115,6 @@ export function markShapeOf(type: EventType, score = 1): MarkShape {
   }
 }
 
-/**
- * 符号对话的「求解意图」启发式占位 —— 一次停笔会话里若有一个圈/点选 + 至少一个附加记号
- * （形如「圈住某处再写个问号」），就当作用户在发问。
- *
- * ⚠️ 这是占位级近似。真正「这个符号在问什么、圈住的到底是什么」属于语义识别，
- * 是本项目要突破的差异化，最终由 LLM 承载（providers/inference.ts 的 cloud 接缝）。
- * 前端只负责把候选意图标出来，不替 LLM 下结论。
- */
-export function detectQueryIntent(types: EventType[]): boolean {
-  if (types.length < 2) return false;
-  const hasCircle = types.includes('circle');                  // 必须真的圈了东西
-  const hasMark = types.some((t) => t === 'stroke');           // 旁边再加个潦草记号（问号/感叹号）
-  return hasCircle && hasMark;                                 // tap 不再当问号—— tap 不进手势路径
-}
-
 /* ──────────────────────────────────────────────────────────────────────────
  * 笔迹特征型分类器（level-1，确定性、便宜、端侧友好）—— 两段成本阶梯：
  *   ① markup（圈/划/箭头）有干净几何模板 → 纯几何判定，准、零识别调用。

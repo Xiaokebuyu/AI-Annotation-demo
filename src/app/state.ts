@@ -41,28 +41,19 @@ export type ViewMode = 'page' | 'reader';
  * 开放式行为设置 —— 每条行为独立可启停，可任意组合（非二选一模式）。
  * 以后新增符号语法（箭头=建立联系、波浪线=存疑…）只需再加一条，不动其它。
  */
-/** 图像 OCR 模式：关闭 / 裁标注局部图 / 看整页图。textlayer（数字版文本层）是独立开关。 */
-export type OcrImageMode = 'off' | 'region' | 'page';
-
 export interface Settings {
   placement: Placement;
   viewMode: ViewMode;                            // 阅读面：原版 PDF / 重排
   reflowProvider: string;                        // 重排引擎：local / llm
   reflowModel: string;                           // 重排专用模型（快·结构任务）：默认 gemini-3.1-flash-lite，独立于 inferModel
   reflowEager: boolean;                          // 急算开关(默认关·留给端侧)：渲染即后台 AI 重排缓存 → AI 上下文用真实阅读序("重排前置")
-  // 文字识别：textlayer 数字版文本层（开关）+ 图像 OCR（关闭/局部图/整页图，给扫描·手写·图表）
-  ocr: { textlayer: boolean; image: OcrImageMode };
-  // 预处理：导入后台预排版前 reflowPages 页 + 预解读（记忆A）前 digestPages 页（封顶，喂推理更准）
-  //  reflowEnabled / digestEnabled：默认关，需 dev 面板手动开
-  preprocess: { reflowEnabled: boolean; digestEnabled: boolean; reflowPages: number; digestPages: number };
-  // 段落讨论：同段上的手势聚成一次讨论，停笔 pauseSeconds 后生成、按 discId 原地更新
-  //   routing: auto=三档自动门（记号→几何·手写→读字·拿不准→VLM 裁决，可回 nothing 不打扰）；
-  //            geometric=只几何阈值（本地·0 token）；vlm=每次抬笔都截图给 VLM 判定
-  //   contextLines: 手写批注的"最近正文"行数（按笔迹 y 距离取最近 N 行）
-  //   idleSeconds: 长停顿(无新笔)多少秒触发整段 session 综合回复（v3 主线，默认 90=~1.5min；可在 __inkloop.settings 调小做冒烟测试）
-  gesture: { enabled: boolean; pauseSeconds: number; routing: 'auto' | 'geometric' | 'vlm'; contextLines: number; idleSeconds?: number };
-  // 推理模型：按前缀路由渠道——kimi*→moonshot；claude/gpt/gemini*→DMX。默认 gemini-3.1-flash-lite。
-  // （Agent SDK 会话引擎已退役 P2；单线走无状态 /api/infer，跨标注连贯交 chat/ 每本书 buffer。）
+  // 预处理：导入后台预排版前 reflowPages 页（封顶；reflowEnabled 默认关，需 dev 面板手动开）
+  preprocess: { reflowEnabled: boolean; reflowPages: number };
+  //   enabled: 手势响应总开关；idleSeconds: 长停顿(无新笔)多少秒触发整段 session 综合回复
+  //   （v3 主线，默认 90=~1.5min；可在 __inkloop.settings 调小做冒烟测试）
+  gesture: { enabled: boolean; idleSeconds?: number };
+  // 推理模型：按前缀路由渠道——kimi*→moonshot；claude/gpt/gemini*→DMX。默认 sonnet-4-6。
+  // （无状态端点：识别/答问/重排走各 /api/* 端点；跨标注连贯交 chat/ 每本书 buffer。）
   inferModel: string;
   // 是否把合成图(墨迹叠原文)送给理解模型。**合成图非徐智强方案**——他的路线靠 HMP 取证事实
   //（命中原文 + text_hint）让 AI 理解，不靠截图。默认 false=纯徐路线验证；dev 控制台可临时 true 做 A/B。
@@ -81,9 +72,8 @@ export const settings: Settings = {
   reflowProvider: 'ai', // 主线：AI 结构重建（文本驱动·保 bbox）
   reflowModel: 'gemini-3.1-flash-lite', // 重排走快模型（结构任务·延迟敏感·质量门槛低）。新字段→所有人即时生效。
   reflowEager: false,   // 默认关：现在不为 AI 上下文烧 token；端侧重排模型上了再默认开 = 真"重排前置"。
-  ocr: { textlayer: true, image: 'off' },
-  preprocess: { reflowEnabled: false, digestEnabled: false, reflowPages: 5, digestPages: 10 },
-  gesture: { enabled: true, pauseSeconds: 5, routing: 'auto', contextLines: 3, idleSeconds: 90 },
+  preprocess: { reflowEnabled: false, reflowPages: 5 },
+  gesture: { enabled: true, idleSeconds: 90 },
   inferModel: 'claude-sonnet-4-6', // 默认推理+识别模型：sonnet-4.6（DMX，中文手写实测准）。recognizeInk/chat 都随它。
   //   注：旧用户 localStorage 里存了别的会覆盖此默认——要用 sonnet 需在 dev 面板「推理模型」选一次或清 inkloop.settings.v1。
   sendMarkImage: false, // 默认不送合成图：纯验证徐智强的取证路线（AI 只吃 HMP 事实+整页上下文）。

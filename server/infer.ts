@@ -159,69 +159,6 @@ async function gateway(system: string, user: string, maxTokens: number, image?: 
   return textOf(await callGateway({ system, messages: [{ role: 'user', content }], maxTokens, model }));
 }
 
-type MemSnap = Array<{ index: number; content?: string | null; summary: string | null; marks: Array<{ text: string; note: string }> }>;
-
-/**
- * Tier2 按需 recall：给模型 recall_page 工具 + 前页索引，让它自己决定回看哪页综合作答。
- * 返回 { text, recalled }（recalled 供开发面板监控"AI 回看了哪些页"）。
- */
-async function agentLoop(system: string, task: string, jsonRule: string, memory: MemSnap, images?: ImgIn[], model?: string): Promise<{ text: string; recalled: number[] }> {
-  const tools = [{
-    name: 'recall_page',
-    description: '回看某一页的标注与摘要，用于跨页综合',
-    input_schema: { type: 'object', properties: { page: { type: 'integer', description: '页码，从 1 起' } }, required: ['page'] },
-  }];
-  // 优先用内容解读（记忆A，预处理产出），其次行为摘要（记忆B）
-  const idx = memory.map((m) => `第${m.index + 1}页${m.content ? '：' + m.content : m.summary ? '：' + m.summary : `（${m.marks.length}处标注）`}`).join('；');
-  const firstText = `${task}\n\n可回看的前页：${idx}。若与当前内容相关，用 recall_page(页码) 取该页详情来综合；不需要就直接给最终答案。\n\n${jsonRule}`;
-  const firstBlocks = images && images.length ? imageBlocks(images) : [];
-  const messages: any[] = [{
-    role: 'user',
-    content: firstBlocks.length ? [...firstBlocks, { type: 'text', text: firstText }] : firstText,
-  }];
-  const recalled: number[] = [];
-  for (let turn = 0; turn < 3; turn++) {
-    const data = await callGateway({ system, messages, maxTokens: 1024, tools, model });
-    const blocks = data.content || [];
-    const toolUses = blocks.filter((b: any) => b.type === 'tool_use');
-    if (!toolUses.length) return { text: textOf(data), recalled };
-    messages.push({ role: 'assistant', content: blocks });
-    messages.push({
-      role: 'user',
-      content: toolUses.map((tu: any) => {
-        const page = Number(tu.input?.page);
-        recalled.push(page);
-        const m = memory.find((x) => x.index === page - 1);
-        const body = m
-          ? `第${page}页：${m.content || m.summary || '(无摘要)'}\n${(m.marks || []).map((k) => `- "${k.text}" → ${k.note}`).join('\n')}`
-          : `第${page}页没有标注记录。`;
-        return { type: 'tool_result', tool_use_id: tu.id, content: body };
-      }),
-    });
-  }
-  const data = await callGateway({ system, messages: [...messages, { role: 'user', content: `直接给最终 JSON，不要再调用工具。${jsonRule}` }], maxTokens: 600, model });
-  return { text: textOf(data), recalled };
-}
-
-const SYM: Record<string, string> = {
-  circle: '圈选', underline: '划线', highlight: '高亮', arrow: '箭头',
-  margin_note: '批注', tap_region: '点选', stroke: '标记', eraser: '擦除', unknown: '标记',
-};
-
-// 回应语气：由「为什么画」(intent) 主导，几何形状(event_type)兜底——提问/指令/综合不被当普通解释。
-const TONE_BY_TYPE: Record<string, string> = {
-  circle: '这是圈选：解释被圈的是什么、关键在哪。',
-  underline: '这是划线/重点：提炼要点、点出它为何重要。',
-  highlight: '这是高亮/重点：提炼这处的要点、点出它为何重要。',
-  arrow: '这是箭头/关联：点出它指向什么、和什么相关。',
-  margin_note: '这是手写批注：先读出 ta 写了什么，再就 ta 写的内容与所标段落给呼应。',
-};
-function toneFor(eventType: string, intent: string, modes: string[]): string {
-  if (intent === 'question') return '用户像在发问：针对所标处直接作答，不要反问。';
-  if (intent === 'command') return '用户写的是一条指令（如总结/翻译/改写）：直接执行 ta 的要求、作用在所标段落上，给结果而非评论。';
-  if (intent === 'summary' || (Array.isArray(modes) && modes.includes('summary'))) return '用户在这一处留了多个标注：综合它们给一条整体性的洞察或提示，帮 ta 想深一层。';
-  return TONE_BY_TYPE[eventType] || '就用户标注处给一条旁注。';
-}
 
 function extractJson(text: string): any {
   if (!text) return {};
@@ -236,152 +173,8 @@ function extractJson(text: string): any {
   return { result_type: rt ? rt[1] : undefined, content: cm ? cm[1] : text, confidence: cf ? Number(cf[1]) : undefined };
 }
 
-const rand = () => Math.random().toString(36).slice(2, 10);
 
-/** 把一个 InferenceRequest 跑成 InferenceResult（contract 不变）。 */
-export async function runInference(req: any): Promise<any> {
-  const modes: string[] = req.output_modes || ['inspiration', 'question', 'connection'];
-  const evt = req.annotation_event || {};
-  const enclosed = (req.ocr_blocks || []).map((b: any) => b.text).join('') || '';
-  const nearby = req.nearby_text || '';
-  const et: string = evt.event_type;
-  const intent = String(req.intent || ''); // 「为什么画」——主导回应语气（提问/指令/综合/解释）
-  const isDigest = modes.includes('summary');
-  const isAsk = modes.length === 1 && modes[0] === 'question';
 
-  const system =
-    '你是 InkLoop —— 嵌在 PDF 阅读器里的旁注式 AI 同读者。用户在原文上用符号（圈/划线/批注/点选）标注，' +
-    '你依据符号含义与它圈住的上下文，轻声给一条简短中文旁注。不寒暄、不复述原文、不用 markdown 或列表、不超过 2 句，像页边批注点到为止。';
-
-  // 推理底图：多图(笔迹/原文/合成，同取景)优先；兼容旧的单图 req.image。让模型看着现场作答。
-  const imagesIn: ImgIn[] = Array.isArray(req.images)
-    ? req.images.filter((i: any) => i && i.data)
-    : (req.image ? [{ role: 'composite', data: String(req.image) }] : []);
-  const hasImg = imagesIn.length > 0;
-  const model = req.model || cfg().model; // dev 面板选的模型(kimi/claude/gemini)，route() 按前缀分渠道
-  const pageTextIn = String(req.page_text || '').slice(0, 4000); // P1：整页文字作恒定上下文
-  const focus = String(req.focus || nearby || '').trim();        // P1：几何焦点提示
-
-  let task: string;
-  if (hasImg && pageTextIn) {
-    // P1 统一视觉路径：整页文字作上下文 + 合成图(墨迹叠原文) + 焦点提示，一次看图判完。
-    // 形状 / 圈中什么 / 手写读出 / 意图 全交模型，不再靠前端 bbox-文本匹配（治"答非所问"）。
-    const tone = toneFor(et, intent, modes);
-    const hasInk = imagesIn.some((i) => i.role === 'ink');
-    // 话术随实际附图自适应：手写发笔迹图+合成图，非手写只发合成图（省 vision token / 延迟）。
-    const imgDesc = hasInk
-      ? `上面附了笔迹图（用户手写已从原文抽出、铺白底）与合成图（墨迹叠在原文上）。原文以上面整页文字为准。`
-      : `上面附了一张合成图（墨迹叠在原文上，看画在哪、圈住了什么）。原文以上面整页文字为准。`;
-    const step1 = hasInk
-      ? `请：① 先看笔迹图把手写文字逐字读出来；再看合成图确认标注形状、以及圈/划/指向落在全文哪一处（对照上面整页文字）；`
-      : `请：① 看合成图确认标注形状、以及圈/划/指向落在全文哪一处（对照上面整页文字）；`;
-    task =
-      `这一页的全文（供你理解语境）：\n${pageTextIn}\n\n` +
-      `${imgDesc}` +
-      `几何粗判焦点约在：「${focus || '（未定位）'}」（仅供参考，以图为准）。\n` +
-      `${step1}` +
-      `② ${tone} 一句中文旁注，点到为止。`;
-  } else if (isDigest) {
-    task = `用户停笔了。下面是 ta 在这一页留下的所有标注（每条含符号类型与圈住的文字）：\n${nearby || '（无可提取文字）'}\n请综合这些标注给一条整体性的洞察或提示——帮 ta 想深一层、点出背后的关键、或建议下一步。`;
-  } else if (isAsk) {
-    // 圈+问号 = 提问
-    task = `用户圈了一处并加了记号，像在发问。圈住/附近的内容："${enclosed || nearby || '（未提取到文字）'}"。请针对它直接作答，不要反问。`;
-  } else if (et === 'underline') {
-    // 划线 = 重点
-    task = `用户用划线标了重点："${enclosed || nearby || '（未提取到文字）'}"。请提炼这处的要点、点出它为什么重要——一句话。`;
-  } else if (et === 'arrow') {
-    // 箭头 = 关联/导向
-    task = `用户画了个箭头，像在标"导向/因果/关联"。箭头附近或指向的内容："${enclosed || nearby || '（未提取到文字）'}"。请点出它和什么相关、指向什么结论或下一步——一句话。`;
-  } else if (et === 'margin_note') {
-    // 写字 = 批注（手写内容暂不可读，先用附近正文）
-    task = `用户在页边写了一条批注（手写内容暂不可读）。批注落在这段正文附近："${nearby || enclosed || '（未提取到文字）'}"。请就这段正文给一条呼应 ta 思路的旁注。`;
-  } else {
-    // 圈 = 解释
-    task = `用户圈出了一处："${enclosed || nearby || '（未提取到文字）'}"。请解释它是什么、关键在哪——像同读者在页边轻声点一句。`;
-  }
-  const jsonRule = `最终只输出一个 JSON 对象：{"result_type":"…","content":"…","confidence":0.x}。result_type 从这些里选最贴切的一个：${modes.join(' / ')}；content 是要显示的旁注文字（内部若引用原文用「」括，勿用半角双引号，否则破坏 JSON）；confidence 是 0–1 把握度。除该 JSON 外不要输出任何文字。`;
-
-  // Tier2：附带前页记忆快照时，走 recall 工具循环；否则单发
-  const memory: MemSnap = Array.isArray(req.memory) ? req.memory : [];
-  let raw: string;
-  let recalled: number[] = [];
-  if (memory.length) {
-    const r = await agentLoop(system, task, jsonRule, memory, imagesIn, model);
-    raw = r.text;
-    recalled = r.recalled;
-  } else {
-    raw = await gateway(system, `${task}\n\n${jsonRule}`, isDigest ? 600 : 400, imagesIn, model);
-  }
-  const parsed = extractJson(raw);
-  const result_type = modes.includes(parsed.result_type) ? parsed.result_type : modes[0];
-  const content = String(parsed.content || raw || '此刻没能想清楚，稍后再为你低语。').trim();
-  const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.8;
-
-  const bbox = req.ocr_blocks?.[0]?.bbox || evt.geometry?.bbox || [0, 0, 0, 0];
-  return {
-    result_id: 'res_' + rand(),
-    trace_id: req.trace_id,
-    request_id: req.request_id,
-    result_type,
-    content,
-    source_refs: [{
-      page_id: evt.page_id,
-      bbox,
-      ocr_block_ids: (req.ocr_blocks || []).map((b: any) => b.id),
-      event_id: req.event_id,
-    }],
-    confidence,
-    created_at: new Date().toISOString(),
-    model_name: model,
-    model_version: 'nodesk-gateway',
-    recalled, // 服务端额外字段：本次回看了哪些页（开发面板监控用）
-    // 上下文监控（proxy 级附加，不动冻结契约）：暴露模型真正看到的 system + 任务 + 上下文
-    _debug: {
-      model,
-      system,
-      task,
-      enclosed,
-      nearby,
-      focus,
-      page_text_len: pageTextIn.length,
-      ocr_block_count: (req.ocr_blocks || []).length,
-      has_image: hasImg,
-      image_roles: imagesIn.map((i) => i.role || 'image'),
-      mode: (hasImg && pageTextIn) ? 'p1-vision' : 'legacy',
-      tier: memory.length ? 'tier2-recall' : 'single',
-      memory_pages: memory.map((m) => ({ index: m.index, content: m.content ?? null, summary: m.summary, marks: m.marks.length })),
-    },
-  };
-}
-
-/**
- * 视觉手势判定（VLM 路径）：替代几何阈值，让模型看用户笔迹截图一气判定
- *   kind:   circle / underline / arrow / handwriting / abstract / nothing
- *   intent: what_is_this / key_point / question / relation / free_note / command
- *   reading: 若是写字，转写出来
- * 用于 settings.gesture.routing='vlm' 时——给"任意符号语言"和"抽象绘画"以可识别性。
- */
-export async function runInterpretGesture(payload: any): Promise<{ kind: string; intent: string; reading: string; confidence: number }> {
-  const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
-  if (!image) return { kind: 'nothing', intent: 'free_note', reading: '', confidence: 0 };
-  const system =
-    '这是用户在 PDF 页面上的笔迹截图（黑色墨水线条）。一次性判定三件事：' +
-    '①kind（笔迹形状）：circle（圈选）/ underline（划线/高亮）/ arrow（箭头·关联指向）/ handwriting（手写文字）/ abstract（其它符号，如星号、波浪线、问号、感叹号、自定义符号）/ nothing（潦草无意图、单点）。' +
-    '②intent（为什么画）：what_is_this（圈一处问含义）/ key_point（标重点）/ question（在提问）/ relation（指出关联）/ free_note（自由批注）/ command（在下指令，如"总结"/"翻译"）。' +
-    '③reading：若 kind=handwriting，原样转写其中文字；否则空字符串。' +
-    '只输出一个 JSON：{"kind":"...","intent":"...","reading":"...","confidence":0.x}。除该 JSON 外不要任何文字。' +
-    '如果看不出明确意图（很可能只是用户走神涂了一笔），kind="nothing"，让系统不打扰用户。';
-  const raw = await gateway(system, '判定这笔笔迹：', 400, image, payload?.model); // 手写视觉随 inferModel 走（kimi/gemini A/B）
-  const j = extractJson(raw);
-  const KINDS = ['circle', 'underline', 'arrow', 'handwriting', 'abstract', 'nothing'];
-  const INTENTS = ['what_is_this', 'key_point', 'question', 'relation', 'free_note', 'command'];
-  return {
-    kind: KINDS.includes(j.kind) ? j.kind : 'nothing',
-    intent: INTENTS.includes(j.intent) ? j.intent : 'free_note',
-    reading: String(j.reading || '').trim(),
-    confidence: typeof j.confidence === 'number' ? j.confidence : 0.6,
-  };
-}
 
 /**
  * 意图理解：读用户在页边的手写批注截图 —— ①转写手写文字 ②判断「为什么写」。
@@ -439,15 +232,6 @@ export async function runClassifyContext(payload: any): Promise<{ respond: boole
   return { respond: j?.respond !== false, reason: String(j?.reason || '').slice(0, 120) };
 }
 
-/** 内容解读（记忆A）：把一页文字压成一两句「这页在讲什么」，预处理流水线调用。 */
-export async function runDigest(payload: any): Promise<{ digest: string }> {
-  const text = String(payload?.text || '').slice(0, 4000);
-  if (!text) return { digest: '' };
-  const system = '你在为一页文档做「内容解读」：用一两句中文概括这页在讲什么、核心论点或关键信息。不寒暄、不复述原文、不用 markdown、不超过 2 句。';
-  const user = `这一页的文字：\n${text}\n\n给出这页的内容解读：`;
-  const out = await gateway(system, user, 200);
-  return { digest: out.trim() };
-}
 
 function extractJsonArray(text: string): any[] {
   if (!text) return [];
@@ -665,13 +449,3 @@ export async function* chatStream(payload: any): AsyncGenerator<string> {
   }
 }
 
-/** 翻页总结：把一页的标注 + AI 回应压成一句备忘，供跨页综合。 */
-export async function runSummarize(payload: any): Promise<{ summary: string }> {
-  const marks: any[] = payload?.marks || [];
-  if (!marks.length) return { summary: '' };
-  const list = marks.map((m, i) => `${i + 1}. "${String(m.text || '').slice(0, 50)}"${m.note ? ` → ${m.note}` : ''}`).join('\n');
-  const system = '你在为一页阅读做一句话备忘：读者在这页关注/追问了什么、形成了什么想法。';
-  const user = `这页的标注与 AI 回应：\n${list}\n\n用一句中文概括读者在这页的关注线索（≤40 字），只输出这句话，别的不要。`;
-  const raw = await gateway(system, user, 120);
-  return { summary: raw.trim() };
-}

@@ -18,7 +18,7 @@
  *
  * 非「阅读」的页面渲染进 #app-pages（覆盖正文区、不挡侧栏）。侧栏可折叠（键 m / 折叠钮），折叠时正文占满。
  */
-import { bus, state, settings, saveSettings, type Placement, type OcrImageMode } from '../app/state';
+import { bus, state, settings, saveSettings, type Placement } from '../app/state';
 import { resetBook } from '../chat/buffer';
 import { listBooks, getBookAiTurns, getFoldedMarks } from '../local/store';
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
@@ -724,14 +724,12 @@ function renderCapture(c: HTMLDivElement): void {
 /* ── 设置页（迁出旧 #dev 抽屉；按代码审计诚实标注每项是否真生效）─────────────────────
  * settings 落 localStorage('inkloop.settings.v1')；多数项改完 effect='changed'（emit settings:changed
  * → main 取消在途计时 + 清当前 session），少数仅 saveSettings()。可用性徽标来自本会话审计：
- * 生效=v3 主路真读；调试叠层=只影响可视化；弱效=读它的 runOcr/预处理当前主路不走或仅导入时生效；
- * 失效=定义了但无人按它分流（gesture.routing / pauseSeconds / 解读预处理已撤）。 */
+ * 生效=v3 主路真读；调试叠层=只影响可视化；弱效=仅下次导入文档时生效（预排版预热）。 */
 
 type SetBadge = { t: string; c: 'live' | 'dev' | 'weak' | 'dead' };
 const B_LIVE: SetBadge = { t: '生效', c: 'live' };
 const B_DEV: SetBadge = { t: '调试叠层', c: 'dev' };
 const B_WEAK: SetBadge = { t: '弱效', c: 'weak' };
-const B_DEAD: SetBadge = { t: '失效', c: 'dead' };
 
 type SetRow =
   | { kind: 'check'; label: string; badge: SetBadge; hint?: string; get: () => boolean; set: (v: boolean) => void; effect: 'changed' | 'save' }
@@ -740,7 +738,7 @@ type SetRow =
 interface SetSection { title: string; note?: string; fold?: boolean; rows: SetRow[] }
 
 function setSections(): SetSection[] {
-  const g = settings.gesture, o = settings.ocr, p = settings.preprocess;
+  const g = settings.gesture, p = settings.preprocess;
   return [
     { title: '核心 · 影响真实行为', rows: [
       { kind: 'select', label: '推理模型（每次标注答问/识别用）', badge: B_LIVE, opts: [['kimi-k2.6', 'kimi-k2.6（中文笔迹稳）'], ['claude-opus-4-8', 'claude-opus-4-8（最新·慢）'], ['claude-opus-4-7', 'claude-opus-4-7（质量·慢）'], ['claude-sonnet-4-6', 'claude-sonnet-4-6（快·能回思考）'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite（快）']], get: () => settings.inferModel, set: (v) => { settings.inferModel = v; }, effect: 'changed' },
@@ -757,16 +755,9 @@ function setSections(): SetSection[] {
       { kind: 'check', label: '显示组装区域（手写实时框）', badge: B_DEV, get: () => settings.showRegion, set: (v) => { settings.showRegion = v; }, effect: 'changed' },
       { kind: 'check', label: '显示关联框（综合后紫色虚框）', badge: B_DEV, get: () => settings.showRelations, set: (v) => { settings.showRelations = v; }, effect: 'changed' },
     ] },
-    { title: '历史 / 弱效 · 已知不全生效（按代码审计标注）', note: '保留可调，但当前 v3 主路要么不读、要么仅特定时机生效。', fold: true, rows: [
-      { kind: 'number', label: '停笔秒数（段落讨论计时）', unit: '秒', min: 1, max: 30, hint: 'v3 主路不读它（只剩 dev 快照引用）；区域收口用固定 6s', badge: B_DEAD, get: () => g.pauseSeconds, set: (v) => { g.pauseSeconds = v; }, effect: 'changed' },
-      { kind: 'select', label: '手势判定路由', badge: B_DEAD, hint: '客户端未按它分流——识别恒走 recognizeInk；此项当前无效', opts: [['auto', '自动三档'], ['geometric', '只几何阈值'], ['vlm', '全程 VLM·烧 token']], get: () => g.routing, set: (v) => { g.routing = v as 'auto' | 'geometric' | 'vlm'; }, effect: 'changed' },
-      { kind: 'number', label: '批注上下文行数', unit: '行', min: 0, max: 10, hint: '喂给 runOcr 的最近 N 行；runOcr 当前不在 v3 主路', badge: B_WEAK, get: () => g.contextLines, set: (v) => { g.contextLines = v; }, effect: 'changed' },
-      { kind: 'check', label: 'PDF 文本层 OCR', hint: 'SurfaceIndex 已直接吃文本层；runOcr 主路不走', badge: B_WEAK, get: () => o.textlayer, set: (v) => { o.textlayer = v; }, effect: 'changed' },
-      { kind: 'select', label: '图像 OCR', badge: B_WEAK, hint: '图像 OCR 兜底现走 enrichHmp，不读此项', opts: [['off', '关闭'], ['region', '局部图'], ['page', '整页图']], get: () => o.image, set: (v) => { o.image = v as OcrImageMode; }, effect: 'changed' },
+    { title: '历史 / 弱效 · 仅特定时机生效（按代码审计标注）', note: '保留可调，但仅下次导入文档时生效。', fold: true, rows: [
       { kind: 'check', label: '预排版前 N 页', hint: '仅下次导入文档时生效', badge: B_WEAK, get: () => p.reflowEnabled, set: (v) => { p.reflowEnabled = v; }, effect: 'save' },
       { kind: 'number', label: '预排版页数', unit: '页', min: 0, max: 100, badge: B_WEAK, get: () => p.reflowPages, set: (v) => { p.reflowPages = v; }, effect: 'save' },
-      { kind: 'check', label: '预解读前 N 页', hint: '解读预处理代码已撤，置位无效', badge: B_DEAD, get: () => p.digestEnabled, set: (v) => { p.digestEnabled = v; }, effect: 'save' },
-      { kind: 'number', label: '预解读页数', unit: '页', min: 0, max: 100, badge: B_DEAD, get: () => p.digestPages, set: (v) => { p.digestPages = v; }, effect: 'save' },
     ] },
   ];
 }

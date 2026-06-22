@@ -1,5 +1,5 @@
-import type { AnnotationEvent, EventType, HMP, InferenceRequest, InferenceResult, InferenceView, MarkFeatureType, MarkShape, NormBBox, OCRResult, OutputMode, PipelineStage, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
-import { RESULT_TO_OVERLAY, SCHEMA_VERSION, INFERVIEW_SCHEMA_VERSION } from './contracts';
+import type { AnnotationEvent, EventType, HMP, InferenceResult, InferenceView, MarkFeatureType, MarkShape, NormBBox, PipelineStage, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
+import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
 import { DEVICE_ID, SESSION_ID, shortId, sha256Hex } from './ids';
 import { appendAiTurnEntry, getReflow, setSynthesisWatermark } from '../local/store';
 import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
@@ -27,9 +27,6 @@ const CHAT_SYSTEM =
   '有时随回复附一张截图（你圈/划/写处的图）——给了图就结合图作答。' +
   '不寒暄、不复述原文、不用 markdown 或列表、至多 2–3 句，像页边批注点到为止。' +
   '上文里有读者在这本书前面留下的标注与你的回应——需要时自然呼应，但别强行联系。';
-const GVERB: Record<string, string> = {
-  circle: '圈选', underline: '划线', highlight: '高亮', arrow: '画箭头标', margin_note: '手写批注', tap_region: '点选', stroke: '标记',
-};
 
 /* ── 处理流水线（调试）：逐组件「收到什么 → 产出什么」，含缩略图，串成一轮链路 ─────────
  * 仅 DEV 落库（gate 同 mirror*）；图压成 ~220px 缩略图控 IndexedDB 体积。供 AI 会话调试页复盘。 */
@@ -109,33 +106,6 @@ function unionBBox(events: AnnotationEvent[]): NormBBox {
   return [x0, y0, x1 - x0, y1 - y0];
 }
 
-/** 会话内多笔合并成一个代表 event 用于推理（trace 里每笔仍独立留存）。 */
-function representative(events: AnnotationEvent[]): AnnotationEvent {
-  const bbox = unionBBox(events);
-  const points = events.flatMap((e) => e.stroke_points);
-  const last = events[events.length - 1];
-  return { ...last, geometry: { bbox }, stroke_points: points, event_type: classify(points, bbox) };
-}
-
-function buildRequest(
-  evt: AnnotationEvent,
-  ocr: Pick<OCRResult, 'text_blocks' | 'nearby_text'>,
-  output_modes: OutputMode[] = ['inspiration', 'question', 'connection'],
-): InferenceRequest {
-  return {
-    request_id: shortId('req'),
-    trace_id: evt.trace_id,
-    event_id: evt.event_id,
-    document_context: { document_id: evt.document_id },
-    page_context: { page_id: evt.page_id, page_index: state.pageIndex },
-    annotation_event: { event_type: evt.event_type, page_id: evt.page_id, geometry: evt.geometry },
-    ocr_blocks: ocr.text_blocks,
-    nearby_text: ocr.nearby_text,
-    user_profile_stub: null,
-    output_modes,
-    version: SCHEMA_VERSION,
-  };
-}
 
 function errorResult(evt: AnnotationEvent, err: unknown): InferenceResult {
   return {
@@ -206,21 +176,6 @@ async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[
   } catch { /* 兜底失败不连累闭环 */ }
 }
 
-/**
- * 从 HMP 取证记录装配"标注命中了什么"——替掉旧的 focusHint 几何拼装，让"标注→理解"真正由 HMP 驱动。
- *  anchored/mixed：命中对象的原文 +（图区 OCR 读出的字）；self_content：手写读出的内容。
- *  圈在对象内部的精确落点由合成图(crop_ref)承载，这里只交"文字事实"。
- */
-function hmpFocus(hmp: HMP, index: SurfaceIndex | null, preReading?: string): string {
-  const refs = new Set(hmp.target_object_refs);
-  // 命中对象按 target_object_refs 顺序（resolveTarget 已按阅读序排好）取文字，字母级直接拼回原文（无空格）。
-  const objs = (index?.objects ?? []).filter((o) => refs.has(o.id));
-  const targetText = objs.map((o) => o.text).filter(Boolean).join('').trim();
-  const hint = (hmp.text_hint || preReading || '').trim();
-  if (hmp.mode === 'self_content') return hint ? `手写「${hint}」` : '';
-  if (targetText && hint && hint !== targetText) return `${targetText} · 读出「${hint}」`;
-  return targetText || (hint ? `读出「${hint}」` : '');
-}
 
 /**
  * dev-only：把完整 HMP 取证记录镜像到服务端调试通道（/api/__debug/event, kind='hmp'）。
@@ -257,190 +212,6 @@ function mirrorHmp(hmp: HMP): void {
   } catch { /* 取值出错不连累 UI */ }
 }
 
-/**
- * 段落讨论提交：把同一段上的一簇手势（1 个或多个）合成一条回应，落在该段旁的留白。
- * 每个标注各取「符号类型 + 圈住的上下文」结构化进 nearby_text（守 D4：不改契约形状，
- * 只用既有 nearby_text / output_modes）。**按 discId upsert** —— 讨论继续就原地刷新
- * 同一条，不每段各占空间。云端失败降级不崩（A11）。
- */
-export async function commitDiscussion(
-  events: AnnotationEvent[],
-  penUpAt: number,
-  discId: string,
-  modes: OutputMode[],
-  eventType?: EventType,
-  intent?: string,
-  /** VLM 路径已读到的手写文字（margin_note 时优先用它，跳过 /api/interpret 二次调用）。 */
-  preReading?: string,
-): Promise<void> {
-  if (!events.length) return;
-  const evt = representative(events);
-  evt.trace_id = shortId('disc');
-  if (eventType) evt.event_type = eventType; // 单手势时写 canonical 类型，服务端据此框定语气
-
-  // 徐智强取证线驱动「标注 → 理解」：先产 HMP，await 取证增益(step⑤OCR/step⑥手写)把 text_hint 等齐，
-  // 再从 HMP 装配理解输入（命中原文 + 读出的字）。整页文字 pgText 仍作恒定上下文，合成图承载"圈在哪"的精度。
-  const layers = grabLayers(evt.geometry.bbox, 0.04);
-  const composite = layers.composite; // 监控缩略图 / 兼容字段仍用合成图
-  const pgText = pageText();
-  const finalModes = modes;
-  const finalIntent = intent ?? '';
-
-  let hmp: HMP | null = null;
-  if (state.surfaceIndex) {
-    const action = markShapeOf(evt.event_type);
-    const targets = resolveTarget(events, evt.geometry.bbox, state.surfaceIndex);
-    hmp = buildHmp({
-      surfaceId: state.surfaceIndex.surface_id,
-      action,
-      targetBbox: evt.geometry.bbox,
-      targetObjects: targets,
-      cropRef: layers.composite,
-      vectorRef: evt.event_type === 'margin_note' ? layers.ink : undefined,
-    });
-    // VLM 路径已读到的手写(preReading) 直接作 text_hint，enrichHmp 据此跳过重复的 /api/interpret
-    if (preReading && hmp.mode === 'self_content' && !hmp.text_hint) hmp.text_hint = preReading;
-    state.lastHmps.unshift(hmp);
-    if (state.lastHmps.length > 10) state.lastHmps.length = 10;
-    trace('HMP', hmp as unknown as Record<string, unknown>);
-    bus.emit('hmp:updated', hmp);
-    await enrichHmp(hmp, evt, targets); // 图区 OCR 兜底（reader stub 路径；freeform 转写不在此处）
-    mirrorHmp(hmp); // 取证完成 → 镜像到 dev 通道，供开发者侧逐字段核对
-  }
-
-  // 标注内容来源 = HMP 取证记录（替掉旧的 focusHint 几何拼装）
-  const focusStr = hmp ? hmpFocus(hmp, state.surfaceIndex, preReading) : '';
-
-  // 合成图改成**仅兜底才发**（徐方案里它就是"拿不到文字时的视觉证据"）：有文字事实(focusStr 非空)就纯吃事实、不发图。
-  // focusStr 为空时，只在"有东西可看"——命中图区但 OCR 没读出(object_hint=image_region) 或 空白手写(self_content)——才发图；
-  // 纯空白没命中(unknown/refs空)不发图，让模型走"没对到内容"的诚实兜底，别拿白图瞎编。dev 可强制 sendMarkImage。
-  const sendImg = settings.sendMarkImage
-    || (!focusStr && hmp != null && (hmp.object_hint === 'image_region' || hmp.mode === 'self_content'));
-  const wantInk = hmp?.mode === 'self_content' || evt.event_type === 'margin_note';
-  const images: Array<{ role: 'ink' | 'composite'; data: string }> = [];
-  if (sendImg) {
-    if (wantInk && layers.ink) images.push({ role: 'ink', data: layers.ink });
-    if (layers.composite) images.push({ role: 'composite', data: layers.composite });
-  }
-
-  let result: InferenceResult;
-  let memoryPages = 0;
-  let hasImage = false;
-  let anchorRefs: string[] = []; // 提升出 try：落账本(B0)在 try 外要用
-  let userContent = '';
-  const bookId = state.documentId ?? 'book';
-  try {
-    // v3 合龙①②：理解走每本书有状态 chat buffer（流式），回应实时落 anchor-layer（页内按 HMP 锚点）。
-    // 收尾清掉流式预览，交给持久 overlay（whisper 页 / reader 重排 / insight 卡片 / 记忆）。
-    openBook(bookId);
-    const marked = (hmp?.text_hint || focusStr || '').trim() || '（未提取到文字）';
-    const verb = GVERB[evt.event_type] ?? '标注';
-    const ask = finalIntent === 'question' ? '读者像在发问：针对所标处直接作答，不要反问。'
-      : finalIntent === 'command' ? '读者写的是一条指令（如总结/翻译/改写）：直接作用在所标处、给结果而非评论。'
-      : finalModes.includes('summary') ? '读者在这一处留了多个标注：综合它们给一条整体性的洞察或提示。'
-      : '解释所标处是什么、关键在哪，或顺着它点一句——但始终扣住所标这几个字。';
-    // 先把"所标处"摆在最前、最重；整页文字仅作消歧上下文放在后面、压短，免得模型跑题到整页主题。
-    const ctx = pgText ? `\n\n（仅供消歧的本页上下文，别据此跑题到整页主题）：${pgText.slice(0, 700)}` : '';
-    userContent = `读者在原文上${verb}了这一处：「${marked}」。${ask}${ctx}`;
-    anchorRefs = hmp?.target_object_refs ?? [];
-    trace('InferenceRequest(disc)', { mode: 'chat-buffer', page_id: evt.page_id, gesture: evt.event_type, intent: finalIntent, marked: marked.slice(0, 60), buffer_turns: bookMessages(bookId).length } as unknown as Record<string, unknown>);
-    const { text: full } = await chatTurn(bookId, userContent, {
-      system: CHAT_SYSTEM, model: settings.inferModel,
-      onDelta: (t) => bus.emit('anchor:place', { id: discId, pageId: evt.page_id, anchorRefs, bbox: evt.geometry.bbox, text: t, kind: 'note' }),
-    });
-    bus.emit('anchor:clear', discId); // 流式预览结束 → 持久 overlay 接手
-    memoryPages = bookMessages(bookId).length;
-    result = {
-      result_id: shortId('res'), trace_id: evt.trace_id, request_id: 'chat',
-      result_type: finalModes[0] as InferenceResult['result_type'],
-      content: full || '此刻没能想清楚，稍后再为你低语。',
-      source_refs: [{ page_id: evt.page_id, bbox: evt.geometry.bbox, ocr_block_ids: [], event_id: evt.event_id }],
-      confidence: 0.8, created_at: new Date().toISOString(), model_name: settings.inferModel, model_version: 'chat-buffer',
-    };
-    (result as unknown as { _debug?: unknown })._debug = { mode: 'chat-buffer', focus: focusStr, page_text_len: pgText.length, has_image: false, buffer_turns: memoryPages };
-    trace('InferenceResult(disc)', result as unknown as Record<string, unknown>);
-  } catch (err) {
-    bus.emit('anchor:clear', discId);
-    result = errorResult(evt, err);
-    trace('InferenceResult(error)', result as unknown as Record<string, unknown>);
-  }
-
-  // 上下文监控：记一条「这次喂了什么、模型回了什么」
-  const dbg = result as unknown as { _debug?: Record<string, unknown>; recalled?: number[] };
-  pushInspect({
-    ts: new Date().toISOString(),
-    pageIndex: state.pageIndex,
-    gesture: evt.event_type,
-    intent: finalIntent,
-    modes: finalModes,
-    nearby: focusStr,
-    ocrTexts: [],
-    memoryPages,
-    hasImage,
-    composite: sendImg ? composite : undefined, // 没送图就不在监控里冒充"模型看到的图"
-    images,
-    bbox: evt.geometry.bbox,
-    debug: dbg._debug ?? null,
-    resultType: result.result_type,
-    content: result.content,
-    confidence: result.confidence,
-    recalled: dbg.recalled ?? [],
-    model: result.model_name,
-  });
-
-  // upsert by discId：移除同一讨论的上一条，原地换最新一条
-  const prev = state.overlays.find((o) => o.overlay_id === discId);
-  if (prev) {
-    state.overlays = state.overlays.filter((o) => o !== prev);
-    bus.emit('overlay:remove', discId);
-  }
-  const overlay = buildOverlay(result, evt);
-  overlay.overlay_id = discId;
-  overlay.geometry = { anchor_bbox: evt.geometry.bbox }; // 锚到这簇手势，留白里按其 y 对齐
-  overlay.object_refs = anchorRefs; // 跨视图锚：旁注锚在对象上 → 原版/重排都解析得出
-  trace('ScreenOverlay(disc)', overlay as unknown as Record<string, unknown>);
-  state.overlays.push(overlay);
-  bus.emit('overlay:add', overlay);
-
-  // 处理流水线（DEV·段落讨论路）：取证 → 主模型两段，逐组件「收到什么 → 产出什么」
-  let pipeline: PipelineStage[] | undefined;
-  if (DEV) {
-    const pl: PipelineStage[] = [];
-    if (hmp) pl.push({
-      stage: 'hmp', label: 'HMP 取证（段落讨论）', status: 'ran',
-      note: `mode=${hmp.mode} · 命中类型=${hmp.object_hint}`,
-      input: [{ k: '标注框 bbox', v: evt.geometry.bbox.map((n) => +n.toFixed(3)).join(', ') }],
-      output: [{ k: '所标内容', v: focusStr || '（未提取到文字）' }],
-      images: composite ? [{ role: 'composite（笔迹叠原文）', thumb: await thumb(composite) }].filter((x) => x.thumb) : [],
-    });
-    pl.push({
-      stage: 'model', label: '主模型 · /api/chat（段落讨论）', status: 'ran',
-      note: `滑窗 buffer ${memoryPages} 轮`,
-      input: [
-        { k: '模型', v: settings.inferModel },
-        { k: '随发图', v: '无（段落讨论路当前未将图送入主模型）' },
-        { k: '完整 prompt', v: userContent },
-      ],
-      output: [{ k: '回复', v: result.content }],
-    });
-    pipeline = pl;
-  }
-
-  // 落账本：reader/段落讨论的回复也进书日志（此前只有 PDF 主路落账）→ reader 旁注持久 + 跨视图
-  void appendAiTurnEntry({
-    document_id: bookId, page_id: evt.page_id, page_index: state.pageIndex,
-    overlay_id: discId, overlay, overlay_state: 'shown', user_edited_text: null,
-    ai_reply: result.content,
-    anchor: { surface_id: evt.page_id, mark_ids: [], object_refs: anchorRefs },
-    inference_view: { view_id: shortId('view'), trigger: 'idle', narrative: '', marked: (hmp?.text_hint || focusStr || ''), anchor_refs: anchorRefs, anchor_bbox: evt.geometry.bbox, page_id: evt.page_id, version: INFERVIEW_SCHEMA_VERSION },
-    prompt_snapshot: userContent,
-    system_prompt_hash: await SYS_HASH_P,
-    settings_snapshot: { inferModel: settings.inferModel, reflowProvider: settings.reflowProvider },
-    trigger: 'discussion', model: result.model_name, supersedes: null,
-    pipeline,
-  });
-  mark('total', performance.now() - penUpAt);
-}
 
 /* ──────────────────────────────────────────────────────────────────────────
  * v3 会话流：mark 落笔即取证(captureMark) → 累积成 session → 长停顿/手写触发

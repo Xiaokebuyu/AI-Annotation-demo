@@ -53,10 +53,7 @@ function mirrorToDebug(rec: InferenceInspect): void {
       debug: rec.debug, // 服务端 _debug：真实 system + task + page_text_len + image_roles + mode
       env: {
         model: settings.inferModel,
-        routing: settings.gesture.routing,
         placement: settings.placement,
-        pauseSeconds: settings.gesture.pauseSeconds,
-        contextLines: settings.gesture.contextLines,
         pageIndex: state.pageIndex,
         documentId: state.documentId,
         textBlocks: state.textBlocks.length,
