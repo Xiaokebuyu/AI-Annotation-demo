@@ -71,6 +71,7 @@ export function projectInferenceView(
     crop?: { role: 'ink' | 'composite'; data: string };
     anchorMarkId?: string;
     priorNeighbors?: PriorNeighbor[]; // 空间召回回来的同页邻近旧标注（回访子句用；不进 graph.nodes）
+    rowText?: string;                 // ②：手写问题纵向压着的印刷正文行（指代用）
   },
 ): InferenceView {
   const { trigger, pageText } = opts;
@@ -144,6 +145,7 @@ export function projectInferenceView(
     anchor_bbox: anchor?.bbox ?? [0, 0, 0, 0],
     page_id: anchor?.page_id ?? '',
     recall: recall.length ? recall : undefined,
+    referent_lines: opts.rowText?.trim() || undefined,
     version: INFERVIEW_SCHEMA_VERSION,
   };
 }

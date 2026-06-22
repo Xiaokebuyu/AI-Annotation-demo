@@ -12,7 +12,7 @@ import { mark } from './metrics';
 import { trace } from './trace';
 import { bus, settings, state, type Stroke } from '../app/state';
 import { grabLayers, grabRegion } from '../evidence/ocr';
-import { pageText, blocksToText } from '../evidence/focus';
+import { pageText, blocksToText, linesInBand } from '../evidence/focus';
 import { extractPageBlocks } from '../surface/renderer';
 import { pushInspect } from './inspect';
 import { chatTurn } from '../chat/stream-client';
@@ -345,7 +345,8 @@ export async function captureMark(
 function renderUserTurn(view: ReturnType<typeof projectInferenceView>): string {
   const ctx = view.page_context ? `\n\n（本页上下文，仅供消歧）：${view.page_context}` : '';
   if (view.trigger === 'handwriting') {
-    return `读者手写问：「${view.question || view.marked}」。相关标注脉络：${view.narrative}。${ctx}`;
+    const ref = view.referent_lines ? `读者在这句旁边写道：「${view.referent_lines}」。` : ''; // ②指代：问的就是这行
+    return `读者手写问：「${view.question || view.marked}」。${ref}相关标注脉络：${view.narrative}。${ctx}`;
   }
   return `读者这一阵连续标注的脉络：${view.narrative}。所标内容：「${view.marked || '（未提取到文字）'}」。${ctx}`;
 }
@@ -414,6 +415,11 @@ export async function commitSessionDiscussion(
     findSpatialRecall(session.bookId, marks), // 账本捞回同页邻近旧标注（不进 graph.nodes）
     slidingContext(3000),                     // 以当前页为中心、前后共 ~3000 字滑动窗
   ]);
+  // ②：手写问题（孤立边注本身不带指代）取它纵向压着的印刷正文行作显式指代。
+  // 仅当锚点 mark 就在当前页（刚写下的手写恒成立）才有现成 textBlocks；否则跳过、退回页面上下文。
+  const rowText = (reason === 'handwriting' && anchorMark.event.page_id === state.pageId)
+    ? linesInBand(state.textBlocks, anchorMark.event.geometry.bbox)
+    : undefined;
   const view = projectInferenceView(graph, {
     trigger: reason,
     pageText: pageCtx,
@@ -421,6 +427,7 @@ export async function commitSessionDiscussion(
     crop,
     anchorMarkId: anchorMark.id,
     priorNeighbors,
+    rowText,
   });
   mirrorView(view, reason, discId); // dev 通道：喂模型前的精简载荷可离线核对
 
@@ -526,7 +533,7 @@ export async function commitSessionDiscussion(
       output: [{
         k: '召回',
         v: priorNeighbors.length
-          ? priorNeighbors.map((r) => `${r.rel === 'containment' ? '圈住' : '邻近'}「${r.text}」`).join(' / ')
+          ? priorNeighbors.map((r) => `${r.rel === 'containment' ? '圈住' : r.rel === 'same_row' ? '同行' : '邻近'}「${r.text}」`).join(' / ')
           : '无（附近无已落库旧标注）',
       }],
     });
@@ -544,6 +551,7 @@ export async function commitSessionDiscussion(
         { k: '关系叙事 narrative', v: view.narrative || '—' },
         { k: '所标内容 marked', v: view.marked || '（未提取到文字）' },
         ...(view.question ? [{ k: '手写问 question', v: view.question }] : []),
+        ...(view.referent_lines ? [{ k: '指代行原文（②）', v: view.referent_lines }] : []),
         { k: '滑窗上下文', v: `${view.page_context?.length ?? 0} 字` },
         { k: '回访 recall', v: view.recall?.length ? view.recall.map((r) => `「${r.text}」`).join('、') : '无' },
         { k: '锚点', v: `${view.anchor_refs.length} 对象` },
