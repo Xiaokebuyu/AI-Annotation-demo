@@ -24,7 +24,7 @@ import { postJson } from './api';
 
 /** 伴读 persona 已搬到服务端 server/prompts.ts（按 role 索引、与模型解耦）；/api/chat 收 role='annotator'。
  *  下面这个标签随账本存 system_prompt_hash，标识本轮提示词版本（与 server PROMPT_VERSION 对齐，改 system 文案时同步）。 */
-const PROMPT_TAG = 'annotator@v2';
+const PROMPT_TAG = 'annotator@v3';
 
 /* ── 处理流水线（调试）：逐组件「收到什么 → 产出什么」，含缩略图，串成一轮链路 ─────────
  * 仅 DEV 落库（gate 同 mirror*）；图压成 ~220px 缩略图控 IndexedDB 体积。供 AI 会话调试页复盘。 */
@@ -253,6 +253,7 @@ function mirrorView(view: InferenceView, reason: string, discId: string): void {
     discId, trigger: reason,
     narrative: view.narrative, marked: view.marked, question: view.question ?? null,
     referent_lines: view.referent_lines ?? null, recall_n: view.recall?.length ?? 0, thematic_n: view.thematic?.length ?? 0,
+    page_annot_n: view.page_annotations?.length ?? 0,
     anchor_refs: view.anchor_refs, has_crop: !!view.crop, page_ctx_len: view.page_context?.length ?? 0,
   }));
 }
@@ -397,19 +398,28 @@ export async function captureMark(
   return { hmp, markedText, feature: resolved, trace: DEV ? pl : undefined };
 }
 
+/** 「本页已有批注」动态背景段：本页其他批注+你的旧回应，帮模型理解整页脉络（背景、非焦点）；空则空串。 */
+function renderPageBackground(items?: Array<{ marked: string; reply: string }>): string {
+  if (!items?.length) return '';
+  const lines = items.map((it) => `· 读者标注「${it.marked || '（无字）'}」→ 你曾回应「${it.reply || '（无）'}」`).join('\n');
+  return `【本页已有批注】（背景，帮你理解整页脉络；别逐条复述，回应只针对下面"当前聚焦"处）：\n${lines}\n\n`;
+}
+
 /**
  * 把 inference-view 渲染成喂模型的 user turn：idle=整段综合 / handwriting=定向答问。
  * v2 去重：只带本轮动态数据 + 一句标明类别；"怎么回应"的规则单点存 server/prompts.ts 的 annotator system。
+ * v3：前置「本页已有批注」动态背景段（system 的 <background> 是静态语境，这里是本页动态背景），用「当前聚焦」与之区隔。
  */
 function renderUserTurn(view: ReturnType<typeof projectInferenceView>): string {
+  const bg = renderPageBackground(view.page_annotations); // 动态背景段，前置、与焦点区隔
   const ctx = view.page_context ? `\n\n（本页上下文，仅供消歧）：${view.page_context}` : '';
   // 全书主题联想（向量召回）——单独贴标签、与"你正指的这行"严格区隔，防语义关联反过来制造主题漂移。现 no-op 恒空。
   const themes = view.thematic?.length ? `\n\n【全书别处你也提过】：${view.thematic.map((t) => `「${t.text}」`).join('、')}` : '';
   if (view.trigger === 'handwriting') {
     const ref = view.referent_lines ? `读者在这句旁边写道：「${view.referent_lines}」。` : ''; // ②指代：问的就是这行
-    return `读者手写问：「${view.question || view.marked}」。${ref}相关标注脉络：${view.narrative}。${themes}${ctx}`;
+    return `${bg}【当前聚焦】读者刚在本页这一处写下问题——手写问：「${view.question || view.marked}」。${ref}相关标注脉络：${view.narrative}。${themes}${ctx}`;
   }
-  return `读者这一阵连续标注的脉络：${view.narrative}。所标内容：「${view.marked || '（未提取到文字）'}」。${themes}${ctx}`;
+  return `${bg}【当前聚焦】读者刚在本页这一处连续标注——脉络：${view.narrative}。所标内容：「${view.marked || '（未提取到文字）'}」。${themes}${ctx}`;
 }
 
 /**
@@ -493,6 +503,15 @@ export async function commitSessionDiscussion(
   const rowText = (reason === 'handwriting' && anchorMark.event.page_id === state.pageId)
     ? linesInBand(state.textBlocks, anchorMark.event.geometry.bbox)
     : undefined;
+  // 动态背景：本页其他批注 + 你当时的回应（给模型整页脉络）。去重已被焦点召回的那些（priorNeighbors），
+  // 免得和召回子句重复；上限最近 6 条防膨胀。本轮尚未入账，天然不在内。
+  const focusMarkIds = new Set(priorNeighbors.map((n) => n.mark_id).filter(Boolean) as string[]);
+  const pageAnnotations = bookTurns
+    .filter((t) => t.page_index === state.pageIndex && t.overlay_state !== 'dismissed')
+    .filter((t) => !t.anchor.mark_ids.some((id) => focusMarkIds.has(id)))
+    .map((t) => ({ marked: String(t.inference_view?.marked || '').slice(0, 50), reply: String(t.ai_reply || '').slice(0, 80) }))
+    .filter((x) => x.marked || x.reply)
+    .slice(-6);
   const view = projectInferenceView(graph, {
     trigger: reason,
     pageText: pageCtx,
@@ -501,6 +520,7 @@ export async function commitSessionDiscussion(
     anchorMarkId: anchorMark.id,
     priorNeighbors,
     rowText,
+    pageAnnotations,
     thematic,
   });
   mirrorView(view, reason, discId); // dev 通道：喂模型前的精简载荷可离线核对
@@ -626,6 +646,7 @@ export async function commitSessionDiscussion(
         { k: '所标内容 marked', v: view.marked || '（未提取到文字）' },
         ...(view.question ? [{ k: '手写问 question', v: view.question }] : []),
         ...(view.referent_lines ? [{ k: '指代行原文（②）', v: view.referent_lines }] : []),
+        ...(view.page_annotations?.length ? [{ k: '本页已有批注（背景）', v: view.page_annotations.map((a) => `「${a.marked}」`).join('、') }] : []),
         { k: '滑窗上下文', v: `${view.page_context?.length ?? 0} 字` },
         { k: '回访 recall', v: view.recall?.length ? view.recall.map((r) => r.reply ? `「${r.text}」(当时:${r.reply.slice(0, 20)}…)` : `「${r.text}」`).join('、') : '无' },
         { k: '主题召回（向量）', v: view.thematic?.length ? view.thematic.map((t) => `「${t.text}」`).join('、') : '无（向量未接入）' },

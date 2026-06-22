@@ -298,6 +298,7 @@ export interface InferenceView {
   page_id: string;
   recall?: PriorNeighbor[];         // 这附近先前标过的旧标注（空间召回；调试/账本可见）
   referent_lines?: string;          // 孤立手写问题纵向压着的印刷正文行（②：指出"问的是这行"）
+  page_annotations?: Array<{ marked: string; reply: string }>; // 本页其他批注+你的旧回应（动态背景；已去重焦点召回的）
   thematic?: Array<{ text: string; pageIndex: number; score: number; anchorRefs?: string[] }>; // 全书主题联想（向量召回·现 no-op 恒空）
   version: string;
 }

@@ -72,6 +72,7 @@ export function projectInferenceView(
     anchorMarkId?: string;
     priorNeighbors?: PriorNeighbor[]; // 空间召回回来的同页邻近旧标注（回访子句用；不进 graph.nodes）
     rowText?: string;                 // ②：手写问题纵向压着的印刷正文行（指代用）
+    pageAnnotations?: InferenceView['page_annotations']; // 本页其他批注+旧回应（动态背景）
     thematic?: InferenceView['thematic']; // 全书主题联想（向量召回·现 no-op）
   },
 ): InferenceView {
@@ -147,6 +148,7 @@ export function projectInferenceView(
     page_id: anchor?.page_id ?? '',
     recall: recall.length ? recall : undefined,
     referent_lines: opts.rowText?.trim() || undefined,
+    page_annotations: opts.pageAnnotations?.length ? opts.pageAnnotations : undefined,
     thematic: opts.thematic?.length ? opts.thematic : undefined,
     version: INFERVIEW_SCHEMA_VERSION,
   };
