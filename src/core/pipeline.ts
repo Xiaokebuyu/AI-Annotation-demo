@@ -18,6 +18,7 @@ import { pushInspect } from './inspect';
 import { chatTurn } from '../chat/stream-client';
 import { openBook, bookMessages } from '../chat/buffer';
 import { classifyContext } from '../chat/classify-client';
+import { postJson } from './api';
 
 /** 旁注人格（网页对话式·替代退役 session 的伴读 persona）。buffer 给跨标注连贯，需要时呼应本书前文。 */
 const CHAT_SYSTEM =
@@ -154,17 +155,16 @@ async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[
   if (!crop) return;
   hmp.crop_ref = crop;
   try {
-    const r = await fetch('/api/ocr-vlm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: crop, model: settings.inferModel }) });
     let readOut = '';
-    if (r.ok) {
-      const t = String((await r.json())?.text || '').trim();
-      readOut = t;
-      if (t) {
-        hmp.text_hint = t; // 识别只补内容，不改 mode/类型
-        hmp.confidence = Math.max(hmp.confidence, 0.7);
-        trace('HMP:ocrFallback', { hmp_id: hmp.hmp_id, text_hint: t.slice(0, 60) });
-        bus.emit('hmp:updated', hmp);
-      }
+    try {
+      const j = await postJson<{ text?: string }>('/api/ocr-vlm', { image: crop, model: settings.inferModel });
+      readOut = String(j?.text || '').trim();
+    } catch { /* http/网络错 → readOut 留空，下方仍记 DEV 阶段 */ }
+    if (readOut) {
+      hmp.text_hint = readOut; // 识别只补内容，不改 mode/类型
+      hmp.confidence = Math.max(hmp.confidence, 0.7);
+      trace('HMP:ocrFallback', { hmp_id: hmp.hmp_id, text_hint: readOut.slice(0, 60) });
+      bus.emit('hmp:updated', hmp);
     }
     if (pl && DEV) pl.push({
       stage: 'ocr_fallback', label: '图区 OCR 兜底 · /api/ocr-vlm', status: 'ran',
@@ -261,9 +261,7 @@ function resolveMarkedText(hmp: HMP, index: SurfaceIndex): string {
 /** 云端识别当类型分类器（context-free）：读这团墨是不是文字 → kind + 转写 + 画的粗描述。失败默认 none。 */
 async function recognizeInk(inkData: string): Promise<{ kind: string; reading: string; description: string }> {
   try {
-    const r = await fetch('/api/interpret', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image: inkData, model: settings.inferModel }) });
-    if (!r.ok) return { kind: 'none', reading: '', description: '' };
-    const j = await r.json() as { kind?: string; reading?: string; description?: string };
+    const j = await postJson<{ kind?: string; reading?: string; description?: string }>('/api/interpret', { image: inkData, model: settings.inferModel });
     return { kind: String(j.kind || 'none'), reading: String(j.reading || '').trim(), description: String(j.description || '').trim() };
   } catch { return { kind: 'none', reading: '', description: '' }; }
 }

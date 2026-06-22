@@ -1,4 +1,5 @@
 import { appendMsg, bookMessages } from './buffer';
+import { postNdjson } from '../core/api';
 
 /** 一轮聊天的产物：回复正文 text + 思考过程 thinking（仅 Claude 返回，其余为空）。 */
 export interface ChatTurnResult { text: string; thinking: string; }
@@ -24,30 +25,17 @@ export async function chatTurn(
     }).filter(Boolean);
     if (blocks.length) messages[messages.length - 1] = { role: 'user', content: [...blocks, { type: 'text', text: userContent }] };
   }
-  const resp = await fetch('/api/chat', {
-    method: 'POST', headers: { 'content-type': 'application/json' }, signal: opts.signal,
-    body: JSON.stringify({ messages, system: opts.system, model: opts.model, maxTokens: opts.maxTokens ?? 500 }),
-  });
-  if (!resp.ok || !resp.body) throw new Error(`/api/chat ${resp.status}`);
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '', text = '', thinking = '';
-  const consume = (line: string): void => {
-    if (!line) return;
-    try {
-      const ev = JSON.parse(line) as { k?: string; d?: string };
+  let text = '', thinking = '';
+  // NDJSON 帧 {k:'t'|'r',d} 分流——t=正文(onDelta)、r=思考(onThinking)。分帧/容错/收尾在 postNdjson 内。
+  await postNdjson<{ k?: string; d?: string }>(
+    '/api/chat',
+    { messages, system: opts.system, model: opts.model, maxTokens: opts.maxTokens ?? 500 },
+    (ev) => {
       if (ev.k === 'r') { thinking += ev.d ?? ''; opts.onThinking?.(thinking); }
       else { text += ev.d ?? ''; opts.onDelta?.(text); }
-    } catch { /* 容忍非 JSON / 半行 */ }
-  };
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) { consume(buf.slice(0, nl).trim()); buf = buf.slice(nl + 1); }
-  }
-  consume(buf.trim()); // 收尾残行
+    },
+    { signal: opts.signal },
+  );
   text = text.trim(); thinking = thinking.trim();
   appendMsg(bookId, { role: 'assistant', content: text });
   return { text, thinking };

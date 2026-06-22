@@ -6,24 +6,20 @@
 import type { InferenceView } from '../core/contracts';
 import type { ChatMsg } from './buffer';
 import { settings } from '../app/state';
+import { postJson } from '../core/api';
 
 export async function classifyContext(
   view: InferenceView,
   conversation: ChatMsg[],
 ): Promise<{ respond: boolean; reason: string }> {
   try {
-    const r = await fetch('/api/classify-context', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        question: view.question || view.marked,
-        view_narrative: view.narrative,
-        marked: view.marked,
-        conversation: conversation.map((m) => ({ role: m.role, content: m.content })),
-        model: settings.inferModel,
-      }),
+    const j = await postJson<{ respond?: boolean; reason?: string }>('/api/classify-context', {
+      question: view.question || view.marked,
+      view_narrative: view.narrative,
+      marked: view.marked,
+      conversation: conversation.map((m) => ({ role: m.role, content: m.content })),
+      model: settings.inferModel,
     });
-    if (!r.ok) return { respond: true, reason: 'classifier http error' };
-    const j = await r.json() as { respond?: boolean; reason?: string };
     return { respond: j?.respond !== false, reason: String(j?.reason || '') };
   } catch {
     return { respond: true, reason: 'classifier unreachable' };

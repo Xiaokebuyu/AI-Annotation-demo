@@ -2,6 +2,7 @@ import type { NormBBox, OcrTextBlock } from '../core/contracts';
 import type { ReflowBlock, ReflowBlockType } from './reflow';
 import { reflowLocal, groupLines, blockId, type ReflowLine } from './reflow';
 import { settings } from '../app/state';
+import { postJson, postNdjson } from '../core/api';
 
 /**
  * 重排 provider 接缝（跟 ocr.ts / inference.ts 同构）。
@@ -37,17 +38,11 @@ async function refine(base: ReflowBlock[], image?: string): Promise<ReflowBlock[
   if (base.length < 2) return base;
   let refined: Array<{ id: string; type: string; level: number; text: string }>;
   try {
-    const resp = await fetch('/api/reflow', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      // 列表用占位文本送给模型（只让它排序，不让它拆平结构）
-      body: JSON.stringify({
-        blocks: base.map((b) => ({ id: b.id, type: b.type, text: b.type === 'list' ? `（列表）${(b.items ?? []).join(' / ')}` : b.text })),
-        image,
-      }),
+    // 列表用占位文本送给模型（只让它排序，不让它拆平结构）
+    refined = await postJson<Array<{ id: string; type: string; level: number; text: string }>>('/api/reflow', {
+      blocks: base.map((b) => ({ id: b.id, type: b.type, text: b.type === 'list' ? `（列表）${(b.items ?? []).join(' / ')}` : b.text })),
+      image,
     });
-    if (!resp.ok) return base;
-    refined = await resp.json();
     if (!Array.isArray(refined)) return base;
   } catch {
     return base;
@@ -88,11 +83,7 @@ const rewrite: ReflowProvider = async () => {
   if (!image) return [];
   let arr: Array<{ type?: string; level?: number; text?: string; items?: string[]; ordered?: boolean; bbox?: number[] }>;
   try {
-    const resp = await fetch('/api/reflow-vlm', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image }),
-    });
-    if (!resp.ok) return [];
-    arr = await resp.json();
+    arr = await postJson<Array<{ type?: string; level?: number; text?: string; items?: string[]; ordered?: boolean; bbox?: number[] }>>('/api/reflow-vlm', { image });
     if (!Array.isArray(arr)) return [];
   } catch { return []; }
   return arr.map((b, i): ReflowBlock => {
@@ -154,12 +145,7 @@ const ai: ReflowProvider = async (blocks) => {
   if (lines.length < 3) return reflowLocal(blocks);
   let groups: Group[];
   try {
-    const resp = await fetch('/api/reflow-ai', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ lines: payload, model: settings.reflowModel }),
-    });
-    if (!resp.ok) return reflowLocal(blocks);
-    groups = await resp.json();
+    groups = await postJson<Group[]>('/api/reflow-ai', { lines: payload, model: settings.reflowModel });
     if (!Array.isArray(groups)) return reflowLocal(blocks);
   } catch { return reflowLocal(blocks); }
 
@@ -200,28 +186,8 @@ export async function reflowAiStream(
     onBlock(b, out);
   };
 
-  const resp = await fetch('/api/reflow-ai-stream', {
-    method: 'POST', headers: { 'content-type': 'application/json' }, signal,
-    body: JSON.stringify({ lines: payload, model: settings.reflowModel }),
-  });
-  if (!resp.ok || !resp.body) throw new Error(`reflow-ai-stream ${resp.status}`);
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line) continue;
-      try { take(JSON.parse(line)); } catch { /* 半行/坏行跳过 */ }
-    }
-  }
-  const tail = buf.trim();
-  if (tail) { try { take(JSON.parse(tail)); } catch { /* noop */ } }
+  // 分帧/容错/收尾在 postNdjson 内；失败（含网关不支持流式）抛给调用方退回非流式 ai()，AbortError 原样抛出。
+  await postNdjson<Group>('/api/reflow-ai-stream', { lines: payload, model: settings.reflowModel }, take, { signal });
 
   for (const l of lines) if (!used.has(l.id)) { const b: ReflowBlock = { id: blockId(l.text, out.length + 1000), type: 'para', level: 0, text: l.text, source: l.bbox, sourceRunIds: l.runIds }; out.push(b); onBlock(b, out); }
   out.sort((a, b) => a.source[1] - b.source[1]);

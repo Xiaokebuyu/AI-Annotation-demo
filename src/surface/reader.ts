@@ -6,6 +6,7 @@ import { reflowProviders, reflowAiStream } from './reflow-provider';
 import { reflowLocal } from './reflow';
 import { extractPageBlocks } from './renderer';
 import { grabRegion } from '../evidence/ocr';
+import { postJson } from '../core/api';
 import { getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
 import { bboxOf, classifyScored } from '../capture/classify';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
@@ -161,17 +162,13 @@ async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string)
   const nearby = nearbyText(source);
   const prevSummary = ''; // 跨页记忆撤除（押后）：图解不再带前页摘要
   try {
-    const resp = await fetch('/api/explain-image', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ image, nearby, prevSummary }),
-    });
-    const data = resp.ok ? await resp.json() : null;
+    const data = await postJson<{ text?: string }>('/api/explain-image', { image, nearby, prevSummary });
     if (data?.text) { cap.textContent = `图：${String(data.text)}`; putImageExplain(state.pageIndex, source, String(data.text)); }
     else cap.textContent = '（这张图暂时没读出含义）';
   } catch {
     cap.textContent = '（解读失败）';
   }
+
   delete cap.dataset.pending;
 }
 
