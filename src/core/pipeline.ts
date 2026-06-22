@@ -2,6 +2,7 @@ import type { AnnotationEvent, EventType, HMP, InferenceResult, InferenceView, M
 import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
 import { DEVICE_ID, SESSION_ID, shortId } from './ids';
 import { appendAiTurnEntry, getReflow, setSynthesisWatermark, getBookAiTurns } from '../local/store';
+import { devEmit } from './dev-telemetry';
 import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
 import { resolveTarget, buildHmp } from '../evidence/target';
 import { buildMarkGraph } from '../evidence/mark-graph';
@@ -171,21 +172,18 @@ async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[
 
 
 /**
- * dev-only：把完整 HMP 取证记录镜像到服务端调试通道（/api/__debug/event, kind='hmp'）。
- * 去掉 crop/vector 的 base64（只留是否存在），并把 target_object_refs 解析成原文——
- * 让"开发者侧的 Claude"不进浏览器也能逐字段核对采集的完整性/准确性。
+ * dev-only：完整 HMP 取证 → kind='hmp'。去 crop/vector base64（只留是否存在），
+ * 把 target_object_refs 解析成原文——开发者侧不进浏览器也能逐字段核对采集准确性。
+ * 传输/容错/DEV 闸统一在 devEmit；payload 在 thunk 内塑形（生产零开销）。
  */
 function mirrorHmp(hmp: HMP): void {
-  if (!(import.meta as { env?: { DEV?: boolean } }).env?.DEV) return;
-  try {
+  devEmit('hmp', () => {
     const objs = state.surfaceIndex?.objects ?? [];
     const targets = hmp.target_object_refs.map((id) => {
       const o = objs.find((x) => x.id === id);
       return o ? { id: o.id, type: o.type, role: o.role ?? null, text: o.text ?? null } : { id, missing: true };
     });
-    const slim = {
-      kind: 'hmp',
-      ts: new Date().toISOString(),
+    return {
       hmp_id: hmp.hmp_id,
       surface_id: hmp.surface_id,
       surface_type: state.surfaceIndex?.surface_type ?? null,
@@ -201,8 +199,26 @@ function mirrorHmp(hmp: HMP): void {
       confidence: hmp.confidence,
       version: hmp.version,
     };
-    void fetch('/api/__debug/event', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(slim) }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
-  } catch { /* 取值出错不连累 UI */ }
+  });
+}
+
+/**
+ * dev-only：识别裁判 → kind='recognize'。哭脸式漏判的关键观测点——
+ * 一笔 freeform 是否送 /api/interpret、为何跳过（markup 由几何判 / 几何门不值得 / 无墨图）、
+ * 判定 kind+转写+描述，以及几何初判 feature_in 与最终 feature_out。每笔 captureMark 都发一条。
+ */
+function mirrorRecognize(o: {
+  event_id: string; page_id: string; region: NormBBox;
+  feature_in: string; feature_out: string; ocrWorthy: boolean; hasInk: boolean;
+  interpretCalled: boolean; gate: string;
+  kind?: string; reading?: string; description?: string;
+}): void {
+  devEmit('recognize', () => ({
+    event_id: o.event_id, page_id: o.page_id, region: o.region.map((n) => +n.toFixed(4)),
+    feature_in: o.feature_in, feature_out: o.feature_out, ocrWorthy: o.ocrWorthy, hasInk: o.hasInk,
+    interpretCalled: o.interpretCalled, gate: o.gate,
+    ...(o.interpretCalled ? { kind: o.kind ?? '', reading: o.reading ?? '', description: o.description ?? '' } : {}),
+  }));
 }
 
 
@@ -211,44 +227,33 @@ function mirrorHmp(hmp: HMP): void {
  * 时建标注图 + 蒸馏 inference-view → 主模型回应。语义全交模型（无形状→意图映射）。
  * ────────────────────────────────────────────────────────────────────────── */
 
-/** dev-only：把上下文分类器的 respond/fold 决策镜像到调试通道（kind='classify'）。 */
+/** dev-only：上下文分类器 respond/fold 判定 → kind='classify'。 */
 function mirrorClassify(o: { respond: boolean; reason: string; question: string; discId: string }): void {
-  if (!(import.meta as { env?: { DEV?: boolean } }).env?.DEV) return;
-  void fetch('/api/__debug/event', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ kind: 'classify', ts: new Date().toISOString(), ...o }),
-  }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
+  devEmit('classify', () => ({ ...o }));
 }
 
 /**
- * dev-only：把空间召回的逐候选判定镜像到调试通道（kind='recall'）。
- * 召回为空时尤其有用——直接看到每条邻近旧标注的 euclid/dy/dx/sameRow/verdict，
- * 无需进浏览器展开折叠复制。target=当前锚点笔（手写）的 bbox/文字，candidates=evals。
+ * dev-only：空间召回逐候选判定 → kind='recall'。召回为空时直接看每条候选的 euclid/dy/dx/sameRow/verdict，
+ * 无需进浏览器展开折叠。target=当前锚点笔(手写)的 bbox/文字，candidates=evals。
+ * 注：thresholds 与 mark-graph.ts SPATIAL_NEAR / recall.ts ROW_BAND·ROW_REACH 对齐（仅作展示）。
  */
 function mirrorRecall(o: { discId: string; target: { text: string; bbox: NormBBox } | null; evals: RecallCandDiag[]; recalled: number }): void {
-  if (!(import.meta as { env?: { DEV?: boolean } }).env?.DEV) return;
-  void fetch('/api/__debug/event', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      kind: 'recall', ts: new Date().toISOString(), discId: o.discId,
-      target: o.target ? { text: o.target.text, bbox: o.target.bbox.map((n) => +n.toFixed(4)), ycenter: +(o.target.bbox[1] + o.target.bbox[3] / 2).toFixed(4) } : null,
-      thresholds: { SPATIAL_NEAR: 0.12, ROW_BAND: 0.03, ROW_REACH: 0.5 },
-      recalled: o.recalled, candidates: o.evals,
-    }),
-  }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
+  devEmit('recall', () => ({
+    discId: o.discId,
+    target: o.target ? { text: o.target.text, bbox: o.target.bbox.map((n) => +n.toFixed(4)), ycenter: +(o.target.bbox[1] + o.target.bbox[3] / 2).toFixed(4) } : null,
+    thresholds: { SPATIAL_NEAR: 0.12, ROW_BAND: 0.03, ROW_REACH: 0.5 },
+    recalled: o.recalled, candidates: o.evals,
+  }));
 }
 
-/** dev-only：把蒸馏出的 inference-view（喂模型的精简载荷）镜像到调试通道（kind='inferview'）。 */
+/** dev-only：蒸馏出的 inference-view（喂模型的精简载荷）→ kind='inferview'。 */
 function mirrorView(view: InferenceView, reason: string, discId: string): void {
-  if (!(import.meta as { env?: { DEV?: boolean } }).env?.DEV) return;
-  void fetch('/api/__debug/event', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      kind: 'inferview', ts: new Date().toISOString(), discId, trigger: reason,
-      narrative: view.narrative, marked: view.marked, question: view.question ?? null,
-      anchor_refs: view.anchor_refs, has_crop: !!view.crop, page_ctx_len: view.page_context?.length ?? 0,
-    }),
-  }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
+  devEmit('inferview', () => ({
+    discId, trigger: reason,
+    narrative: view.narrative, marked: view.marked, question: view.question ?? null,
+    referent_lines: view.referent_lines ?? null, recall_n: view.recall?.length ?? 0, thematic_n: view.thematic?.length ?? 0,
+    anchor_refs: view.anchor_refs, has_crop: !!view.crop, page_ctx_len: view.page_context?.length ?? 0,
+  }));
 }
 
 /** 形状/特征 → MarkShape：手写/画由特征定，其余按几何 EventType。 */
@@ -297,33 +302,43 @@ export async function captureMark(
   // 不值得（单笔近直线/太小）→ 跳过识别、留 drawing，省调用、也避免把线条误转写成字。
   let resolved = feature;
   let textHint: string | undefined;
-  if (feature.type !== 'markup') {
-    if (feature.raw.ocrWorthy && layers.ink) {
-      const r = await recognizeInk(layers.ink);
-      const isText = r.kind === 'handwriting' || r.kind === 'mixed';
-      resolved = { ...feature, type: isText ? 'handwriting' : 'drawing', confidence: r.kind === 'none' ? 0.3 : 0.85 };
-      // 文字→转写；画→粗描述（让画也带"内容"进 markedText/叙事/召回；意图仍交推理模型）。
-      textHint = (isText ? r.reading : r.description) || undefined;
-      if (DEV) pl.push({
-        stage: 'recognize', label: '识别分类器 · /api/interpret', status: 'ran',
-        note: '自由笔且过几何门(ocrWorthy)：判「手写 vs 画」、转写文字、给画一句粗描述（context-free，不看上下文、不揣测意图）',
-        input: [{ k: '模型', v: settings.inferModel }, { k: '输入', v: '白底笔迹图 ink' }],
-        output: [
-          { k: '判定 kind', v: r.kind },
-          { k: '转写 reading', v: r.reading || '（无）' },
-          { k: '画的描述 description', v: r.description || '（非画/无）' },
-          { k: '定型', v: `${resolved.type} · conf ${resolved.confidence}` },
-        ],
-        images: [{ role: 'ink（识别输入）', thumb: await thumb(layers.ink) }].filter((x) => x.thumb),
-      });
-    } else if (DEV) {
-      pl.push({
-        stage: 'recognize', label: '识别分类器 · /api/interpret', status: 'skipped',
-        note: layers.ink ? '几何门判不值得识别（单笔近直线/太小）→ 跳过、留 drawing' : '无白底笔迹图可识别',
-        output: [{ k: '定型', v: `${feature.type}（未经识别）` }],
-      });
-    }
+  let recog: { kind: string; reading: string; description: string } | null = null; // interpret 结果（仅调用时）
+  let recogGate: string; // 为何送/跳过识别（dev 遥测核对哭脸式漏判）
+  if (feature.type === 'markup') {
+    recogGate = 'markup（几何已定型）·不送识别';
+  } else if (feature.raw.ocrWorthy && layers.ink) {
+    recog = await recognizeInk(layers.ink);
+    const isText = recog.kind === 'handwriting' || recog.kind === 'mixed';
+    resolved = { ...feature, type: isText ? 'handwriting' : 'drawing', confidence: recog.kind === 'none' ? 0.3 : 0.85 };
+    // 文字→转写；画→粗描述（让画也带"内容"进 markedText/叙事/召回；意图仍交推理模型）。
+    textHint = (isText ? recog.reading : recog.description) || undefined;
+    recogGate = 'freeform 过几何门(ocrWorthy)·送识别';
+    if (DEV) pl.push({
+      stage: 'recognize', label: '识别分类器 · /api/interpret', status: 'ran',
+      note: '自由笔且过几何门(ocrWorthy)：判「手写 vs 画」、转写文字、给画一句粗描述（context-free，不看上下文、不揣测意图）',
+      input: [{ k: '模型', v: settings.inferModel }, { k: '输入', v: '白底笔迹图 ink' }],
+      output: [
+        { k: '判定 kind', v: recog.kind },
+        { k: '转写 reading', v: recog.reading || '（无）' },
+        { k: '画的描述 description', v: recog.description || '（非画/无）' },
+        { k: '定型', v: `${resolved.type} · conf ${resolved.confidence}` },
+      ],
+      images: [{ role: 'ink（识别输入）', thumb: await thumb(layers.ink) }].filter((x) => x.thumb),
+    });
+  } else {
+    recogGate = layers.ink ? '几何门判不值得识别（单笔近直线/太小）·跳过' : '无白底笔迹图·跳过';
+    if (DEV) pl.push({
+      stage: 'recognize', label: '识别分类器 · /api/interpret', status: 'skipped',
+      note: recogGate + '→ 留 drawing',
+      output: [{ k: '定型', v: `${feature.type}（未经识别）` }],
+    });
   }
+  // dev：每笔都发识别裁判（含 markup 跳过的——哭脸式"被组装成 markup 而漏判画"靠这条一眼看穿）
+  mirrorRecognize({
+    event_id: event.event_id, page_id: event.page_id, region: event.geometry.bbox,
+    feature_in: feature.type, feature_out: resolved.type, ocrWorthy: !!feature.raw.ocrWorthy, hasInk: !!layers.ink,
+    interpretCalled: !!recog, gate: recogGate, kind: recog?.kind, reading: recog?.reading, description: recog?.description,
+  });
   const action = markActionOf(resolved.type, event.event_type, score);
   // markup 锚它所标的内容；freeform（手写/画）属 self_content——它本身就是内容，不锚到 bbox 碰巧蹭到的正文
   // （手写跟正文的位置关系靠叙事里同时出现的圈/划来带，避免"误锚正文→模型幻觉"）。

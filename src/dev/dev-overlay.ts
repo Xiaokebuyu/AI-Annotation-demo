@@ -10,6 +10,7 @@
  */
 import { bus, state, settings } from '../app/state';
 import { pageCss } from '../core/transform';
+import { devEmit } from '../core/dev-telemetry';
 import type { HMP, MarkGraph } from '../core/contracts';
 
 let layer: HTMLDivElement | null = null;
@@ -50,10 +51,7 @@ let logNextRel = false;
 function mirrorRelViz(d: Record<string, unknown>): void {
   if (!logNextRel) return;
   logNextRel = false;
-  void fetch('/api/__debug/event', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ kind: 'relviz', ts: new Date().toISOString(), ...d }),
-  }).catch(() => { /* 诊断失败不连累 */ });
+  devEmit('relviz', () => ({ ...d }));
 }
 
 function drawRelations(): void {

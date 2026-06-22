@@ -3,6 +3,7 @@
  * 供开发面板的「上下文监控」面板展示运行状况。纯记录，不参与主链路。
  */
 import { bus, settings, state } from '../app/state';
+import { devEmit } from './dev-telemetry';
 
 export interface InferenceInspect {
   ts: string;
@@ -29,43 +30,34 @@ const log: InferenceInspect[] = [];
 const MAX = 20;
 
 /**
- * dev-only：把这条 inspect 镜像到服务端调试通道（/api/__debug/event）。
+ * dev-only：把这条 inspect 镜像到 dev 遥测通道（kind='inference'）。
  * 去掉 base64（只留图的角色+字节数），附当前设置/页码快照——便于"开发者侧"离线定位问题。
- * fire-and-forget，失败不影响 UI；生产构建（import.meta.env.DEV=false）直接跳过。
+ * 传输/容错/DEV 闸统一在 devEmit；这里只塑形 payload。
  */
 function mirrorToDebug(rec: InferenceInspect): void {
-  if (!(import.meta as { env?: { DEV?: boolean } }).env?.DEV) return;
-  try {
-    const slim = {
-      kind: 'inference',
-      ts: rec.ts,
-      gesture: rec.gesture,
-      intent: rec.intent,
-      modes: rec.modes,
-      focus: rec.nearby,
-      hasImage: rec.hasImage,
-      images: (rec.images ?? []).map((im) => ({ role: im.role, bytes: im.data?.length ?? 0 })),
-      resultType: rec.resultType,
-      content: rec.content,
-      confidence: rec.confidence,
-      recalled: rec.recalled,
-      model: rec.model,
-      debug: rec.debug, // 服务端 _debug：真实 system + task + page_text_len + image_roles + mode
-      env: {
-        model: settings.inferModel,
-        placement: settings.placement,
-        pageIndex: state.pageIndex,
-        documentId: state.documentId,
-        textBlocks: state.textBlocks.length,
-        overlays: state.overlays.length,
-      },
-    };
-    void fetch('/api/__debug/event', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(slim),
-    }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
-  } catch { /* 取值出错也不连累 UI */ }
+  devEmit('inference', () => ({
+    ts: rec.ts, // 回填记录自身时刻（覆盖 envelope 默认 now）
+    gesture: rec.gesture,
+    intent: rec.intent,
+    modes: rec.modes,
+    focus: rec.nearby,
+    hasImage: rec.hasImage,
+    images: (rec.images ?? []).map((im) => ({ role: im.role, bytes: im.data?.length ?? 0 })),
+    resultType: rec.resultType,
+    content: rec.content,
+    confidence: rec.confidence,
+    recalled: rec.recalled,
+    model: rec.model,
+    debug: rec.debug, // 服务端 _debug：真实 system + task + page_text_len + image_roles + mode
+    env: {
+      model: settings.inferModel,
+      placement: settings.placement,
+      pageIndex: state.pageIndex,
+      documentId: state.documentId,
+      textBlocks: state.textBlocks.length,
+      overlays: state.overlays.length,
+    },
+  }));
 }
 
 export function pushInspect(rec: InferenceInspect): void {

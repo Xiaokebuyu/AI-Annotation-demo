@@ -7,6 +7,7 @@ import {
 } from './capture/session';
 import { localCharHeight } from './evidence/target';
 import { trace } from './core/trace';
+import { devEmit } from './core/dev-telemetry';
 import { shortId, DEVICE_ID } from './core/ids';
 import { bus, state, settings, strokeMarkIds, type Stroke, type Tool } from './app/state';
 import { appendMarkEntry, getBookAiTurns, getFoldedMarks, getPendingMarks, listBooks, setLastReadPage, updateOverlayState } from './local/store';
@@ -108,10 +109,7 @@ function cancelTimers(): void {
 /** 手势决策 = trace + 镜像到 dev 通道（让"圈了几次/每笔判成什么/有没有被并/被丢"在通道里可见）。 */
 function gtrace(o: Record<string, unknown>): void {
   trace('GestureSession', o);
-  void fetch('/api/__debug/event', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ kind: 'gesture', ts: new Date().toISOString(), strokeCount: Array.isArray(o.strokes) ? (o.strokes as unknown[]).length : undefined, ...o }),
-  }).catch(() => { /* 镜像失败不连累主链路 */ });
+  devEmit('gesture', () => ({ strokeCount: Array.isArray(o.strokes) ? (o.strokes as unknown[]).length : undefined, ...o }));
 }
 
 const diagOf = (scored: ReturnType<typeof classifyScored>[]) => scored.map((s) => ({ type: s.type, score: Number(s.score.toFixed(2)) }));
