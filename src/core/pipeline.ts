@@ -217,7 +217,8 @@ function mirrorRecognize(o: {
     event_id: o.event_id, page_id: o.page_id, region: o.region.map((n) => +n.toFixed(4)),
     feature_in: o.feature_in, feature_out: o.feature_out, ocrWorthy: o.ocrWorthy, hasInk: o.hasInk,
     interpretCalled: o.interpretCalled, gate: o.gate,
-    ...(o.interpretCalled ? { kind: o.kind ?? '', reading: o.reading ?? '', description: o.description ?? '' } : {}),
+    // VLM 判定值字段名用 interp_kind，**不要叫 kind**——会和 envelope 的事件 kind 撞名。
+    ...(o.interpretCalled ? { interp_kind: o.kind ?? '', reading: o.reading ?? '', description: o.description ?? '' } : {}),
   }));
 }
 

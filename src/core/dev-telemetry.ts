@@ -30,8 +30,10 @@ const DEV = (import.meta as { env?: { DEV?: boolean } }).env?.DEV === true;
 /**
  * 发射一条 dev 事件。仅 DEV；fire-and-forget；任何失败(取值/序列化/网络/dev sink 不在)都不连累 UI。
  * `build` 是**惰性 thunk**：生产构建下根本不调用——payload 既零开销、又不可能抛。
- * envelope 统一为 `{ kind, ts, ...payload }`——`ts`=客户端事件时刻；server 另盖 `t`=落库时刻
- * （payload 里若自带 `ts`，会覆盖默认值，用于回填记录自身的时刻）。
+ * envelope `{ ts, ...payload, kind }`：
+ *   · `kind` 放**末尾、永不被 payload 覆盖**——曾因 recognize 的 payload 自带 `kind` 字段（VLM 判定值）
+ *     spread 覆盖掉事件类型 'recognize'、把事件改名成 'sketch'，故钉死在最后。payload 别再用 `kind` 字段名。
+ *   · `ts`=客户端事件时刻、放最前，**payload 可覆盖**（inspect 用 rec.ts 回填记录自身时刻）；server 另盖 `t`=落库时刻。
  */
 export function devEmit(kind: DevEventKind, build: () => Record<string, unknown>): void {
   if (!DEV) return;
@@ -40,7 +42,7 @@ export function devEmit(kind: DevEventKind, build: () => Record<string, unknown>
     void fetch('/api/__debug/event', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kind, ts: new Date().toISOString(), ...payload }),
+      body: JSON.stringify({ ts: new Date().toISOString(), ...payload, kind }),
     }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
   } catch { /* 取值/序列化出错也不连累 UI */ }
 }
