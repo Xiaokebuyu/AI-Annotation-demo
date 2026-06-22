@@ -487,7 +487,7 @@ export async function commitSessionDiscussion(
       source_refs: [{ page_id: pageId, bbox: view.anchor_bbox, ocr_block_ids: [], event_id: anchorMark.id }],
       confidence: 0.8, created_at: new Date().toISOString(), model_name: settings.inferModel, model_version: 'chat-session',
     };
-    (result as unknown as { _debug?: unknown })._debug = { mode: 'chat-session', trigger: reason, narrative: view.narrative, marked: view.marked, buffer_turns: bookMessages(bookId).length };
+    (result as unknown as { _debug?: unknown })._debug = { mode: 'chat-session', trigger: reason, narrative: view.narrative, marked: view.marked, buffer_turns: bookMessages(bookId).length, referent_lines: view.referent_lines, recall: view.recall, thematic_n: view.thematic?.length ?? 0 };
     trace('InferenceResult(session)', result as unknown as Record<string, unknown>);
   } catch (err) {
     bus.emit('anchor:clear', discId);
