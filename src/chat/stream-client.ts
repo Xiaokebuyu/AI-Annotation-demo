@@ -13,7 +13,7 @@ export interface ChatTurnResult { text: string; thinking: string; }
 export async function chatTurn(
   bookId: string,
   userContent: string,
-  opts: { system: string; model: string; maxTokens?: number; onDelta?: (full: string) => void; onThinking?: (full: string) => void; signal?: AbortSignal; images?: Array<{ data: string }> },
+  opts: { role: string; model: string; maxTokens?: number; onDelta?: (full: string) => void; onThinking?: (full: string) => void; signal?: AbortSignal; images?: Array<{ data: string }> },
 ): Promise<ChatTurnResult> {
   appendMsg(bookId, { role: 'user', content: userContent }); // 历史只存文字：图不进 buffer（避免每轮重发/滚雪球）
   const messages: Array<{ role: string; content: unknown }> = bookMessages(bookId).map((m) => ({ role: m.role, content: m.content as unknown }));
@@ -29,7 +29,7 @@ export async function chatTurn(
   // NDJSON 帧 {k:'t'|'r',d} 分流——t=正文(onDelta)、r=思考(onThinking)。分帧/容错/收尾在 postNdjson 内。
   await postNdjson<{ k?: string; d?: string }>(
     '/api/chat',
-    { messages, system: opts.system, model: opts.model, maxTokens: opts.maxTokens ?? 500 },
+    { messages, role: opts.role, model: opts.model, maxTokens: opts.maxTokens ?? 500 },
     (ev) => {
       if (ev.k === 'r') { thinking += ev.d ?? ''; opts.onThinking?.(thinking); }
       else { text += ev.d ?? ''; opts.onDelta?.(text); }

@@ -1,6 +1,6 @@
 import type { AnnotationEvent, EventType, HMP, InferenceResult, InferenceView, MarkFeatureType, MarkShape, NormBBox, PipelineStage, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
 import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
-import { DEVICE_ID, SESSION_ID, shortId, sha256Hex } from './ids';
+import { DEVICE_ID, SESSION_ID, shortId } from './ids';
 import { appendAiTurnEntry, getReflow, setSynthesisWatermark } from '../local/store';
 import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
 import { resolveTarget, buildHmp } from '../evidence/target';
@@ -20,14 +20,9 @@ import { openBook, bookMessages } from '../chat/buffer';
 import { classifyContext } from '../chat/classify-client';
 import { postJson } from './api';
 
-/** 旁注人格（网页对话式·替代退役 session 的伴读 persona）。buffer 给跨标注连贯，需要时呼应本书前文。 */
-const CHAT_SYSTEM =
-  '你是 InkLoop —— 嵌在阅读器里的旁注式 AI 同读者。读者在原文上用符号（圈/划/箭头/手写等）连续标注，你只用简短中文旁注回应。' +
-  '有时你收到读者这一阵连续标注的整段脉络——综合它给一条贯穿性的旁注，紧扣这些标注、按它们的顺序与关系理解、别逐条复述、别脱开去谈整页大主题。' +
-  '有时你收到读者手写的一个问题——直接回答它、扣住所写、不要反问。' +
-  '有时随回复附一张截图（你圈/划/写处的图）——给了图就结合图作答。' +
-  '不寒暄、不复述原文、不用 markdown 或列表、至多 2–3 句，像页边批注点到为止。' +
-  '上文里有读者在这本书前面留下的标注与你的回应——需要时自然呼应，但别强行联系。';
+/** 伴读 persona 已搬到服务端 server/prompts.ts（按 role 索引、与模型解耦）；/api/chat 收 role='annotator'。
+ *  下面这个标签随账本存 system_prompt_hash，标识本轮提示词版本（与 server PROMPT_VERSION 对齐，改 system 文案时同步）。 */
+const PROMPT_TAG = 'annotator@v1';
 
 /* ── 处理流水线（调试）：逐组件「收到什么 → 产出什么」，含缩略图，串成一轮链路 ─────────
  * 仅 DEV 落库（gate 同 mirror*）；图压成 ~220px 缩略图控 IndexedDB 体积。供 AI 会话调试页复盘。 */
@@ -62,9 +57,6 @@ function markTraceLabel(feature: MarkFeatureType, markedText: string): string {
   return `标记「${t || '—'}」`;
 }
 
-/** CHAT_SYSTEM 指纹（ai_turn 存 system_prompt_hash，便于日后 prompt 变更后审计/复现）。模块加载即算。 */
-const SYS_HASH_P: Promise<string> = sha256Hex(new TextEncoder().encode(CHAT_SYSTEM).buffer as ArrayBuffer)
-  .then((h) => h.slice(0, 8)).catch(() => '');
 
 /** 单笔封装为契约 shape。会话内多笔共享一个 trace_id（决策：停笔会话）。 */
 export function makeEvent(stroke: Stroke, traceId: string): AnnotationEvent | null {
@@ -457,7 +449,7 @@ export async function commitSessionDiscussion(
   const tModel0 = performance.now();
   try {
     const { text: full, thinking: tk } = await chatTurn(bookId, userContent, {
-      system: CHAT_SYSTEM, model: settings.inferModel,
+      role: 'annotator', model: settings.inferModel,
       maxTokens: reason === 'idle' ? 600 : 400,
       images: view.crop ? [{ data: view.crop.data }] : [], // 被判需图片识别的内容：把合成图/笔迹图送进主推理
       onDelta: (t) => bus.emit('anchor:place', { id: discId, pageId, anchorRefs, bbox: view.anchor_bbox, text: t, kind: 'note' }),
@@ -576,7 +568,7 @@ export async function commitSessionDiscussion(
     // ⑤ 主模型（流式）——产出即下方那条回复气泡 + 思考过程
     pl.push({
       stage: 'model', label: '主模型 · /api/chat（流式）', status: result.model_version === 'chat-session' ? 'ran' : 'error',
-      note: `系统人格 hash ${await SYS_HASH_P} · 滑窗 buffer ${bufBefore} 轮（发送前）`,
+      note: `系统人格 ${PROMPT_TAG} · 滑窗 buffer ${bufBefore} 轮（发送前）`,
       input: [
         { k: '模型', v: settings.inferModel },
         { k: 'maxTokens', v: String(reason === 'idle' ? 600 : 400) },
@@ -601,7 +593,7 @@ export async function commitSessionDiscussion(
     anchor: { surface_id: view.page_id, mark_ids: marks.map((m) => m.id), object_refs: view.anchor_refs },
     inference_view: { ...view, crop: undefined }, // 存料不存图：crop 落库前剥掉
     prompt_snapshot: userContent,
-    system_prompt_hash: await SYS_HASH_P,
+    system_prompt_hash: PROMPT_TAG,
     settings_snapshot: { inferModel: settings.inferModel, reflowProvider: settings.reflowProvider },
     trigger: reason, model: result.model_name, supersedes: null, thinking,
     diag: { classify: classifyDiag, sent_image: !!view.crop },

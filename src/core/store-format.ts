@@ -108,7 +108,7 @@ export interface PersistedAiTurn extends BaseEntry {
   anchor: { surface_id: string; mark_ids: string[]; object_refs: string[] }; // 指回页/笔/对象
   inference_view: InferenceView;   // 喂模型的精简载荷快照（crop 已剥），审计/复现
   prompt_snapshot: string;         // 渲染出的用户轮文本（renderUserTurn 结果）
-  system_prompt_hash: string;      // CHAT_SYSTEM 的 sha256[:8]
+  system_prompt_hash: string;      // 提示词版本标签（如 annotator@v1）；提示词文本在 server/prompts.ts、git 版本化
   settings_snapshot: { inferModel: string; reflowProvider: string }; // 影响取证的配置
   trigger: 'idle' | 'handwriting' | 'discussion';
   model: string;

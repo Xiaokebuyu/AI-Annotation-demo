@@ -1,3 +1,5 @@
+import { SYSTEM_PROMPTS, type PromptRole } from './prompts';
+
 /**
  * 推理网关代理（Node 侧，仅 dev server 内运行）。
  *
@@ -186,13 +188,7 @@ export async function runInterpret(payload: any): Promise<{ reading: string; kin
   // 类型分类器 + 转写器（v3：markup 由几何判，"手写 vs 画"这条无几何模板的轴交给识别——
   // 它读这团墨是不是文字。**context-free**：只看墨图，不需要对话上下文。英文优先、中文兜底，逐字转写不翻译。
   // 画（sketch/mixed）另给一句"大概像什么"的粗描述（笑脸/箭头/方框…）——只描述长相，不揣测意图（意图交推理模型）。
-  const system =
-    'This is a crop of ink the reader drew (white background, dark strokes). Judge the KIND of ink, transcribe any text, and roughly describe any drawing. ' +
-    'kind: "handwriting" = legible letters / words / characters; "sketch" = a drawing / diagram / doodle / arrow / lone line, not text; ' +
-    '"mixed" = both text and a drawing; "none" = a stray dot or scribble with no content. ' +
-    'reading: if it contains text, transcribe it verbatim in its original language (the reader writes primarily English; Chinese also possible); otherwise empty. ' +
-    'description: ONLY if kind is "sketch" or "mixed", give a SHORT 3-8 character Chinese phrase for what the drawing LOOKS LIKE (e.g. 一张笑脸 / 一个箭头 / 一个方框 / 一团乱线 / 一颗星). Describe appearance only — do NOT guess why it was drawn or what it means. Empty for handwriting/none. ' +
-    'Do not translate, summarize, or correct text. Output only one JSON: {"kind":"handwriting|sketch|mixed|none","reading":"<text or empty>","description":"<short zh or empty>"}. No other text.';
+  const system = SYSTEM_PROMPTS.ink_classifier;
   const raw = await gateway(system, 'Classify, transcribe and describe this ink:', 300, image, payload?.model);
   const j = extractJson(raw);
   const reading = String(j.reading || '').trim();
@@ -215,12 +211,7 @@ export async function runClassifyContext(payload: any): Promise<{ respond: boole
   const marked = String(payload?.marked || '').trim();
   const convo: Array<{ role: string; content: string }> = Array.isArray(payload?.conversation) ? payload.conversation : [];
   const history = convo.slice(-6).map((m) => `${m.role === 'user' ? '读者' : 'AI'}：${String(m.content || '').slice(0, 200)}`).join('\n');
-  const system =
-    '你在判断读者刚写下的一段手写，是不是想让伴读 AI 现在就回应。' +
-    'respond=true：这是冲着 AI 来的提问或指令（想要解释/回答/总结/翻译等）。' +
-    'respond=false：这只是读者写给自己的笔记、批注或感想，不需要 AI 出声。' +
-    '遇到明确问号、疑问词（什么/为什么/如何/谁/哪里）、或祈使指令，倾向 respond=true——漏答一个真问题，比偶尔多答一句更糟。' +
-    '只输出一个 JSON：{"respond":true|false,"reason":"一句话"}。除该 JSON 外不要任何文字。';
+  const system = SYSTEM_PROMPTS.context_classifier;
   const user =
     `读者刚写下：「${question}」\n` +
     (marked ? `这一阵标注涉及：${marked}\n` : '') +
@@ -249,7 +240,7 @@ export async function runReflow(payload: any): Promise<any[]> {
   if (!blocks.length) return [];
   const img = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : undefined;
   const list = blocks.map((b, i) => `${i + 1}. [${b.type}] (${b.id}) ${b.text}`).join('\n');
-  const system = '你在精修一页 PDF 的文本块：纠正每块是标题还是正文、按正确阅读顺序排列、修断词与多余空格。只精修，不改写原意。';
+  const system = SYSTEM_PROMPTS.reflow_refine;
   const rules =
     `输出一个 JSON 数组，每个元素 {"id":"…","type":"heading"|"para","level":1到3,"text":"…"}：\n` +
     `- 必须把每个 id 各用一次，不许合并、拆分、新增或丢弃；\n` +
@@ -279,7 +270,7 @@ const REFLOW_MODEL = 'gemini-3.1-flash-lite';
  */
 function buildReflowAiPrompt(lines: any[]): { system: string; user: string } {
   const list = lines.map((l) => `${l.id}\t[${l.sizeRatio ?? 1}x] ${String(l.text || '').slice(0, 200)}`).join('\n');
-  const system = '你在重建一页 PDF 的文档结构。下面是按阅读顺序的"行"，每行有 id、相对字号(1=正文)、文字。把这些行分组成干净的语义块：heading(标题,带 level)、para(正文段落)、list(列表)。靠内容与字号判断——标题通常字号偏大且独立成行；连续正文要按语义切成多个 para，**绝不能因为行距均匀就把多段并成一段**；项目符号/编号行归 list。';
+  const system = SYSTEM_PROMPTS.reflow_structure;
   const rules =
     `逐行输出 NDJSON——**一行一个独立 JSON 对象**，每行就是一个语义块，按阅读顺序排：\n` +
     `{"type":"heading"|"para"|"list","level":1到3(仅heading需要),"lineIds":["ln_x",...]}\n` +
@@ -368,13 +359,10 @@ export async function runOcrVlm(payload: any): Promise<{ text: string }> {
   if (!image) return { text: '' };
   const isPage = payload?.scope === 'page';
   const bbox = Array.isArray(payload?.bbox) ? payload.bbox.map((n: any) => Number(n)) : null;
-  const system =
-    '你是一个 OCR 转写器。' +
-    (isPage
-      ? '输入是一整页 PDF 截图，以及用户标注框在页面上的大致位置。只转写标注框那块区域内的文字。'
-      : '输入是一张从 PDF 页面裁出的局部截图。转写图中的文字。') +
-    '可能是印刷体或手写，按自然阅读顺序输出纯文本，多行用换行分隔。' +
-    '不要解释、不要翻译、不要加任何说明或标点修饰。若没有可辨认的文字，输出空字符串。';
+  // scope 分支（整页只转写框内 / 局部转写全图）按需追加在注册表 system 后
+  const system = SYSTEM_PROMPTS.ocr + (isPage
+    ? '\n<input>输入是一整页 PDF 截图，以及用户标注框在页面上的大致位置。只转写标注框那块区域内的文字。</input>'
+    : '\n<input>输入是一张从 PDF 页面裁出的局部截图。转写图中的文字。</input>');
   let user = '转写这张截图里的文字：';
   if (isPage && bbox) {
     const [x, y, w, h] = bbox;
@@ -394,10 +382,7 @@ export async function runExplainImage(payload: any): Promise<{ text: string }> {
   if (!image) return { text: '' };
   const nearby = String(payload?.nearby || '').slice(0, 800);
   const prev = String(payload?.prevSummary || '').slice(0, 200);
-  const system =
-    '你在帮读者理解一篇文档里的一张图（照片 / 图表 / 示意图 / 公式截图）。' +
-    '结合给到的上下文，用一两句中文说清这张图在讲什么、为什么放在这里、它支撑了什么观点。' +
-    '不要逐像素描述外观，不要寒暄，不要 markdown，最多 2 句。读不出就说「这张图的含义不明确」。';
+  const system = SYSTEM_PROMPTS.image_explain;
   const ctx = [prev ? `前页梗概：${prev}` : '', nearby ? `图附近的正文：${nearby}` : ''].filter(Boolean).join('\n');
   const user = `${ctx ? ctx + '\n\n' : ''}看这张图，给读者一句解读：`;
   const text = await gateway(system, user, 300, image);
@@ -412,14 +397,7 @@ export async function runExplainImage(payload: any): Promise<{ text: string }> {
 export async function runReflowVlm(payload: any): Promise<any[]> {
   const image = payload?.image ? String(payload.image).replace(/^data:image\/[a-z]+;base64,/, '') : '';
   if (!image) return [];
-  const system =
-    '你在重排一张 PDF 页面截图。按真实阅读顺序输出一个 JSON 数组，每个元素是一个语义块：' +
-    '{"type":"heading"|"para"|"list","level":1到3(heading时；其他=0),' +
-    '"text":"原样转写的文字（para/heading用；list省略）",' +
-    '"items":["项1","项2"](list用；其他省略),"ordered":true|false(list用),' +
-    '"bbox":[x,y,w,h] 归一化0–1，估计该块在页面上的位置}。' +
-    '严格按图中文字转写，不要改写、翻译、添加或省略文字；多栏按真实阅读顺序排（先左栏后右栏）；' +
-    '标题/正文/列表分类清楚。只输出 JSON 数组，别的都不要。';
+  const system = SYSTEM_PROMPTS.reflow_vlm;
   const raw = await gateway(system, '看这张页面图，按上面格式重排：', 3000, image);
   const arr = extractJsonArray(raw);
   return arr.filter((b) => b && (b.type === 'heading' || b.type === 'para' || b.type === 'list')).map((b) => ({
@@ -440,7 +418,8 @@ export async function runReflowVlm(payload: any): Promise<any[]> {
 export async function* chatStream(payload: any): AsyncGenerator<string> {
   const messages: any[] = Array.isArray(payload?.messages) ? payload.messages : [];
   if (!messages.length) return;
-  const system = String(payload?.system || '');
+  const role = (String(payload?.role || 'annotator')) as PromptRole;
+  const system = SYSTEM_PROMPTS[role] ?? SYSTEM_PROMPTS.annotator;
   const model = payload?.model || cfg().model;
   const maxTokens = typeof payload?.maxTokens === 'number' ? payload.maxTokens : 800;
   // NDJSON 帧：每行 {"k":"t"|"r","d":"<增量>"}——t=回复正文、r=思考过程（reasoning）。客户端 chatTurn 分流。
