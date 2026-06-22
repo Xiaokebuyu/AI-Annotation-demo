@@ -1,0 +1,1109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InkLoop · 标注采集 / 识别 / 分类 / 读取 技术文档</title>
+<style>
+:root{
+  --paper:#f4efe3; --paper-2:#efe7d6; --paper-3:#e9e0cd; --sheet:#faf6ec;
+  --ink:#1a1a1a; --ink-soft:#5a5347; --ink-faint:#8b8475; --line:#dcd2bd; --line-2:#cabfa6;
+  --sienna:#a85a2e; --sienna-50:#f0e0d2; --sienna-90:#6f3a1c;
+  --gold:#b08524; --gold-50:#efe3c4; --gold-90:#6e5212;
+  --sage:#5f7355; --sage-50:#dde4d4; --sage-90:#3a4a32;
+  --slate:#566a78; --slate-50:#d8e0e4; --slate-90:#33424c;
+  --hl:#d4cfca;
+  --serif:"Songti SC","STSong","Noto Serif SC",Georgia,"Times New Roman",serif;
+  --sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+  font-size:16.5px;line-height:1.85;-webkit-font-smoothing:antialiased;
+  background-image:linear-gradient(var(--paper),var(--paper));}
+a{color:var(--sienna);text-decoration:none}
+a:hover{text-decoration:underline}
+code,.mono{font-family:var(--mono);font-size:.86em;background:var(--paper-2);
+  padding:.06em .34em;border-radius:4px;color:var(--sienna-90);border:1px solid var(--line)}
+
+.topbar{position:sticky;top:0;z-index:30;background:rgba(244,239,227,.92);
+  backdrop-filter:blur(6px);border-bottom:1px solid var(--line);}
+.topbar .in{max-width:1040px;margin:0 auto;padding:9px 28px;display:flex;align-items:center;gap:14px;
+  font-size:13.5px;color:var(--ink-soft);}
+.topbar .brand{font-family:var(--serif);color:var(--ink);font-size:15px;letter-spacing:.02em}
+.topbar .brand b{color:var(--sienna)}
+.topbar nav{margin-left:auto;display:flex;gap:2px;flex-wrap:wrap}
+.topbar nav a{color:var(--ink-soft);padding:3px 8px;border-radius:6px;font-size:12.5px}
+.topbar nav a:hover{background:var(--paper-3);text-decoration:none;color:var(--ink)}
+
+.hero{max-width:1040px;margin:0 auto;padding:64px 28px 26px;position:relative}
+.hero .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--sienna);margin-bottom:18px}
+.hero h1{font-family:var(--serif);font-weight:600;font-size:40px;line-height:1.24;margin:0 0 18px;
+  max-width:760px;letter-spacing:.01em}
+.hero .lede{max-width:680px;font-size:18px;color:var(--ink-soft);line-height:1.8}
+.hero .meta{margin-top:26px;display:flex;gap:22px;flex-wrap:wrap;font-size:13px;color:var(--ink-faint);
+  font-family:var(--mono);border-top:1px solid var(--line);padding-top:16px;max-width:680px}
+.hero .meta b{color:var(--ink-soft);font-weight:500}
+
+.sec{max-width:1040px;margin:0 auto;padding:40px 28px 6px}
+.sec::after{content:"";display:block;clear:both}
+.col-w{max-width:680px}
+.sec h2{font-family:var(--serif);font-weight:600;font-size:25px;line-height:1.3;margin:8px 0 16px;
+  display:flex;align-items:baseline;gap:14px;max-width:760px}
+.seal{flex:0 0 auto;width:34px;height:34px;border:1.5px solid var(--sienna);border-radius:50%;
+  color:var(--sienna);font-family:var(--mono);font-size:15px;display:inline-flex;align-items:center;
+  justify-content:center;transform:rotate(-4deg);background:var(--sienna-50)}
+.sec h3{font-family:var(--sans);font-weight:600;font-size:17px;margin:28px 0 8px;color:var(--ink);
+  max-width:680px}
+.sec p{max-width:680px;margin:14px 0}
+.sec p.lead{font-size:17.5px;color:var(--ink-soft)}
+.sec ul,.sec ol{max-width:680px;padding-left:1.3em}
+.sec li{margin:6px 0}
+em.k{font-style:normal;font-weight:600;color:var(--sienna-90);background:linear-gradient(transparent 62%,var(--sienna-50) 62%)}
+
+.rule{max-width:680px;height:1px;background:var(--line);border:0;margin:30px 0}
+
+.note{float:right;clear:right;width:232px;margin:8px 0 20px 30px;padding:2px 0 2px 16px;
+  border-left:2px solid var(--sienna);font-family:var(--serif);font-size:14.5px;line-height:1.7;
+  color:var(--ink-soft);background:linear-gradient(90deg,var(--sienna-50),transparent 70%)}
+.note .nh{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--sienna);margin-bottom:4px;font-style:normal}
+.note.q{border-left-color:var(--gold);background:linear-gradient(90deg,var(--gold-50),transparent 70%)}
+.note.q .nh{color:var(--gold-90)}
+.note q{quotes:"「" "」";color:var(--ink)}
+
+figure{margin:22px 0;max-width:680px}
+figure.wide{max-width:1000px}
+figcaption{font-size:13px;color:var(--ink-faint);margin-top:8px;font-family:var(--serif);
+  font-style:italic;max-width:660px}
+.card-fig{background:var(--sheet);border:1px solid var(--line);border-radius:12px;padding:20px 22px;
+  box-shadow:0 1px 0 var(--line),0 8px 24px -18px rgba(80,60,30,.4)}
+svg.dgm{display:block;width:100%;height:auto;font-family:var(--sans)}
+svg.dgm text{fill:var(--ink)}
+svg.dgm .t{font-size:14px}
+svg.dgm .tb{font-size:14px;font-weight:600}
+svg.dgm .ts{font-size:12px;fill:var(--ink-soft)}
+svg.dgm .tm{font-family:var(--mono);font-size:11.5px;fill:var(--ink-soft)}
+svg.dgm .tw{fill:var(--sheet)}
+
+table{border-collapse:collapse;width:100%;max-width:680px;margin:18px 0;font-size:14.5px}
+table.wide{max-width:1000px}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--ink);border-bottom:1.5px solid var(--line-2);font-size:13.5px;
+  background:var(--paper-2)}
+td .mono,td code{font-size:12.5px}
+tr:hover td{background:var(--sheet)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;max-width:1000px;margin:20px 0}
+.pc{background:var(--sheet);border:1px solid var(--line);border-radius:12px;padding:16px 18px;position:relative;
+  box-shadow:0 6px 18px -16px rgba(80,60,30,.5)}
+.pc .pn{position:absolute;top:-11px;right:14px;width:26px;height:26px;border-radius:50%;
+  background:var(--sienna);color:var(--sheet);font-family:var(--mono);font-size:13px;
+  display:flex;align-items:center;justify-content:center;transform:rotate(5deg)}
+.pc h4{margin:0 0 6px;font-size:15.5px;font-weight:600}
+.pc p{margin:0;font-size:13.8px;color:var(--ink-soft);line-height:1.66;max-width:none}
+.pc .tag{font-family:var(--mono);font-size:10.5px;color:var(--sienna);letter-spacing:.08em}
+
+.demo{background:var(--sheet);border:1px solid var(--line-2);border-radius:12px;padding:18px 20px;margin:22px 0;
+  max-width:680px;box-shadow:0 8px 24px -18px rgba(80,60,30,.5)}
+.demo.wide{max-width:1000px}
+.demo .dh{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--sienna);margin-bottom:12px}
+.demo .dh::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--sienna)}
+.btn{font-family:var(--sans);font-size:13px;border:1px solid var(--line-2);background:var(--paper);
+  color:var(--ink);padding:5px 12px;border-radius:8px;cursor:pointer}
+.btn:hover{background:var(--paper-2)}
+.btn.on{background:var(--sienna);color:var(--sheet);border-color:var(--sienna)}
+.readout{font-family:var(--mono);font-size:12.5px;color:var(--ink-soft)}
+
+.foot{max-width:1040px;margin:40px auto 80px;padding:24px 28px;border-top:1px solid var(--line);
+  font-size:13px;color:var(--ink-faint);font-family:var(--mono)}
+
+.proposal{border:1.5px dashed var(--slate);border-radius:12px;background:linear-gradient(180deg,var(--slate-50),transparent 55%);padding:18px 22px;margin:24px 0;max-width:680px}
+.proposal .ph{font-family:var(--serif);font-size:17.5px;font-weight:600;color:var(--slate-90);margin:0 0 8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;line-height:1.4}
+.proposal p{max-width:none}
+.proposal table{margin:14px 0}
+.flag{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--slate-90);background:var(--slate-50);border:1px solid var(--slate);border-radius:20px;padding:2px 10px;white-space:nowrap}
+.flag.stub{color:var(--gold-90);background:var(--gold-50);border-color:var(--gold)}
+.seal.key{background:var(--ink);color:var(--paper);border-color:var(--ink);transform:rotate(0);font-size:18px}
+.kick{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--sienna);margin:0}
+
+.plain{font-family:var(--serif);font-size:17px;line-height:1.72;color:var(--ink);max-width:680px;margin:16px 0;padding:11px 16px 11px 17px;border-left:3px solid var(--sienna);background:linear-gradient(90deg,var(--sienna-50),transparent 80%);border-radius:0 8px 8px 0}
+.plain .pt{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--sienna);margin-right:9px;border:1px solid var(--sienna);border-radius:20px;padding:1px 8px;white-space:nowrap}
+.skip{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:11px;color:var(--ink-faint);background:var(--paper-2);border:1px dashed var(--line-2);border-radius:20px;padding:2px 11px;margin:6px 0;white-space:nowrap}
+details.gloss{max-width:680px;margin:20px 0;border:1px solid var(--line);border-radius:12px;background:var(--sheet);box-shadow:0 6px 18px -16px rgba(80,60,30,.5)}
+details.gloss>summary{cursor:pointer;padding:13px 18px;font-family:var(--serif);font-size:16.5px;font-weight:600;color:var(--ink);list-style:none;display:flex;align-items:center;gap:9px}
+details.gloss>summary::-webkit-details-marker{display:none}
+details.gloss>summary::before{content:"+";font-family:var(--mono);color:var(--sienna);font-size:17px;line-height:1}
+details.gloss[open]>summary::before{content:"\2212"}
+details.gloss .gbody{padding:0 20px 14px;columns:2;column-gap:30px}
+details.gloss dl{margin:0}
+details.gloss dt{font-weight:600;font-size:14px;margin-top:11px;color:var(--ink);break-inside:avoid}
+details.gloss dd{margin:1px 0 0;font-size:13.3px;color:var(--ink-soft);line-height:1.55;break-inside:avoid}
+details.gloss dd b{color:var(--sienna-90);font-weight:500}
+
+@media(max-width:900px){
+  .note{float:none;width:auto;margin:14px 0;background:var(--sienna-50);padding:12px 14px;border-radius:8px}
+  .hero h1{font-size:31px}
+  .topbar nav{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar"><div class="in">
+  <span class="brand"><b>Ink</b>Loop · 标注链路</span>
+  <nav>
+    <a href="#s1">不变量</a><a href="#s2">总图</a><a href="#s3">契约</a><a href="#s4">采集</a>
+    <a href="#s5">分类</a><a href="#s6">取证</a><a href="#hmp">HMP</a><a href="#s7">关系</a><a href="#s8">召回</a>
+    <a href="#s9">蒸馏</a><a href="#s10">LLM</a><a href="#s11">读取</a><a href="#s12">账本</a>
+  </nav>
+</div></div>
+
+<header class="hero">
+  <div class="kicker">前端技术文档 · feat/xzq-hmp</div>
+  <h1>在原文上圈、划、写——一笔从落下到回屏，前端做了什么</h1>
+  <p class="lede">用户连续地圈、划、写，前端把每一笔无损采下来，纯几何地判断"这是什么手势、标到了什么"，攒成一段有时空关系的脉络，蒸馏成一段不含坐标的叙事交给模型，再把旁注按对象引用精确锚回页面——原版与重排两个视图都不丢位置。</p>
+  <div class="meta">
+    <span><b>范围</b> 采集 · 分类 · 取证 · 关系 · 蒸馏 · 读取 · 持久</span>
+    <span><b>不含</b> 与模型对话那一跳（只锁抽象契约）</span>
+    <span><b>基线</b> 2026-06-22</span>
+  </div>
+</header>
+
+<section class="sec" id="s0">
+  <div class="col-w">
+    <p class="lead">这份文档按数据在链路里流动的顺序展开：先立七条贯穿全局的不变量，再给一张端到端总图与一份数据字典作索引，然后逐层拆解实现。每一层都先讲<em class="k">为什么这么设计</em>，再讲<em class="k">怎么实现的</em>；正文旁边的页边批注是设计理由与代码里的原话——就像 InkLoop 自己把 AI 旁注放在页边那样。</p>
+    <div class="plain"><span class="pt">读法</span>本页分两层：每节开头有一句<b>白话总括</b>，随便读就懂；标着 <span class="skip">实现细节 · 可跳过</span> 的表格和参数是给工程同事查的，跳过不影响理解。碰到不认识的词，点开下面的词汇表。</div>
+  </div>
+  <details class="gloss">
+    <summary>词汇表 · 十六个核心词</summary>
+    <div class="gbody"><dl>
+      <dt>笔画 stroke</dt><dd>一笔，从落笔到抬笔。</dd>
+      <dt>标记 mark</dt><dd>一处连续画的几笔合成的<b>一次手势</b>——圈一下、写一句，都算一个 mark。</dd>
+      <dt>会话 session</dt><dd>一本书里你这一阵攒下的所有 mark（可跨页）。</dd>
+      <dt>标记 vs 自由笔</dt><dd><b>标记</b>＝有固定形状的圈/划/箭头；<b>自由笔</b>＝手写或随手画。</dd>
+      <dt>取证单 HMP</dt><dd>记录"你在哪、对什么、做了什么手势"的一条结构化小档案，<b>不含 AI 判断</b>。</dd>
+      <dt>对象 SurfaceObject</dt><dd>把一页文字拆成的最小单位（精确到一个字），标注靠引用它的编号定位。</dd>
+      <dt>命中 target</dt><dd>你的圈/划盖住了哪些字。</dd>
+      <dt>锚定 anchor</dt><dd>把标注/旁注"挂"在某个字上，而不是挂在坐标上（避免 AI 乱编位置）。</dd>
+      <dt>标记图 mark-graph</dt><dd>把这一阵的 mark 连成的关系图：谁挨着谁、先后顺序。</dd>
+      <dt>时空四象限</dt><dd>用"时间近不近、空间近不近"把两个 mark 的关系分成四类。</dd>
+      <dt>蒸馏 inference-view</dt><dd>把关系图压成一段<b>不带坐标的大白话叙事</b>，交给 AI。</dd>
+      <dt>旁注 overlay</dt><dd>AI 给你的那条贴在页边的简短回应。</dd>
+      <dt>账本 / 真相源</dt><dd>只认两本"流水账"（你的笔迹、AI 的回应）当真相，其余都是临时算出来的。</dd>
+      <dt>两投影</dt><dd>同一份内容的两种看法：原版 PDF、与重排后的阅读流。</dd>
+      <dt>角色 role</dt><dd>服务端按"任务角色"挑一段固定的 AI 指令（提示词）。</dd>
+      <dt>网关 gateway</dt><dd>统一转发 AI 请求的中转站。</dd>
+    </dl></div>
+  </details>
+</section>
+
+<section class="sec" id="s1">
+  <h2><span class="seal">1</span>七条设计不变量</h2>
+  <div class="plain"><span class="pt">白话</span>这七条是贯穿全篇的"底层规矩"，后面每一节本质上都是其中某条在某一层的落地。</div>
+  <div class="col-w">
+    <p>这七条贯穿所有模块，是看懂任何单点实现之前都该先装进脑子的前提。后面每一节本质上都是它们在某一层的落地。</p>
+  </div>
+  <div class="cards">
+    <div class="pc"><span class="pn">1</span><div class="tag">D1 · 坐标</div><h4>全程归一化坐标</h4><p>一切几何量都是相对页面的 <code>[0,1]</code>。像素只在采集（除以画布）和渲染（乘回去）两端出现。运行时可换、缩放无关、跨视图可比。</p></div>
+    <div class="pc"><span class="pn">2</span><div class="tag">D3 · 无损</div><h4>笔迹无损保留</h4><p>每个采样点是 <code>{x,y,t,pressure}</code>，笔压原样留。下游所有判定都从原始点序算，不依赖有损中间产物。</p></div>
+    <div class="pc"><span class="pn">3</span><div class="tag">防幻觉</div><h4>引用，不吐坐标</h4><p>模型永远只引用前端算好的对象 id，绝不让它生成 bbox——吐坐标必幻觉。"标到哪个字"由几何命中算 id，"贴在哪"由前端把 id 解析回坐标。</p></div>
+    <div class="pc"><span class="pn">4</span><div class="tag">成本</div><h4>端侧成本阶梯</h4><p>能几何判的不调识别，能本地算的不调模型：纯几何 → 按需云端识别 → 确定性蒸馏 → 最后一次模型对话。每级是下一级的门。</p></div>
+    <div class="pc"><span class="pn">5</span><div class="tag">体验</div><h4>连续标注静默</h4><p>不边画边弹。连续写画时界面什么都不做，只有长停顿综合、或手写一个问题能打破静默。</p></div>
+    <div class="pc"><span class="pn">6</span><div class="tag">关系</div><h4>时空即关系</h4><p>两标注有没有关系，由时间近邻与空间近邻共同决定，落成四象限。规则：非 separate 即关联——只有时间又远空间又远才算无关。</p></div>
+    <div class="pc"><span class="pn">7</span><div class="tag">真相</div><h4>账本 + 派生现算</h4><p>真相只存两件 append-only（只追加、不改不删）账本（marks / ai_turns），其余一切都是 reload（重新打开）时现算的派生物。擦除落墓碑、改写用新条目盖过旧的（supersedes）。</p></div>
+  </div>
+</section>
+
+<section class="sec" id="s2">
+  <h2><span class="seal">2</span>端到端总图：从落笔到旁注</h2>
+  <div class="plain"><span class="pt">白话</span>一句话看懂全流程：你画一笔 → 系统判断它是什么、标到了什么 → 攒成一段脉络 → 压成一句话问 AI → 把 AI 的回应贴回你画的地方。下面这张图就是这条流水线。</div>
+  <aside class="note"><span class="nh">为什么取证要趁早</span>session 可跨页累积，到提交那刻画布可能已翻到别页、无法回去裁图查字。所以每个 mark 在<q>落笔当时</q>就把取证（HMP、转写）和所标内容算好存进自己身上，提交时只读不重取。</aside>
+  <div class="col-w">
+    <p>整条链路有两个异步"重活"节点：<em class="k">captureMark</em>（落笔当时取证 + 按需识别）和 <em class="k">commitSessionDiscussion</em>（停笔后建图 + 蒸馏 + 模型回应）。两者都在 <code>pipeline.ts</code>，把它们串起来的时序调度（区域收口、idle 计时、手写早提交）在 <code>main.ts</code>。下图是数据流的主干——后面每一节都是在放大其中一个环节。</p>
+  </div>
+  <figure class="card-fig">
+    <svg class="dgm" viewBox="0 0 700 812" role="img" aria-label="从指针事件到旁注回屏的端到端数据流主图">
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+      <line x1="350" y1="86" x2="350" y2="116" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="350" y1="182" x2="350" y2="212" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="350" y1="278" x2="350" y2="308" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="350" y1="404" x2="350" y2="434" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="350" y1="500" x2="350" y2="556" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar)"/>
+      <line x1="350" y1="682" x2="350" y2="712" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar)"/>
+
+      <rect x="250" y="44" width="200" height="42" rx="8" fill="var(--paper-2)" stroke="var(--line-2)"/>
+      <text class="t" x="350" y="63" text-anchor="middle">指针事件</text>
+      <text class="ts" x="350" y="78" text-anchor="middle">pen / touch · getCoalescedEvents</text>
+
+      <rect x="120" y="116" width="460" height="66" rx="10" fill="var(--sienna-50)" stroke="var(--sienna)"/>
+      <text class="tb" x="140" y="142" fill="var(--sienna-90)">A · 采集 ink.ts</text>
+      <text class="ts" x="140" y="162" fill="var(--sienna-90)">笔/手分流 · 死区 1.3px · 归一化 · 抬笔成 Stroke</text>
+      <text class="tm" x="560" y="152" text-anchor="end">→ AnnotationEvent</text>
+
+      <rect x="120" y="212" width="460" height="66" rx="10" fill="var(--sienna-50)" stroke="var(--sienna)"/>
+      <text class="tb" x="140" y="238" fill="var(--sienna-90)">B · 区域组装 main.ts</text>
+      <text class="ts" x="140" y="258" fill="var(--sienna-90)">空间连贯并区 · far-stroke / quiet-6s 收口</text>
+      <text class="tm" x="560" y="248" text-anchor="end">→ Mark</text>
+
+      <rect x="120" y="308" width="460" height="96" rx="10" fill="var(--gold-50)" stroke="var(--gold)" stroke-width="2"/>
+      <text class="tb" x="140" y="332" fill="var(--gold-90)">C · captureMark 落笔取证 ★</text>
+      <text class="ts" x="140" y="352" fill="var(--gold-90)">resolveTarget 字符级命中 · classifyStrokeFeature</text>
+      <text class="ts" x="140" y="370" fill="var(--gold-90)">recognizeInk 手写 vs 画（按需）· buildHmp</text>
+      <text class="tm" x="560" y="392" text-anchor="end">→ HMP · markedText</text>
+
+      <rect x="120" y="434" width="460" height="66" rx="10" fill="var(--paper-2)" stroke="var(--ink-faint)"/>
+      <text class="tb" x="140" y="460">D · 落账本 marks（真相·append-only）</text>
+      <text class="ts" x="140" y="480" fill="var(--ink-soft)">+ 累积进内存 session（可跨页）</text>
+
+      <rect x="158" y="514" width="384" height="28" rx="14" fill="none" stroke="var(--line-2)" stroke-dasharray="3 3"/>
+      <text class="ts" x="350" y="533" text-anchor="middle" fill="var(--ink-soft)">触发：手写即时提交  ·  空闲 90s 综合提交</text>
+
+      <rect x="120" y="556" width="460" height="126" rx="10" fill="var(--sage-50)" stroke="var(--sage)" stroke-width="2"/>
+      <text class="tb" x="140" y="580" fill="var(--sage-90)">E · commitSessionDiscussion 停笔提交 ★</text>
+      <text class="ts" x="140" y="600" fill="var(--sage-90)">buildMarkGraph 时空四象限 + 三类边</text>
+      <text class="ts" x="140" y="618" fill="var(--sage-90)">findSpatialRecall 账本召回（不进 graph.nodes）</text>
+      <text class="ts" x="140" y="636" fill="var(--sage-90)">projectInferenceView 蒸馏：丢坐标/分数</text>
+      <rect x="140" y="648" width="400" height="24" rx="6" fill="none" stroke="var(--ink-faint)" stroke-dasharray="4 3"/>
+      <text class="tm" x="350" y="664" text-anchor="middle">LLM 边界（抽象）: classify respond/fold → chatTurn 流式 → 实时落屏</text>
+
+      <rect x="120" y="712" width="460" height="74" rx="10" fill="var(--slate-50)" stroke="var(--slate)"/>
+      <text class="tb" x="140" y="738" fill="var(--slate-90)">F · 落 ai_turns（真相）+ 水位线 → 两投影回屏</text>
+      <text class="ts" x="140" y="758" fill="var(--slate-90)">anchor-layer 原版页 · reader 重排页（同一套对象锚）</text>
+      <text class="tm" x="140" y="776" fill="var(--slate-90)">← overlay:add</text>
+    </svg>
+    <figcaption>主干数据流。★ 为两个异步重活节点；右侧灰字是该环节产出的数据对象。色块按子系统分：采集（赭）、识别取证（金）、关系蒸馏（绿）、呈现（青）。</figcaption>
+  </figure>
+</section>
+
+<section class="sec" id="s3">
+  <h2><span class="seal">3</span>数据契约：链路的骨架</h2>
+  <div class="plain"><span class="pt">白话</span>这一节是"数据字典"——把系统里流动的几种核心数据各长什么样列清楚。普通读者扫一眼下面的血缘图就够了，再往下的字段表是给工程同事查的。</div>
+  <aside class="note"><span class="nh">两批契约</span><code>SCHEMA_VERSION='0'</code> 是逐字段冻结的 v0 原始契约，改动须 bump 并通知两组；<code>HMP_SCHEMA_VERSION='2'</code> / <code>INFERVIEW='1'</code> 是序列语义方案新增契约，不动 v0。</aside>
+  <div class="col-w">
+    <p>类型全部定义在 <code>core/contracts.ts</code>。理解链路最快的路径是先看这些数据对象怎么一个生一个：每一步处理都是把上一个对象加工成下一个，最终落进两件账本。下图是它们的血缘——<em class="k">采集产出单笔，组装成 Mark，取证成 HMP，建图成 MarkGraph，蒸馏成 InferenceView，回应成 Overlay</em>。</p>
+  </div>
+  <figure class="card-fig wide">
+    <svg class="dgm" viewBox="0 0 1000 300" role="img" aria-label="核心数据对象的血缘关系图">
+      <defs><marker id="ar2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+      <line x1="165" y1="149" x2="185" y2="149" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar2)"/>
+      <line x1="327" y1="149" x2="347" y2="149" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar2)"/>
+      <line x1="489" y1="149" x2="509" y2="149" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar2)"/>
+      <line x1="651" y1="149" x2="671" y2="149" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar2)"/>
+      <line x1="813" y1="149" x2="833" y2="149" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar2)"/>
+
+      <rect x="349" y="40" width="140" height="50" rx="9" fill="var(--paper-2)" stroke="var(--slate)" stroke-dasharray="4 3"/>
+      <text class="tb" x="419" y="62" text-anchor="middle" fill="var(--slate-90)">SurfaceIndex</text>
+      <text class="ts" x="419" y="79" text-anchor="middle" fill="var(--slate-90)">字符级对象表</text>
+      <line x1="419" y1="90" x2="419" y2="118" stroke="var(--slate)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+
+      <rect x="25" y="120" width="140" height="58" rx="9" fill="var(--sienna-50)" stroke="var(--sienna)"/>
+      <text class="tb" x="95" y="143" text-anchor="middle" fill="var(--sienna-90)">AnnotationEvent</text>
+      <text class="ts" x="95" y="161" text-anchor="middle" fill="var(--sienna-90)">单笔 · 无损点序</text>
+
+      <rect x="187" y="120" width="140" height="58" rx="9" fill="var(--sienna-50)" stroke="var(--sienna)"/>
+      <text class="tb" x="257" y="143" text-anchor="middle" fill="var(--sienna-90)">Mark</text>
+      <text class="ts" x="257" y="161" text-anchor="middle" fill="var(--sienna-90)">一次手势（多笔合并）</text>
+
+      <rect x="349" y="120" width="140" height="58" rx="9" fill="var(--gold-50)" stroke="var(--gold)"/>
+      <text class="tb" x="419" y="143" text-anchor="middle" fill="var(--gold-90)">HMP</text>
+      <text class="ts" x="419" y="161" text-anchor="middle" fill="var(--gold-90)">取证记录</text>
+
+      <rect x="511" y="120" width="140" height="58" rx="9" fill="var(--sage-50)" stroke="var(--sage)"/>
+      <text class="tb" x="581" y="143" text-anchor="middle" fill="var(--sage-90)">MarkGraph</text>
+      <text class="ts" x="581" y="161" text-anchor="middle" fill="var(--sage-90)">节点 + 三类边</text>
+
+      <rect x="673" y="120" width="140" height="58" rx="9" fill="var(--sage-50)" stroke="var(--sage)"/>
+      <text class="tb" x="743" y="143" text-anchor="middle" fill="var(--sage-90)">InferenceView</text>
+      <text class="ts" x="743" y="161" text-anchor="middle" fill="var(--sage-90)">蒸馏载荷</text>
+
+      <rect x="835" y="120" width="140" height="58" rx="9" fill="var(--slate-50)" stroke="var(--slate)"/>
+      <text class="tb" x="905" y="143" text-anchor="middle" fill="var(--slate-90)">ScreenOverlay</text>
+      <text class="ts" x="905" y="161" text-anchor="middle" fill="var(--slate-90)">屏上旁注</text>
+
+      <line x1="257" y1="178" x2="257" y2="208" stroke="var(--ink-faint)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+      <rect x="187" y="210" width="140" height="46" rx="9" fill="none" stroke="var(--ink-faint)"/>
+      <text class="tb" x="257" y="232" text-anchor="middle">marks 账本</text>
+      <text class="ts" x="257" y="248" text-anchor="middle" fill="var(--ink-soft)">真相 · append-only</text>
+
+      <line x1="905" y1="178" x2="905" y2="208" stroke="var(--ink-faint)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+      <rect x="835" y="210" width="140" height="46" rx="9" fill="none" stroke="var(--ink-faint)"/>
+      <text class="tb" x="905" y="232" text-anchor="middle">ai_turns 账本</text>
+      <text class="ts" x="905" y="248" text-anchor="middle" fill="var(--ink-soft)">真相 · append-only</text>
+    </svg>
+    <figcaption>数据对象血缘。实线箭头＝加工成下一个；虚线＝引用（SurfaceIndex 提供命中对象）/ 落账本。两件账本是唯一真相，中间所有对象 reload 时现算。</figcaption>
+  </figure>
+
+  <div class="col-w">
+    <h3>单笔与坐标</h3><span class="skip">以下字段表 · 实现细节 · 可跳过</span>
+  </div>
+  <table>
+    <tr><th>类型</th><th>字段</th><th>含义</th></tr>
+    <tr><td><code>NormBBox</code></td><td><span class="mono">[x,y,w,h]</span></td><td>页面归一化坐标，全系统统一制</td></tr>
+    <tr><td rowspan="2"><code>StrokePoint</code></td><td><span class="mono">x, y</span></td><td>归一化坐标</td></tr>
+    <tr><td><span class="mono">t / pressure</span></td><td>相对落笔 ms / 笔压 0–1（无损）</td></tr>
+    <tr><td rowspan="2"><code>AnnotationEvent</code></td><td><span class="mono">event_type</span></td><td>几何分类结果 EventType</td></tr>
+    <tr><td><span class="mono">stroke_points · pointer_type</span></td><td>无损点序 · pen/touch/mouse/<b>reader</b></td></tr>
+  </table>
+
+  <div class="col-w"><h3>组装单位 Mark / Session</h3>
+    <p>一笔不是处理单位，<em class="k">Mark</em>（一处区域连续画的若干笔合并成的"一次手势"）才是；Mark 再按本书攒成 Session（可跨页）。</p>
+  </div>
+  <table>
+    <tr><th>Mark 字段</th><th>含义</th></tr>
+    <tr><td><span class="mono">event</span></td><td>合并后的代表 AnnotationEvent（union bbox + 合并笔点）</td></tr>
+    <tr><td><span class="mono">feature</span></td><td>特征型分类（markup / handwriting / drawing + ocrWorthy）</td></tr>
+    <tr><td><span class="mono">scored</span></td><td>几何模板得分（形状 + 置信 + 箭头方向）</td></tr>
+    <tr><td><span class="mono">hmp</span></td><td>落笔当时建好的取证（含 crop / 转写），跨页提交不重取</td></tr>
+    <tr><td><span class="mono">markedText</span></td><td>落笔当时解析好的"所标内容"（结构原文 + 转写）</td></tr>
+  </table>
+
+  <div class="col-w"><h3>页面对象表与取证记录</h3>
+    <p>把一页拆成字符级对象表 <code>SurfaceObject</code>（id 形如 <code>tl_3_0</code>＝第 3 个 run 第 0 个字），标注命中哪些字就引用哪些 id。一次手势的取证落成 <code>HMP</code>——只放"在哪、对什么、做了什么 + 证据"，不放 AI 推断。</p>
+  </div>
+  <table>
+    <tr><th>HMP 字段</th><th>含义</th></tr>
+    <tr><td><span class="mono">mode</span></td><td>anchored（锚到内容）/ self_content（自身即内容，手写/画）/ mixed / unknown</td></tr>
+    <tr><td><span class="mono">action</span></td><td>enclosure / underline / arrow / handwriting / sketch / highlight …</td></tr>
+    <tr><td><span class="mono">target_object_refs</span></td><td>命中的 SurfaceObject.id（markup 有值；self_content 空）</td></tr>
+    <tr><td><span class="mono">text_hint · crop_ref · vector_ref</span></td><td>识别读出的字 · 合成 crop · 白底笔迹图（后两者落库前剥掉）</td></tr>
+  </table>
+
+  <div class="col-w"><h3>关系图 · 蒸馏载荷 · 账本</h3></div>
+  <table>
+    <tr><th>类型</th><th>关键字段</th><th>含义</th></tr>
+    <tr><td><code>MarkEdge</code></td><td><span class="mono">kind / rel / quadrant?</span></td><td>spatial / temporal / semantic；时间边带四象限</td></tr>
+    <tr><td><code>PriorNeighbor</code></td><td><span class="mono">text / rel</span></td><td>空间召回的旧标注；<b>不进 graph.nodes</b></td></tr>
+    <tr><td><code>InferenceView</code></td><td><span class="mono">narrative / marked / crop?</span></td><td>蒸馏后载荷，丢坐标/stroke/分数</td></tr>
+    <tr><td><code>ScreenOverlay</code></td><td><span class="mono">object_refs?</span></td><td>跨视图锚（按 ref 在两投影定位）</td></tr>
+  </table>
+  <table>
+    <tr><th>账本 store</th><th>角色</th><th>内容</th></tr>
+    <tr><td><code>marks</code></td><td><b>真相</b></td><td>一次手势的取证 + 构成笔；擦除＝tombstone</td></tr>
+    <tr><td><code>ai_turns</code></td><td><b>真相</b></td><td>AI 一轮回复 + 锚点 + view 快照；改/忽略＝supersedes</td></tr>
+    <tr><td><code>pdf_blobs</code></td><td>真相</td><td>原始 PDF 字节（重开免重导）</td></tr>
+    <tr><td><code>docs</code></td><td>派生缓存</td><td>reflow / 图解 / 阅读位置 / 综合水位线</td></tr>
+  </table>
+</section>
+
+<section class="sec" id="s4">
+  <h2><span class="seal">4</span>采集层：把笔尖变成区域</h2>
+  <div class="plain"><span class="pt">白话</span>"采集"就是把你笔尖的动作变成系统能处理的一团团标记。真正的难点不在记录笔画，而在"怎么判断你在某一处画完了"。</div>
+  <aside class="note"><span class="nh">为什么是区域不是定时</span>不设书写时长上限。慢慢写一整段也保持静默，聚成一整团再识别——读得准、只回一条。收口只靠两个真实信号：走到别处，或停笔满 6 秒。</aside>
+  <div class="col-w">
+    <p><code>ink.ts</code> 是唯一接触硬件输入的地方，也是唯一做意图分流的 policy：<code>pen</code> 走标注、<code>touch</code> 走翻页、鼠标兜底 hand。它做三件事——用 <code>getCoalescedEvents()</code> 无损采样、用 <code>DEADZONE_PX=1.3</code> 在抖动当时就过滤掉比一个像素还小的抖动（sub-px 噪声）、把落点换算成 0–1 的相对坐标（归一化）。</p>
+    <p>抬笔后单笔并不立即处理，而是进入 <em class="k">区域组装</em>（<code>main.ts</code>）：把空间挨在一起、时间连续画的若干笔聚成一个 mark。下面这个演示走一遍它的收口逻辑——点"下一步"看区域怎么长、怎么收口。</p>
+  </div>
+
+  <div class="demo" id="regionDemo">
+    <div class="dh">动态演示 · 区域组装收口</div>
+    <svg class="dgm" viewBox="0 0 640 260" role="img" aria-label="区域组装步进演示">
+      <rect x="40" y="14" width="360" height="232" rx="6" fill="var(--sheet)" stroke="var(--line-2)"/>
+      <text class="ts" x="48" y="30" fill="var(--ink-faint)">一页</text>
+      <rect id="rg-reg1" x="0" y="0" width="0" height="0" rx="4" fill="rgba(168,90,46,.10)" stroke="var(--sienna)" stroke-dasharray="5 3" opacity="0"/>
+      <rect id="rg-reg2" x="0" y="0" width="0" height="0" rx="4" fill="rgba(95,115,85,.10)" stroke="var(--sage)" stroke-dasharray="5 3" opacity="0"/>
+      <path id="rg-s1" d="M95 70 q14 -12 28 0 q14 12 0 24 q-14 12 -28 0 q-14 -12 0 -24" fill="none" stroke="var(--ink)" stroke-width="2.4" stroke-linecap="round" opacity="0"/>
+      <path id="rg-s2" d="M150 78 L210 78" fill="none" stroke="var(--ink)" stroke-width="2.4" stroke-linecap="round" opacity="0"/>
+      <path id="rg-s3" d="M150 104 L196 104" fill="none" stroke="var(--ink)" stroke-width="2.4" stroke-linecap="round" opacity="0"/>
+      <path id="rg-s4" d="M300 180 q12 -14 24 0 q12 14 0 26 q-12 12 -24 0 q-10 -12 0 -26" fill="none" stroke="var(--ink)" stroke-width="2.4" stroke-linecap="round" opacity="0"/>
+      <g id="rg-flush" opacity="0"><circle cx="380" cy="92" r="0"/><text class="ts" x="252" y="60" text-anchor="middle" fill="var(--sienna)">收口 → 1 个 mark</text></g>
+
+      <rect x="424" y="14" width="200" height="232" rx="8" fill="var(--paper-2)" stroke="var(--line)"/>
+      <text class="tm" x="440" y="40" id="rg-step" fill="var(--sienna)">步 0 / 4</text>
+      <text class="t" x="440" y="66" id="rg-title">落笔前</text>
+      <foreignObject x="436" y="78" width="176" height="150"><div xmlns="http://www.w3.org/1999/xhtml" id="rg-cap" style="font-family:var(--sans);font-size:12.5px;line-height:1.6;color:var(--ink-soft)">点下方按钮开始。</div></foreignObject>
+    </svg>
+    <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+      <button class="btn" id="rg-prev">上一步</button>
+      <button class="btn on" id="rg-next">下一步 ▸</button>
+      <span class="readout" id="rg-trigger" style="margin-left:6px"></span>
+    </div>
+  </div>
+
+  <div class="col-w">
+    <p>Mark 按本书攒进 Session。打破静默、触发提交只有两条路：最后一笔之后 idle 计时器（默认 90s）到点对整段<em class="k">综合</em>回一条；或一个 mark 被识别成 handwriting（手写）时<em class="k">立即提交</em>（唯一的早提交边界）。翻页不是边界事件——只丢半截笔，session 与 idle 跨页延续。</p>
+  </div>
+  <table>
+    <tr><th>常量</th><th>值</th><th>作用</th></tr>
+    <tr><td><code>DEADZONE_PX</code></td><td>1.3 px</td><td>抖动死区（借鉴 xournalpp）</td></tr>
+    <tr><td><code>REGION_NEAR</code></td><td>0.06</td><td>笔中心在区域 bbox 外扩此值内算同区</td></tr>
+    <tr><td><code>REGION_QUIET_MS</code></td><td>6000 ms</td><td>附近无新笔 → 收口</td></tr>
+    <tr><td><code>IDLE_COMMIT_MS</code></td><td>90000 ms</td><td>长停顿 → 综合整段 session</td></tr>
+    <tr><td><code>BURST_GAP_MS</code></td><td>12000 ms</td><td>相邻 mark 间隔阈（建图时间边权重也用）</td></tr>
+  </table>
+</section>
+
+<section class="sec" id="s5">
+  <h2><span class="seal">5</span>分类层：识别裁判与成本阶梯</h2>
+  <div class="plain"><span class="pt">白话</span>这一步回答一个问题：你画的这团，是圈/划这种"标记"，还是手写文字、还是随手一画？而且要尽量省钱——能用免费的"尺子"量出来的，绝不花钱请 AI 看。</div>
+  <aside class="note q"><span class="nh">代码原话</span><q>'手写 vs 画'无干净几何模板，最终由识别裁判——故门要保守、偏向送 OCR，别漏真手写。level-2 端侧小分类器最终替掉云端识别；本函数是它的接缝。</q></aside>
+  <div class="col-w">
+    <p>分类是整条链路的"识别裁判"，全在 <code>classify.ts</code>。它是一道两级成本阶梯：先用纯几何把有干净模板的手势（圈/划/箭头）判掉，<em class="k">零网络</em>；剩下没模板的自由笔，几何只当一道"OCR 门"，决定值不值得送云端识别定型。点下面任一节点看那一步在做什么、花多少成本。</p>
+  </div>
+
+  <div class="demo" id="ladderDemo">
+    <div class="dh">动态演示 · 分类成本阶梯</div>
+    <svg class="dgm" viewBox="0 0 640 372" role="img" aria-label="分类决策树成本阶梯">
+      <defs><marker id="ar3" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+      <line x1="320" y1="52" x2="320" y2="74" stroke="var(--line-2)" stroke-width="1.3" marker-end="url(#ar3)"/>
+      <line x1="320" y1="116" x2="320" y2="138" stroke="var(--line-2)" stroke-width="1.3" marker-end="url(#ar3)"/>
+      <line x1="246" y1="180" x2="168" y2="214" stroke="var(--line-2)" stroke-width="1.3" marker-end="url(#ar3)"/>
+      <line x1="394" y1="180" x2="472" y2="214" stroke="var(--line-2)" stroke-width="1.3" marker-end="url(#ar3)"/>
+      <line x1="452" y1="262" x2="408" y2="298" stroke="var(--line-2)" stroke-width="1.3" marker-end="url(#ar3)"/>
+      <line x1="510" y1="262" x2="556" y2="298" stroke="var(--line-2)" stroke-width="1.3" marker-end="url(#ar3)"/>
+      <text class="ts" x="200" y="202" fill="var(--ink-faint)">是</text>
+      <text class="ts" x="432" y="202" fill="var(--ink-faint)">否</text>
+      <text class="ts" x="416" y="288" text-anchor="end" fill="var(--ink-faint)">否</text>
+      <text class="ts" x="548" y="288" fill="var(--ink-faint)">是</text>
+
+      <g class="lnode" data-k="in"><rect x="232" y="18" width="176" height="34" rx="8" fill="var(--paper-2)" stroke="var(--line-2)"/><text class="t" x="320" y="40" text-anchor="middle">一团笔（一个 mark）</text></g>
+      <g class="lnode" data-k="tap"><rect x="232" y="74" width="176" height="42" rx="8" fill="var(--gold-50)" stroke="var(--gold)"/><text class="tb" x="320" y="92" text-anchor="middle" fill="var(--gold-90)">① 误触门</text><text class="ts" x="320" y="108" text-anchor="middle" fill="var(--gold-90)">行程 &lt; 3.5mm → tap 丢弃</text></g>
+      <g class="lnode" data-k="tpl"><rect x="232" y="138" width="176" height="42" rx="8" fill="var(--gold-50)" stroke="var(--gold)"/><text class="tb" x="320" y="156" text-anchor="middle" fill="var(--gold-90)">② 几何模板</text><text class="ts" x="320" y="172" text-anchor="middle" fill="var(--gold-90)">tplScore≥0.45 且 spanRatio≥0.6 ?</text></g>
+      <g class="lnode" data-k="markup"><rect x="44" y="214" width="180" height="48" rx="8" fill="var(--sage-50)" stroke="var(--sage)"/><text class="tb" x="134" y="234" text-anchor="middle" fill="var(--sage-90)">markup（圈/划/箭头）</text><text class="ts" x="134" y="251" text-anchor="middle" fill="var(--sage-90)">纯几何定型 · 零网络</text></g>
+      <g class="lnode" data-k="ocr"><rect x="382" y="214" width="178" height="48" rx="8" fill="var(--gold-50)" stroke="var(--gold)"/><text class="tb" x="471" y="234" text-anchor="middle" fill="var(--gold-90)">③ OCR 门 ocrWorthy</text><text class="ts" x="471" y="251" text-anchor="middle" fill="var(--gold-90)">非太小 且（多笔/复杂&gt;1.6）?</text></g>
+      <g class="lnode" data-k="drawing"><rect x="300" y="298" width="172" height="48" rx="8" fill="var(--paper-2)" stroke="var(--line-2)"/><text class="t" x="386" y="319" text-anchor="middle">留 drawing</text><text class="ts" x="386" y="337" text-anchor="middle" fill="var(--ink-soft)">省调用 · 不误转写</text></g>
+      <g class="lnode" data-k="recog"><rect x="480" y="298" width="160" height="50" rx="8" fill="var(--sienna-50)" stroke="var(--sienna)"/><text class="tb" x="560" y="319" text-anchor="middle" fill="var(--sienna-90)">recognizeInk 定型</text><text class="ts" x="560" y="337" text-anchor="middle" fill="var(--sienna-90)">一次云端 · 手写/画</text></g>
+    </svg>
+    <div class="readout" id="ladder-out" style="margin-top:10px;min-height:40px">点任一节点 ▸ 看它在做什么、花多少成本。</div>
+  </div>
+
+  <div class="col-w">
+    <p><em class="k">自相对尺寸闸</em>是 markup（圈/划/箭头这类"标记"）判定的精髓：真圈、真划本身就是整个 mark（占比≈1）；手写里的一个"横"（几何像 underline）、一个"口"（几何像 circle）只占整团字一小块（占比小）。用<b>占比</b>而非绝对字号来判，页边写的大字也不会被误判成 markup。识别定型这一步还顺手完成<em class="k">抽象画解读</em>——画也带一句粗描述（"一张笑脸"）进所标内容，但它的<b>意图</b>仍交后面的推理模型，前端只负责"叫对这是画、给它描述、把原图送达"。</p>
+  </div>
+
+  <div class="proposal">
+    <div class="ph"><span class="flag">提议 · 未实现</span>level-2 端侧小分类器：把"手写 vs 画"搬上端侧</div>
+    <p>上面 ② 那次云端识别（<code>recognizeInk</code> → <code>/api/interpret</code>），生产版要换成一个端侧小分类器——这正是 <code>classify.ts</code> 注释里的接缝：「level-2 端侧小分类器最终替掉②的云端识别；本函数是它的接缝」。它的职责很窄：<em class="k">回答几何天生答不了的那一条轴——一团自由笔到底是「手写文字」还是「画 / 草图」</em>。输入是 context-free（不看上下文、只看这团墨）的白底笔迹图，输出一个类型标签（handwriting / drawing，边角带 mixed / none）；只替掉现在那次调用里的 <code>kind</code> 判定，转写与描述不归它。</p>
+    <p>它<b>不</b>负责的事，恰是这个概念容易模糊的地方：</p>
+    <table>
+      <tr><th>这件事</th><th>归谁——不归小分类器</th></tr>
+      <tr><td>把手写读成文字（转写）</td><td>端侧 OCR（徐智强 PP-OCR）。分类器只说"这是字"，OCR 才说"这字是『为什么』"</td></tr>
+      <tr><td>画的含义 / 意图</td><td>推理 LLM（原图送达、意图交模型；v4 原则：前端不拍意图）</td></tr>
+      <tr><td>markup 判定 + 是否值得 OCR</td><td>level-1 几何（本节上面那张成本阶梯）</td></tr>
+      <tr><td>"问我还是写给自己"（respond / fold）</td><td>另一个分类器：<code>chat/classify-client.ts</code>，看叙事 + 对话历史，跟这个看墨图的不是一回事</td></tr>
+    </table>
+    <p>为什么是"小"模型：任务窄（一个标签、只看一张图、不生成），端侧小 CNN 就够；它正卡在成本阶梯上"几何够不着、又不该惊动答问 LLM"的那一格。全本地（B 档）的逻辑就是把这类便宜的感知步骤压到端侧，云端只省给答问。<span class="flag stub">现状</span> 仍走云端 <code>/api/interpret</code>，是 v4 记下的"生产 / 端侧承重项、未做"。</p>
+    <p style="font-size:13.8px;color:var(--ink-soft);margin-bottom:0">易混的三个"小模型 / 分类器"，一并拆开：① <b>笔迹类型分类器</b>（手写 vs 画，就是它，感知侧、看墨图）　② <b>上下文分类器</b>（respond / fold，对话侧、看上下文）　③ <b>端侧答问小 LLM</b>（徐智强的 1–3B，消费 HMP 出旁注，不是分类器）。</p>
+  </div>
+</section>
+
+<section class="sec" id="s6">
+  <h2><span class="seal">6</span>取证 / 识别：标到了什么</h2>
+  <div class="plain"><span class="pt">白话</span>分类回答"你画的是什么手势"，这一节回答"它到底标到了页面上哪些字、有什么证据"，产物就是一张"取证单"（HMP）。</div>
+  <aside class="note q"><span class="nh">代码原话</span><q>markup 锚它所标的内容；freeform（手写/画）属 self_content——它本身就是内容，不锚到 bbox 碰巧蹭到的正文。</q></aside>
+  <div class="col-w">
+    <p>分类回答"这是什么手势"，取证层回答"它标到了什么、在哪、有什么证据"，产物是 HMP。页面渲染时把文本层每个 run（PDF 里一段排版文字片段）按字符均分成逐字 <code>SurfaceObject</code>——对象比任何标记都小，圈/划就能<em class="k">精确命中到具体字</em>。命中用两级优先级：对象中心落在笔迹多边形内（叫"包围"，用射线法判点在不在圈内，最强）＞ bbox 外扩相交。命中的是<b>对象 id</b>，不是坐标。</p>
+  </div>
+  <figure class="card-fig">
+    <svg class="dgm" viewBox="0 0 600 210" role="img" aria-label="字符级命中：圈住的对象中心落在笔迹内即命中">
+      <text class="ts" x="44" y="44" fill="var(--ink-faint)">文本层按字符拆成逐字对象（id = tl_3_c）</text>
+      <g id="ch-row" font-family="var(--serif)">
+        <g><rect x="44" y="60" width="34" height="40" rx="4" fill="var(--sheet)" stroke="var(--line)"/><text class="t" x="61" y="86" text-anchor="middle">反</text></g>
+        <g><rect x="80" y="60" width="34" height="40" rx="4" fill="var(--sheet)" stroke="var(--line)"/><text class="t" x="97" y="86" text-anchor="middle">向</text></g>
+        <g><rect x="116" y="60" width="34" height="40" rx="4" fill="var(--sheet)" stroke="var(--line)"/><text class="t" x="133" y="86" text-anchor="middle">传</text></g>
+        <g><rect x="152" y="60" width="34" height="40" rx="4" fill="var(--sienna-50)" stroke="var(--sienna)" stroke-width="1.6"/><text class="t" x="169" y="86" text-anchor="middle" fill="var(--sienna-90)">播</text></g>
+        <g><rect x="188" y="60" width="34" height="40" rx="4" fill="var(--sienna-50)" stroke="var(--sienna)" stroke-width="1.6"/><text class="t" x="205" y="86" text-anchor="middle" fill="var(--sienna-90)">算</text></g>
+        <g><rect x="224" y="60" width="34" height="40" rx="4" fill="var(--sienna-50)" stroke="var(--sienna)" stroke-width="1.6"/><text class="t" x="241" y="86" text-anchor="middle" fill="var(--sienna-90)">法</text></g>
+        <g><rect x="260" y="60" width="34" height="40" rx="4" fill="var(--sheet)" stroke="var(--line)"/><text class="t" x="277" y="86" text-anchor="middle">很</text></g>
+        <g><rect x="296" y="60" width="34" height="40" rx="4" fill="var(--sheet)" stroke="var(--line)"/><text class="t" x="313" y="86" text-anchor="middle">关</text></g>
+        <g><rect x="332" y="60" width="34" height="40" rx="4" fill="var(--sheet)" stroke="var(--line)"/><text class="t" x="349" y="86" text-anchor="middle">键</text></g>
+      </g>
+      <path d="M150 58 q48 -22 96 0 q22 28 0 48 q-48 20 -96 0 q-20 -24 0 -48" fill="none" stroke="var(--ink)" stroke-width="2.6" stroke-linecap="round"/>
+      <circle cx="169" cy="80" r="2.4" fill="var(--sienna)"/><circle cx="205" cy="80" r="2.4" fill="var(--sienna)"/><circle cx="241" cy="80" r="2.4" fill="var(--sienna)"/>
+      <text class="tm" x="44" y="138">命中（中心在笔迹内）→ target_object_refs = [ tl_3_3, tl_3_4, tl_3_5 ]</text>
+      <text class="ts" x="44" y="170" fill="var(--ink-soft)">所标内容 markedText = 「播算法」 · 这串 id 进 HMP，模型只见 id，从不见坐标</text>
+    </svg>
+    <figcaption>圈住"播算法"三字：只有中心落在笔迹闭合多边形内（红点）的字才算命中。命中产出的是对象 id 列表，不是 bbox——这是防幻觉的根线。</figcaption>
+  </figure>
+  <div class="col-w">
+    <p>HMP 的 <code>mode</code> 是纯几何判定，决定这次标注是"锚到内容"还是"自身即内容"。识别需要图时，<code>grabLayers</code> 从画布裁两张共享 bbox 的图：<code>ink</code>（白底 PNG，无损保手写精度）和 <code>composite</code>（叠原文 JPEG q=0.78，省 token）。命中图区或无字对象时再走 <code>/api/ocr-vlm</code> 兜底补 <code>text_hint</code>，失败一律静默。</p>
+  </div>
+  <table>
+    <tr><th>命中情况</th><th>mode</th><th>confidence</th></tr>
+    <tr><td>命中非空白对象</td><td>anchored</td><td>0.9（结构/重排）/ 0.7</td></tr>
+    <tr><td>只命中空白</td><td>self_content</td><td>0.6</td></tr>
+    <tr><td>混合</td><td>mixed</td><td>0.7</td></tr>
+    <tr><td>无命中且手写/画</td><td>self_content</td><td>—</td></tr>
+    <tr><td>其他</td><td>unknown</td><td>0.3</td></tr>
+  </table>
+</section>
+
+<section class="sec" id="hmp">
+  <p class="kick">核心数据结构 · 深读</p>
+  <h2><span class="seal key">◆</span>HMP：一次手势的取证记录</h2>
+  <div class="plain"><span class="pt">白话</span>把 HMP 想成一张"取证单"：你在哪一处、对着什么内容、做了个什么手势，外加几条证据线索——只记这些事实，不含 AI 的任何判断。它是整条链路的中转站，下游全靠它。</div>
+  <aside class="note q"><span class="nh">代码原话</span><q>只放"在哪、对什么、做了什么手势 + 取证线索"，不放 AI 推断结果（那是 InferenceResult 的职责）。</q></aside>
+  <div class="col-w">
+    <p>如果整篇只让你记住一个数据结构，记 HMP（Hand-Mark Protocol）。它是<em class="k">采集与推理之间的中间层语义接口</em>——把"用户在这一处画了什么、标到了什么、有什么证据"压成一条结构化记录，本身<b>不含任何 AI 推断</b>。下游一切（建图、蒸馏、空间召回、跨视图锚）读的都是它。在徐智强的三段链里，它就是中间那一层、也是整个方案的壁垒所在：</p>
+  </div>
+  <figure class="card-fig">
+    <svg class="dgm" viewBox="0 0 680 196" role="img" aria-label="HMP 是 OCR 与端侧 LLM 之间的中间层接口">
+      <defs><marker id="arh1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <line x1="200" y1="100" x2="250" y2="100" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#arh1)"/>
+      <line x1="428" y1="100" x2="478" y2="100" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#arh1)"/>
+      <rect x="30" y="72" width="170" height="56" rx="10" fill="var(--paper-2)" stroke="var(--line-2)"/>
+      <text class="tb" x="115" y="98" text-anchor="middle">OCR</text>
+      <text class="ts" x="115" y="116" text-anchor="middle" fill="var(--ink-soft)">降级为兜底 feeder</text>
+      <rect x="253" y="54" width="172" height="92" rx="12" fill="var(--gold-50)" stroke="var(--gold)" stroke-width="2.4"/>
+      <text class="tb" x="339" y="84" text-anchor="middle" fill="var(--gold-90)" font-size="17">HMP</text>
+      <text class="ts" x="339" y="104" text-anchor="middle" fill="var(--gold-90)">采集 ↔ 推理 中间层接口</text>
+      <text class="ts" x="339" y="123" text-anchor="middle" fill="var(--gold-90)">徐智强方案的壁垒 · step④</text>
+      <rect x="480" y="72" width="170" height="56" rx="10" fill="var(--slate-50)" stroke="var(--slate)"/>
+      <text class="tb" x="565" y="98" text-anchor="middle" fill="var(--slate-90)">端侧 LLM</text>
+      <text class="ts" x="565" y="116" text-anchor="middle" fill="var(--slate-90)">消费 HMP 出旁注</text>
+      <text class="ts" x="339" y="174" text-anchor="middle" fill="var(--ink-faint)">buildHmp 落笔当时纯几何产出 · OCR / 识别异步补 text_hint</text>
+    </svg>
+    <figcaption>三段链：OCR 被降级为兜底，端侧 LLM 是消费者，HMP 是中间那段语义接口——也是徐智强多半要拿来微调端侧小模型的合同面。</figcaption>
+  </figure>
+
+  <div class="col-w">
+    <h3>构成：五类信息</h3>
+    <p>HMP 的字段按用途分五类。前两类（身份、锚定）由 <code>buildHmp</code> 在落笔当时纯几何产出；取证线索（读出的字、图）由 OCR / 识别异步补填；可信度随之给出。</p>
+  </div>
+  <figure class="card-fig">
+    <svg class="dgm" viewBox="0 0 680 296" role="img" aria-label="HMP 的五类字段构成">
+      <g><rect x="40" y="24" width="150" height="44" rx="7" fill="var(--paper-3)" stroke="var(--ink-faint)"/><text class="tb" x="115" y="51" text-anchor="middle">身份</text></g>
+      <rect x="202" y="24" width="438" height="44" rx="7" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tm" x="218" y="44">hmp_id · surface_id · version</text>
+      <text class="ts" x="218" y="60" fill="var(--ink-soft)">谁 · 哪个面 · 契约版本</text>
+
+      <g><rect x="40" y="76" width="150" height="44" rx="7" fill="var(--sage-50)" stroke="var(--sage)"/><text class="tb" x="115" y="103" text-anchor="middle" fill="var(--sage-90)">锚到哪·对什么</text></g>
+      <rect x="202" y="76" width="438" height="44" rx="7" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tm" x="218" y="96">mode · target_region · target_object_refs · object_hint</text>
+      <text class="ts" x="218" y="112" fill="var(--ink-soft)">锚定语境 + 命中的字符对象</text>
+
+      <g><rect x="40" y="128" width="150" height="44" rx="7" fill="var(--gold-50)" stroke="var(--gold)"/><text class="tb" x="115" y="155" text-anchor="middle" fill="var(--gold-90)">做了什么</text></g>
+      <rect x="202" y="128" width="438" height="44" rx="7" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tm" x="218" y="148">action</text>
+      <text class="ts" x="218" y="164" fill="var(--ink-soft)">enclosure / underline / arrow / handwriting / sketch …</text>
+
+      <g><rect x="40" y="180" width="150" height="44" rx="7" fill="var(--sienna-50)" stroke="var(--sienna)"/><text class="tb" x="115" y="207" text-anchor="middle" fill="var(--sienna-90)">取证线索</text></g>
+      <rect x="202" y="180" width="438" height="44" rx="7" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tm" x="218" y="200">text_hint · crop_ref · vector_ref</text>
+      <text class="ts" x="218" y="216" fill="var(--ink-soft)">读出的字 + 图（图落库前剥，存料不存图）</text>
+
+      <g><rect x="40" y="232" width="150" height="44" rx="7" fill="var(--slate-50)" stroke="var(--slate)"/><text class="tb" x="115" y="259" text-anchor="middle" fill="var(--slate-90)">可信度</text></g>
+      <rect x="202" y="232" width="438" height="44" rx="7" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tm" x="218" y="252">confidence</text>
+      <text class="ts" x="218" y="268" fill="var(--ink-soft)">0–1，随 mode 与来源给出</text>
+    </svg>
+    <figcaption>HMP 五类字段。注意它只描述"事实与证据"，没有一格是 AI 的判断——判断在另一条记录 InferenceResult 里。</figcaption>
+  </figure>
+
+  <div class="col-w">
+    <h3>作用：谁产生它、谁吃它</h3>
+    <p>它在<em class="k">落笔当时</em>由 <code>buildHmp</code> 同步产出（趁画布还停在这一页，跨页提交无法重取），随 mark 一起存进 <code>marks</code> 账本——落库前把 <code>crop_ref / vector_ref</code> 两张图剥掉，<b>存料不存图</b>。此后整条下游都只读它的字段，各取所需：</p>
+  </div>
+  <table>
+    <tr><th>下游</th><th>读 HMP 的什么</th></tr>
+    <tr><td>mark-graph 节点</td><td><span class="mono">action / mode / object_hint / target_object_refs / text_hint</span></td></tr>
+    <tr><td>蒸馏 inference-view</td><td>命中文字（marked）· anchor_refs（= target_object_refs）</td></tr>
+    <tr><td>空间召回</td><td><span class="mono">target_region</span> 的 bbox 邻近</td></tr>
+    <tr><td>跨视图锚</td><td><span class="mono">target_object_refs</span></td></tr>
+  </table>
+  <div class="col-w">
+    <p>这里有个贯穿全局的稳定键：<code>target_object_refs</code>（命中的字符对象 id）同时被 HMP、向量记录的 <code>anchorRefs</code>、屏上旁注的 <code>object_refs</code> 引用——它是串起"采集 → 检索 → 展示"的那根线，也是模型"引用而不吐坐标"得以成立的锚。</p>
+  </div>
+
+  <div class="col-w">
+    <h3>未来用途：作为可取用的数据源</h3>
+    <p>HMP 落进 <code>marks</code> 账本后，是一份结构化、可追溯、append-only 的"标注 / 判断语料"。它被设计成对外可取用的数据源——但<b>消费侧目前全是 P5 骨架占位（stub）、未接</b>。下面三条是<em class="k">路线，不是已实现</em>：账本里的料已经齐了，缺的是取料的人。</p>
+  </div>
+  <aside class="note"><span class="nh">徐智强的壁垒</span>HMP 是采集与端侧 LLM 之间冻结的 typed 契约（<code>HMP_SCHEMA_VERSION='2'</code>）。它的价值不只在本地链路——徐智强多半要拿这份语料去微调端侧小 LLM，格式本身就是接口、是他顶上来填的第一版。</aside>
+  <figure class="card-fig wide">
+    <svg class="dgm" viewBox="0 0 680 252" role="img" aria-label="HMP 账本作为数据源的三条未来消费路径，均为占位骨架">
+      <defs><marker id="arh3" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <rect x="24" y="86" width="156" height="80" rx="11" fill="var(--sienna-50)" stroke="var(--sienna)" stroke-width="1.6"/>
+      <text class="tb" x="102" y="118" text-anchor="middle" fill="var(--sienna-90)">marks 账本</text>
+      <text class="ts" x="102" y="138" text-anchor="middle" fill="var(--sienna-90)">HMP · 真相</text>
+      <text class="ts" x="102" y="155" text-anchor="middle" fill="var(--sienna-90)">append-only</text>
+
+      <line x1="180" y1="120" x2="246" y2="56" stroke="var(--ink-faint)" stroke-width="1.3" marker-end="url(#arh3)"/>
+      <line x1="180" y1="126" x2="246" y2="126" stroke="var(--ink-faint)" stroke-width="1.3" marker-end="url(#arh3)"/>
+      <line x1="180" y1="132" x2="246" y2="196" stroke="var(--ink-faint)" stroke-width="1.3" marker-end="url(#arh3)"/>
+
+      <rect x="250" y="26" width="406" height="60" rx="10" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/>
+      <text class="tb" x="266" y="50">① 本地语义检索 · vector.ts</text>
+      <text class="ts" x="266" y="70" fill="var(--ink-soft)">text + anchorRefs 灌向量库 → "标注即可搜"，命中点回原页</text>
+      <text class="tm" x="640" y="44" text-anchor="end" fill="var(--gold-90)">stub · no-op</text>
+
+      <rect x="250" y="96" width="406" height="60" rx="10" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/>
+      <text class="tb" x="266" y="120">② 冷路径场景 S1–S7 · agent/index.ts</text>
+      <text class="ts" x="266" y="140" fill="var(--ink-soft)">搜 / 落地 / Brief / 综合 / 行动 / 记忆 / 反哺</text>
+      <text class="tm" x="640" y="114" text-anchor="end" fill="var(--gold-90)">stub</text>
+
+      <rect x="250" y="166" width="406" height="60" rx="10" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/>
+      <text class="tb" x="266" y="190">③ 对外 MCP 边 · mcp/index.ts</text>
+      <text class="ts" x="266" y="210" fill="var(--ink-soft)">外部 AI 读判断库 · 连出去推 Notion / Linear / Todo</text>
+      <text class="tm" x="640" y="184" text-anchor="end" fill="var(--gold-90)">stub</text>
+    </svg>
+    <figcaption>三条未来消费路径，全部为 P5 占位骨架——代码里只有类型与注释，没有一条业务逻辑在跑。账本里的 HMP 料已齐，缺的是取料的消费侧。</figcaption>
+  </figure>
+  <div class="col-w">
+    <p><b>① 本地语义检索（<code>vector.ts</code>）。</b>把每条 HMP 的命中文字（<code>marked_text</code>）+ <code>anchorRefs</code>（= <code>target_object_refs</code>）灌进本地向量库，实现"标注即可搜"——自然语言查历史判断，命中后用 refs 点回原页溯源。现状：<code>VectorStore</code> 接口已立、实现是 no-op，选型待定（sqlite-vec / DuckDB / 本地 embedding）。纪律：向量库本地直连、绝不 MCP 化。</p>
+    <p><b>② 冷路径场景编排（<code>agent/index.ts</code>，S1–S7）。</b>以 HMP 账本为底料的确定性 pipeline（步骤已知、非自主 agent，后台异步、不占用户等待）：S1 标注即可搜 / S2 写完即落地（→Notion/Obsidian）/ S3 判断 Brief / S4 跨材料综合 / S5 行动承接（→Linear/Todo）/ S6 长期记忆（Memory Digest）/ S7 内容反哺（→文章/Slide/PRD）。现状：全 stub，S1/S4/S6 等向量库就绪。</p>
+    <p><b>③ 对外 MCP 边（<code>mcp/index.ts</code>）。</b>整个系统唯一对外的缝，双向：把本地判断库包成 MCP server，供外部 AI（CC / Codex / ChatGPT / Cursor）经干净工具边界读取；或连出去把 action items 推到 Notion / Linear / Todo。铁律——<em class="k">内部模型 / 库 / 向量全本地直连，MCP 只在外部集成这条缝</em>；对外取用 opt-in、按范围授权、可撤销。现状：<code>pushTo</code> 是 stub、<code>serveJudgmentMcp</code> 是空函数体。</p>
+    <p>一条现状纪律值得点明：今天 HMP / marks 只在浏览器 IndexedDB 内，<b>没有任何外部读取路径</b>。上面三条都是预留骨架——把它写进文档，是为了让"HMP 是数据源"这件事在设计上成立、在实现上诚实。</p>
+  </div>
+</section>
+
+<section class="sec" id="s7">
+  <h2><span class="seal">7</span>关系建模：时空四象限</h2>
+  <div class="plain"><span class="pt">白话</span>你连着画的几个标记之间到底有没有关系？这一节用一个朴素规则判断：时间挨得近、或位置挨得近，就算有关系。</div>
+  <aside class="note"><span class="nh">恒算的空间边</span>空间边对所有 mark 对都算，体现"空间近一定有关联"：包围（权重 1）＞ 同目标（0.8）＞ 邻近（随距离衰减）。时间边只连相邻、并带四象限标签。</aside>
+  <div class="col-w">
+    <p>提交时 <code>buildMarkGraph</code> 把一段 session 的 marks 建成纯几何、确定性的图。节点是每个 mark 的取证摘要，边有三类：<em class="k">空间边</em>（恒算）、<em class="k">时间边</em>（相邻 + 四象限）、<em class="k">语义边</em>（箭头 A→B）。</p>
+  </div>
+  <figure class="card-fig">
+    <svg class="dgm" viewBox="0 0 600 250" role="img" aria-label="标记图：四个 mark 节点与三类边">
+      <defs><marker id="ar7" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <line x1="150" y1="70" x2="250" y2="120" stroke="var(--sage)" stroke-width="1.6" stroke-dasharray="5 3"/>
+      <line x1="150" y1="70" x2="280" y2="62" stroke="var(--ink)" stroke-width="1.4"/>
+      <line x1="280" y1="62" x2="430" y2="92" stroke="var(--ink)" stroke-width="1.4"/>
+      <line x1="430" y1="92" x2="280" y2="160" stroke="var(--ink)" stroke-width="1.4"/>
+      <line x1="300" y1="180" x2="170" y2="100" stroke="var(--sienna)" stroke-width="2" marker-end="url(#ar7)"/>
+
+      <g><circle cx="150" cy="70" r="26" fill="var(--gold-50)" stroke="var(--gold)"/><text class="ts" x="150" y="74" text-anchor="middle" fill="var(--gold-90)">圈「X」</text></g>
+      <g><circle cx="280" cy="62" r="26" fill="var(--gold-50)" stroke="var(--gold)"/><text class="ts" x="280" y="66" text-anchor="middle" fill="var(--gold-90)">划「Y」</text></g>
+      <g><circle cx="430" cy="92" r="26" fill="var(--gold-50)" stroke="var(--gold)"/><text class="ts" x="430" y="96" text-anchor="middle" fill="var(--gold-90)">写「问」</text></g>
+      <g><circle cx="280" cy="170" r="26" fill="var(--sienna-50)" stroke="var(--sienna)"/><text class="ts" x="280" y="174" text-anchor="middle" fill="var(--sienna-90)">箭头</text></g>
+
+      <g transform="translate(40,210)"><line x1="0" y1="0" x2="30" y2="0" stroke="var(--ink)" stroke-width="1.4"/><text class="ts" x="36" y="4">时间（相邻+四象限）</text></g>
+      <g transform="translate(250,210)"><line x1="0" y1="0" x2="30" y2="0" stroke="var(--sage)" stroke-width="1.6" stroke-dasharray="5 3"/><text class="ts" x="36" y="4">空间（邻近/包围）</text></g>
+      <g transform="translate(440,210)"><line x1="0" y1="0" x2="30" y2="0" stroke="var(--sienna)" stroke-width="2" marker-end="url(#ar7)"/><text class="ts" x="40" y="4">语义（箭头）</text></g>
+    </svg>
+    <figcaption>一段 session 建成的标记图。时间边串起书写顺序、空间边把邻近的连起来、箭头给出 A→B 方向。语义可盖过几何。</figcaption>
+  </figure>
+
+  <div class="col-w">
+    <p>四象限是第六条不变量的实现：两标注间的关系由<em class="k">时间间隔</em>和<em class="k">空间距离</em>共同决定。判定规则——<b>非 separate 即关联</b>：只有时间又远、空间又远才算两件无关的事。拖动下面这个点感受一下：它落在哪一格，蒸馏叙事里就用哪个连接词把前后两笔接起来。</p>
+  </div>
+
+  <div class="demo" id="quadDemo">
+    <div class="dh">动态演示 · 拖动看连接词</div>
+    <svg class="dgm" viewBox="0 0 640 430" role="img" aria-label="时空四象限可拖动演示" style="touch-action:none">
+      <text class="ts" x="142" y="62" text-anchor="end">时间远</text>
+      <text class="ts" x="142" y="368" text-anchor="end">时间近</text>
+      <text class="ts" x="160" y="404" text-anchor="start">空间近</text>
+      <text class="ts" x="520" y="404" text-anchor="end">空间远</text>
+      <text class="tm" x="340" y="36" text-anchor="middle">空间阈 0.12</text>
+      <text class="tm" x="538" y="214" text-anchor="start">时间阈 30s</text>
+
+      <rect id="q-tl" x="150" y="44" width="190" height="170" rx="5" fill="var(--sienna-50)" stroke="var(--sienna)" opacity=".5"/>
+      <rect id="q-tr" x="340" y="44" width="190" height="170" rx="5" fill="var(--paper-3)" stroke="var(--ink-faint)" opacity=".5"/>
+      <rect id="q-bl" x="150" y="214" width="190" height="170" rx="5" fill="var(--sienna-50)" stroke="var(--sienna)" opacity=".5"/>
+      <rect id="q-br" x="340" y="214" width="190" height="170" rx="5" fill="var(--sienna-50)" stroke="var(--sienna)" opacity=".5"/>
+
+      <text class="t" x="245" y="124" text-anchor="middle">回访 revisit</text>
+      <text class="ts" x="245" y="143" text-anchor="middle">「，N 秒后回到」</text>
+      <text class="t" x="435" y="124" text-anchor="middle">另起 separate</text>
+      <text class="ts" x="435" y="143" text-anchor="middle">「；另外」· 无关</text>
+      <text class="t" x="245" y="294" text-anchor="middle">一口气 one_action</text>
+      <text class="ts" x="245" y="313" text-anchor="middle">「，随即」</text>
+      <text class="t" x="435" y="294" text-anchor="middle">扫读 sweep</text>
+      <text class="ts" x="435" y="313" text-anchor="middle">「，接着往下」</text>
+
+      <circle id="q-dot" cx="245" cy="300" r="11" fill="var(--ink)" stroke="var(--sheet)" stroke-width="2" style="cursor:grab"/>
+    </svg>
+    <div class="readout" id="quad-out" style="margin-top:10px">间隔 — · 距离 — → 拖动黑点试试。</div>
+  </div>
+</section>
+
+<section class="sec" id="s8">
+  <h2><span class="seal">8</span>空间召回：把墙上的旧标注捞回来</h2>
+  <div class="plain"><span class="pt">白话</span>你回复一次之后系统就"忘了"之前画的——可墙上明明还画着。这一节就是在你下次标注时，把附近那些旧标注重新捞回来当背景。</div>
+  <aside class="note q"><span class="nh">根因 A</span><q>每次 AI 回复后 session 即清空……于是"空间临近但时间间隔较远"的旧标注——墙上明明画着——对 buildMarkGraph 根本不存在。</q></aside>
+  <div class="col-w">
+    <p>建图视野只到"上次回复以来"。提交时 <code>findSpatialRecall</code> 从持久账本按 bbox 邻近捞回同页的旧 mark，作"回访"背景喂进这一轮。三条纪律：只认几何邻近、严格页内、<em class="k">不进 graph.nodes</em>——它们是背景不是当前动作，绝不污染主链。封顶 3 条。</p>
+  </div>
+  <figure class="card-fig">
+    <svg class="dgm" viewBox="0 0 600 250" role="img" aria-label="空间召回：邻近旧标注被捞回作回访背景">
+      <defs><marker id="ar8" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <rect x="30" y="20" width="320" height="210" rx="6" fill="var(--sheet)" stroke="var(--line-2)"/>
+      <text class="ts" x="40" y="38" fill="var(--ink-faint)">同一页</text>
+
+      <path d="M90 90 q14 -12 28 0 q12 12 0 22 q-14 12 -28 0 q-12 -10 0 -22" fill="none" stroke="var(--ink)" stroke-width="2.6"/>
+      <line x1="84" y1="130" x2="150" y2="130" stroke="var(--ink)" stroke-width="2.6"/>
+      <text class="ts" x="96" y="160" fill="var(--sienna)">当前 session（实）</text>
+
+      <line x1="180" y1="80" x2="240" y2="80" stroke="var(--ink-faint)" stroke-width="2.2" opacity=".42"/>
+      <path d="M186 110 q12 -10 24 0 q10 10 0 20 q-12 10 -24 0 q-10 -8 0 -20" fill="none" stroke="var(--ink-faint)" stroke-width="2.2" opacity=".42"/>
+      <line x1="250" y1="200" x2="320" y2="200" stroke="var(--ink-faint)" stroke-width="2.2" opacity=".42"/>
+      <text class="ts" x="300" y="186" fill="var(--ink-faint)" text-anchor="end">旧标注（账本·淡）</text>
+
+      <line x1="206" y1="86" x2="150" y2="118" stroke="var(--sienna)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar8)"/>
+      <line x1="196" y1="120" x2="150" y2="124" stroke="var(--sienna)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar8)"/>
+
+      <rect x="386" y="78" width="190" height="92" rx="9" fill="var(--gold-50)" stroke="var(--gold)"/>
+      <text class="tb" x="481" y="104" text-anchor="middle" fill="var(--gold-90)">回访上下文</text>
+      <text class="ts" x="481" y="124" text-anchor="middle" fill="var(--gold-90)">「这附近你先前标过…」</text>
+      <text class="ts" x="481" y="142" text-anchor="middle" fill="var(--gold-90)">≤ 3 条 · 不进 graph.nodes</text>
+      <line x1="350" y1="120" x2="384" y2="120" stroke="var(--gold)" stroke-width="1.4" marker-end="url(#ar8)"/>
+      <text class="ts" x="466" y="200" text-anchor="middle" fill="var(--ink-faint)">远处旧标注不召回（既没被圈住、也不够近）</text>
+    </svg>
+    <figcaption>邻近（包围或中心距 &lt; 0.12）的旧标注被捞回当背景子句；远处的不召回。它们清晰标成"先前"，与当前动作区隔。</figcaption>
+  </figure>
+</section>
+
+<section class="sec" id="s9">
+  <h2><span class="seal">9</span>蒸馏：把图变成一句叙事</h2>
+  <div class="plain"><span class="pt">白话</span>在把这一段标注交给 AI 之前，先把它"翻译"成一段不带任何坐标的大白话叙事。AI 只看这段话，不碰几何。</div>
+  <aside class="note"><span class="nh">采集 ↔ 推理的合同面</span>主模型和上下文分类器都只消费 InferenceView，不碰几何。坐标、stroke、分数、内部置信全部丢掉——这是"引用不吐坐标"在数据上的强制兑现。</aside>
+  <div class="col-w">
+    <p><code>projectInferenceView</code> 把标记图蒸馏成一份精简载荷，<em class="k">丢掉坐标 / stroke / 分数 / 置信</em>，只留模型该看的叙事。叙事分三层拼成：时间链（按四象限选连接词）、非相邻空间子句、回访子句。</p>
+  </div>
+  <figure class="card-fig wide">
+    <svg class="dgm" viewBox="0 0 1000 270" role="img" aria-label="标记图蒸馏成叙事：丢掉几何、留下关系叙事">
+      <defs><marker id="ar9" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <rect x="30" y="40" width="220" height="190" rx="10" fill="var(--sage-50)" stroke="var(--sage)"/>
+      <text class="tb" x="140" y="64" text-anchor="middle" fill="var(--sage-90)">MarkGraph</text>
+      <circle cx="80" cy="110" r="18" fill="var(--sheet)" stroke="var(--sage)"/><circle cx="160" cy="100" r="18" fill="var(--sheet)" stroke="var(--sage)"/><circle cx="120" cy="170" r="18" fill="var(--sheet)" stroke="var(--sage)"/>
+      <line x1="80" y1="110" x2="160" y2="100" stroke="var(--ink-faint)"/><line x1="160" y1="100" x2="120" y2="170" stroke="var(--ink-faint)"/>
+      <text class="ts" x="140" y="216" text-anchor="middle" fill="var(--sage-90)">节点 + 三类边 + 命中文字</text>
+
+      <g transform="translate(300,70)">
+        <text class="tm" x="0" y="0" fill="var(--ink-faint)" text-decoration="line-through">stroke_points</text>
+        <text class="tm" x="0" y="26" fill="var(--ink-faint)" text-decoration="line-through">bbox 坐标</text>
+        <text class="tm" x="0" y="52" fill="var(--ink-faint)" text-decoration="line-through">模板分 / 置信</text>
+        <text class="ts" x="0" y="84" fill="var(--sienna)">— 蒸馏时丢弃 —</text>
+      </g>
+      <line x1="250" y1="135" x2="296" y2="135" stroke="var(--sage)" stroke-width="1.4" marker-end="url(#ar9)"/>
+      <line x1="470" y1="135" x2="516" y2="135" stroke="var(--gold)" stroke-width="1.4" marker-end="url(#ar9)"/>
+
+      <rect x="520" y="40" width="450" height="190" rx="10" fill="var(--gold-50)" stroke="var(--gold)"/>
+      <text class="tb" x="544" y="66" fill="var(--gold-90)">InferenceView · narrative</text>
+      <text class="ts" x="544" y="92" fill="var(--gold-90)">① 时间链：圈「反向传播」，随即划线「梯度」</text>
+      <text class="ts" x="544" y="114" fill="var(--gold-90)">　 30 秒后回到，写下「这步为什么」</text>
+      <text class="ts" x="544" y="140" fill="var(--gold-90)">② 空间子句：「反向传播」圈住了「梯度」</text>
+      <text class="ts" x="544" y="162" fill="var(--gold-90)">③ 回访：（这附近你先前标过「链式法则」）</text>
+      <text class="tm" x="544" y="196" fill="var(--gold-90)">+ marked · page_context（滑窗 ~3000 字）· crop?</text>
+    </svg>
+    <figcaption>蒸馏：几何被丢掉，留下一段人类可读、模型可吃的关系叙事。动词中性（圈/划/写/画），意图交给模型。</figcaption>
+  </figure>
+</section>
+
+<section class="sec" id="s10">
+  <h2><span class="seal">10</span>AI 链路：调用形态 · 服务端提示词 · 模型路由</h2>
+  <div class="plain"><span class="pt">白话</span>和 AI 打交道的这一跳。这轮重构后定下来的样子：客户端只管把"本轮数据 + 用哪个角色 + 用哪个模型"发出去，提示词和模型选择都搬到了服务端。</div>
+  <aside class="note"><span class="nh">已定稿</span>原先这节是"抽象 · 正在改"。AI 链路这轮重构已落定，最大的变化：<b>提示词整体搬到服务端</b>（<code>server/prompts.ts</code>，按 role 索引），客户端不再传 <code>system</code>，只传一个 <code>role</code> 字符串。</aside>
+  <div class="col-w">
+    <p>整体形态是<em class="k">一个无状态的薄客户端 + 一层 dev 期 AI 代理</em>：客户端只负责把"本轮动态数据 + role + model"发出去、把流式帧收回来落账本；提示词、模型路由、网关都在服务端。模型仍只在 <code>commitSessionDiscussion</code> 一处被调用（旁注那一跳），但它背后这层现在清清楚楚。</p>
+  </div>
+  <figure class="card-fig wide">
+    <svg class="dgm" viewBox="0 0 1000 300" role="img" aria-label="AI 链路架构：无状态客户端发 role + 动态数据，服务端按 role 取静态提示词并按前缀路由模型到网关">
+      <defs><marker id="ar10" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <rect x="24" y="58" width="244" height="150" rx="11" fill="var(--paper-2)" stroke="var(--line-2)"/>
+      <text class="tb" x="40" y="84">客户端 · stateless</text>
+      <text class="ts" x="40" y="106" fill="var(--ink-soft)">messages（动态半边：</text>
+      <text class="ts" x="40" y="122" fill="var(--ink-soft)">background / history / request）</text>
+      <text class="tm" x="40" y="146" fill="var(--ink-soft)">+ role + model</text>
+      <text class="ts" x="40" y="170" fill="var(--ink-soft)">buffer 每书 24 滑窗</text>
+      <text class="ts" x="40" y="190" fill="var(--ink-soft)">无服务端会话</text>
+
+      <rect x="336" y="40" width="300" height="186" rx="12" fill="var(--gold-50)" stroke="var(--gold)"/>
+      <text class="tb" x="352" y="64" fill="var(--gold-90)">/api 代理（server）</text>
+      <rect x="352" y="76" width="268" height="66" rx="8" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tm" x="366" y="96" fill="var(--gold-90)">SYSTEM_PROMPTS[role]</text>
+      <text class="ts" x="366" y="113" fill="var(--ink-soft)">静态半边：task_context /</text>
+      <text class="ts" x="366" y="129" fill="var(--ink-soft)">rules / examples / output_format</text>
+      <rect x="352" y="150" width="268" height="62" rx="8" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tm" x="366" y="172" fill="var(--gold-90)">模型路由（按前缀）</text>
+      <text class="ts" x="366" y="192" fill="var(--ink-soft)">+ thinking 按家族派生</text>
+
+      <rect x="704" y="58" width="272" height="150" rx="11" fill="var(--slate-50)" stroke="var(--slate)"/>
+      <text class="tb" x="720" y="84" fill="var(--slate-90)">NoDesk 网关</text>
+      <text class="ts" x="720" y="110" fill="var(--slate-90)">kimi* → moonshot</text>
+      <text class="ts" x="720" y="130" fill="var(--slate-90)">claude* / gemini* → DMX</text>
+      <text class="ts" x="720" y="152" fill="var(--slate-90)">Bearer key · .env</text>
+
+      <line x1="268" y1="133" x2="334" y2="133" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar10)"/>
+      <line x1="636" y1="133" x2="702" y2="133" stroke="var(--line-2)" stroke-width="1.4" marker-end="url(#ar10)"/>
+      <polyline points="840,208 840,272 146,272 146,210" fill="none" stroke="var(--slate)" stroke-width="1.4" marker-end="url(#ar10)"/>
+      <text class="tm" x="493" y="266" text-anchor="middle" fill="var(--slate-90)">NDJSON 帧 {k:'t' 正文 · 'r' 思考} → onDelta / onThinking</text>
+    </svg>
+    <figcaption>架构落定。客户端发"动态数据 + role + model"，服务端按 role 取静态提示词、按模型前缀路由到网关，再以 NDJSON 帧（一行一个 JSON、流式逐行回传）把正文与思考分流回客户端。</figcaption>
+  </figure>
+
+  <div class="col-w">
+    <h3>10.1 调用形态（客户端，无状态）</h3>
+    <p>传输收口在 <code>core/api.ts</code>：<code>postJson</code>（一次性，<code>!ok</code> 抛错）与 <code>postNdjson</code>（流式逐行，半行攒着、坏行跳过、收尾处理残行）——只吸收 HTTP 样板，<b>降级语义留给各调用方</b>。对话状态就是客户端持有的一串 <code>messages</code>，<b>无服务端会话进程</b>：每本书一条 buffer（<code>ChatMsg{role,content}</code> 纯文字，滑窗封顶 <code>MAX_TURNS=24</code>、裁头留最近），reload 时由调用方从 <code>ai_turns</code> 账本重灌。<code>chatTurn</code> 发 <code>{messages, role, model, maxTokens}</code>，带图时只把本轮最后一条 user 消息换成多模态块；<b>图与思考都不进 buffer</b>（避免每轮重发滚雪球）。<code>classifyContext</code> 发 respond/fold 五字段，出错一律降级 <code>{respond:true}</code>（漏答真问题更贵）。</p>
+  </div>
+
+  <div class="col-w">
+    <h3>10.2 提示词归拢服务端（server/prompts.ts）</h3>
+    <p>这是这轮最大的结构变化。Anthropic console 的 9 段结构被拆成两半：<em class="k">静态半边</em>（<code>task_context / tone / rules / examples / output_format</code>）作为 system 存在 <code>server/prompts.ts</code>、按 <code>PromptRole</code> 索引；<em class="k">动态半边</em>（<code>background / history / request</code>）在客户端发来的 messages 里；<code>think</code> 段交模型原生（chat 端点已开 thinking）。版本 <code>PROMPT_VERSION='v2'</code>——v1→v2 做了"annotator 去重"：行为规则单点存 system，<code>renderUserTurn</code> 每轮只带本轮数据 + 一句类别标签。三个角色（annotator / ink_classifier / context_classifier）的 <code>&lt;examples&gt;</code> 段<b>刻意留空待填</b>，之后增量补 few-shot。下面是旁注主角色 annotator 的 system 原文：</p>
+  </div>
+  <figure class="card-fig">
+    <pre style="margin:0;font-family:var(--mono);font-size:12px;line-height:1.62;white-space:pre-wrap;color:var(--ink-soft)">&lt;task_context&gt;
+你是 InkLoop —— 嵌在阅读器里的旁注式 AI 同读者。读者在原文上用符号
+（圈/划/箭头/手写等）连续标注，你只用简短中文旁注回应。
+&lt;/task_context&gt;
+&lt;rules&gt;
+- 当本轮给的是读者这一阵连续标注的脉络：综合它给一条贯穿性的旁注，紧扣这些
+  标注、按它们的顺序与关系理解，别逐条复述，别脱开去谈整页大主题。
+- 当本轮给的是读者手写的一个问题：直接回答，扣住所写，不要反问。
+- 若本轮附了一张截图（你圈/划/写处的图）：结合图作答。
+- 上文里有读者在这本书前面留下的标注与你的回应：需要时自然呼应，别强行联系。
+&lt;/rules&gt;
+&lt;examples&gt;
+&lt;!-- 待填：好旁注的 few-shot（本期留空） --&gt;
+&lt;/examples&gt;
+&lt;output_format&gt;
+不寒暄、不复述原文、不用 markdown 或列表、至多 2–3 句，像页边批注点到为止。
+&lt;/output_format&gt;</pre>
+    <figcaption>SYSTEM_PROMPTS.annotator（server/prompts.ts）。其余角色同构，只取适用子集——ocr / image_explain 甚至只有 task_context + rules。</figcaption>
+  </figure>
+
+  <div class="col-w">
+    <h3>10.3 AI 端点册</h3><span class="skip">实现细节 · 可跳过</span>
+    <p>同一套调用形态服务多个角色。每个端点固定一个 role、默认一个模型，旁注/答问与重排走两条模型线。</p>
+  </div>
+  <table class="wide">
+    <tr><th>端点</th><th>role</th><th>模型</th><th>流式</th><th>职责</th></tr>
+    <tr><td><code>/api/chat</code></td><td>annotator</td><td>inferModel</td><td>是</td><td>旁注 / 答问主推理</td></tr>
+    <tr><td><code>/api/interpret</code></td><td>ink_classifier</td><td>inferModel</td><td>否</td><td>手写 vs 画 + 转写 + 草图描述</td></tr>
+    <tr><td><code>/api/classify-context</code></td><td>context_classifier</td><td>inferModel</td><td>否</td><td>respond / fold</td></tr>
+    <tr><td><code>/api/ocr-vlm</code></td><td>ocr</td><td>inferModel</td><td>否</td><td>局部 / 整页转写（兜底）</td></tr>
+    <tr><td><code>/api/explain-image</code></td><td>image_explain</td><td>inferModel</td><td>否</td><td>图解读（一两句）</td></tr>
+    <tr><td><code>/api/reflow-ai-stream</code></td><td>reflow_structure</td><td>reflowModel</td><td>是</td><td>重排结构（按段冒出）</td></tr>
+    <tr><td><code>/api/reflow · reflow-ai · reflow-vlm</code></td><td>reflow_refine / structure / vlm</td><td>reflowModel</td><td>否</td><td>重排精修 / 结构 / 看图</td></tr>
+  </table>
+
+  <div class="col-w">
+    <h3>10.4 模型路由 + 网关</h3>
+    <p>服务端走 <b>NoDesk 网关</b>（<code>llm-gateway-api.nodesk.tech</code>，Bearer key 在 <code>.env</code>），按模型名<em class="k">前缀路由渠道</em>：<code>kimi*</code> → moonshot，<code>claude* / gemini*</code> → DMX。思考块<b>按家族派生</b>——claude / kimi 经网关回思考摘要（请求 thinking），gemini 不回（请求也白吃 token，故不请求）。默认模型分两条线：<code>inferModel = claude-sonnet-4-6</code>（chat / interpret / ocr-vlm / classify-context <b>同源一个模型</b>，DMX 上中文手写实测准）；<code>reflowModel = gemini-3.1-flash-lite</code>（结构任务、延迟敏感、质量门槛低，走快模型）。env 的 <code>LLM_MODEL</code> 未设时整体兜底 <code>kimi-k2.6</code>。<code>ecbbe35</code> 已删掉原先的 kimi 静默兜底——模型选择就看 <code>payload.model</code> 或默认，不再暗中替换。</p>
+  </div>
+
+  <div class="col-w">
+    <h3>10.5 落账本与审计</h3>
+    <p>一轮回复落 <code>ai_turns</code> 时，连同审计信息一起存：<code>prompt_snapshot</code>（<code>renderUserTurn</code> 渲出的 user turn 原文）、<code>system_prompt_hash='annotator@v2'</code>（提示词版本标签，与服务端 <code>PROMPT_VERSION</code> 人工对齐；提示词正文本身在 <code>server/prompts.ts</code>、git 版本化）、<code>thinking</code>（思考过程，不进 buffer）、<code>diag{classify, sent_image}</code>、<code>inference_view</code>（crop 剥掉）、<code>settings_snapshot{inferModel, reflowProvider}</code>。<b>接缝纪律没变</b>：模型只在 <code>commitSessionDiscussion</code> 一处被调用，prompt 在服务端、模型在网关、buffer 在客户端，三者各自可换、都不动 §1–§9。</p>
+  </div>
+</section>
+
+<section class="sec" id="s11">
+  <h2><span class="seal">11</span>读取 / 呈现：一套对象锚，两个投影</h2>
+  <div class="plain"><span class="pt">白话</span>你既想看排版好的原版 PDF，又想看重排后好读的版式，而你画的标注在两边都不能跑位。这一节讲它怎么做到。</div>
+  <aside class="note q"><span class="nh">代码原话</span><q>标注锚在字符对象上 → 经此把"在哪个块"算出来，原版页 / 重排页共用一套锚。</q></aside>
+  <div class="col-w">
+    <p>呈现层要解决一个矛盾：用户既看排版好的原版 PDF，又看重排后的线性阅读流，而<em class="k">标注必须在两个视图都不丢位置</em>。解法是标注从不锚在坐标上，而锚在字符级 <code>SurfaceObject.id</code> 上；这套 index 是单一真相，两个投影各自把同一组 id 解析到自己的坐标系。重排块靠 <code>sourceRunIds</code> 这道桥反查"标注落在哪个块"。</p>
+  </div>
+  <figure class="card-fig wide">
+    <svg class="dgm" viewBox="0 0 1000 300" role="img" aria-label="同一标注锚在同一字符对象，在原版页和重排页两个投影都能定位">
+      <defs><marker id="ar11" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <text class="tm" x="40" y="34" fill="var(--ink-soft)">投影 A · 原版页（散落的 run）</text>
+      <rect x="40" y="46" width="360" height="220" rx="8" fill="var(--sheet)" stroke="var(--line-2)"/>
+      <line x1="64" y1="80" x2="300" y2="80" stroke="var(--line-2)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="64" y1="104" x2="240" y2="104" stroke="var(--line-2)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="64" y1="150" x2="330" y2="150" stroke="var(--sienna)" stroke-width="7" stroke-linecap="round" opacity=".55"/>
+      <path d="M150 138 q40 -16 84 0 q16 18 0 32 q-40 14 -84 0 q-14 -16 0 -32" fill="none" stroke="var(--ink)" stroke-width="2.4"/>
+      <line x1="64" y1="196" x2="280" y2="196" stroke="var(--line-2)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="64" y1="220" x2="200" y2="220" stroke="var(--line-2)" stroke-width="6" stroke-linecap="round"/>
+      <text class="tm" x="192" y="252" text-anchor="middle" fill="var(--sienna-90)">run tl_3 · 字符对象 tl_3_5</text>
+
+      <text class="tm" x="600" y="34" fill="var(--ink-soft)">投影 B · 重排阅读流（干净段落）</text>
+      <rect x="600" y="46" width="360" height="220" rx="8" fill="var(--sheet)" stroke="var(--line-2)"/>
+      <rect x="624" y="70" width="312" height="40" rx="6" fill="var(--paper-2)" stroke="var(--line)"/>
+      <text class="ts" x="640" y="94" fill="var(--ink-soft)">标题块 b_0</text>
+      <rect x="624" y="120" width="312" height="64" rx="6" fill="var(--sienna-50)" stroke="var(--sienna)"/>
+      <text class="ts" x="640" y="142" fill="var(--sienna-90)">段落块 b_2（含 tl_3_5）</text>
+      <path d="M700 150 q40 -14 84 0 q16 16 0 30 q-40 12 -84 0 q-14 -14 0 -30" fill="none" stroke="var(--ink)" stroke-width="2.4"/>
+      <rect x="624" y="194" width="312" height="48" rx="6" fill="var(--paper-2)" stroke="var(--line)"/>
+      <text class="ts" x="640" y="222" fill="var(--ink-soft)">段落块 b_3</text>
+
+      <path d="M392 150 C 470 150, 520 152, 622 152" fill="none" stroke="var(--gold)" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ar11)"/>
+      <text class="tm" x="500" y="138" text-anchor="middle" fill="var(--gold-90)">同一对象 id · sourceRunIds 桥</text>
+    </svg>
+    <figcaption>同一条圈，锚在同一个字符对象 <span class="mono">tl_3_5</span> 上。原版页用对象 bbox 落位、重排页经 charToBlock 查到块 b_2——切视图不丢位。</figcaption>
+  </figure>
+  <div class="col-w">
+    <p>重排面上用户也能圈画：<code>reader.ts</code> 把笔迹坐标<em class="k">反映射</em>回命中块的原页 bbox，构造 <code>pointer_type:'reader'</code> 的事件，经 <code>bus</code> 发回 main 走<b>完全相同</b>的 <code>resolveRegion</code>——落账本、跨视图、持久、同享 session/idle。重排面的标注和原版面的是同一种东西，零特殊路径。</p>
+  </div>
+</section>
+
+<section class="sec" id="s12">
+  <h2><span class="seal">12</span>持久化：真相与派生</h2>
+  <div class="plain"><span class="pt">白话</span>系统只把两样东西当"真账"：你的笔迹、和 AI 的回应。其余一切（当前会话、关系图、旁注…）都是每次打开时现算出来的，不存。</div>
+  <aside class="note q"><span class="nh">代码原话</span><q>派生不存（reload 从 marks/docs 现算）：session、mark-graph、实时 InferenceView。页保持纯净：marks 只装用户笔迹 + 取证，AI 文本全在 ai_turns。</q></aside>
+  <div class="col-w">
+    <p>真相只有两件 append-only 账本，其余全是 reload 现算的派生物。这条纪律保证"重开免重导、跨视图不丢、历史可追溯"。擦除是落墓碑、改写是追加 supersedes；每次回复后推一道<em class="k">综合水位线</em>，水位线之后的 mark 才是下次 idle 仍要综合的。</p>
+  </div>
+  <figure class="card-fig wide">
+    <svg class="dgm" viewBox="0 0 1000 280" role="img" aria-label="两件真相账本与一组 reload 现算的派生物">
+      <defs><marker id="ar12" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <text class="tm" x="40" y="34" fill="var(--sienna)">真相 · append-only</text>
+      <rect x="40" y="46" width="200" height="200" rx="10" fill="var(--sienna-50)" stroke="var(--sienna)" stroke-width="1.6"/>
+      <text class="tb" x="140" y="76" text-anchor="middle" fill="var(--sienna-90)">marks</text>
+      <line x1="64" y1="96" x2="216" y2="96" stroke="var(--sienna)" opacity=".4"/><line x1="64" y1="120" x2="216" y2="120" stroke="var(--sienna)" opacity=".4"/><line x1="64" y1="144" x2="216" y2="144" stroke="var(--sienna)" opacity=".4"/>
+      <text class="ts" x="140" y="180" text-anchor="middle" fill="var(--sienna-90)">页账本：笔迹 + 取证</text>
+      <text class="ts" x="140" y="220" text-anchor="middle" fill="var(--sienna-90)">擦除 = tombstone</text>
+
+      <rect x="260" y="46" width="200" height="200" rx="10" fill="var(--slate-50)" stroke="var(--slate)" stroke-width="1.6"/>
+      <text class="tb" x="360" y="76" text-anchor="middle" fill="var(--slate-90)">ai_turns</text>
+      <line x1="284" y1="96" x2="436" y2="96" stroke="var(--slate)" opacity=".4"/><line x1="284" y1="120" x2="436" y2="120" stroke="var(--slate)" opacity=".4"/><line x1="284" y1="144" x2="436" y2="144" stroke="var(--slate)" opacity=".4"/>
+      <text class="ts" x="360" y="180" text-anchor="middle" fill="var(--slate-90)">书日志：回复 + 锚 + 快照</text>
+      <text class="ts" x="360" y="220" text-anchor="middle" fill="var(--slate-90)">改/忽略 = supersedes</text>
+
+      <text class="tm" x="560" y="34" fill="var(--ink-faint)">派生 · reload 现算（不持久）</text>
+      <g font-family="var(--sans)">
+        <rect x="560" y="50" width="180" height="40" rx="8" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/><text class="ts" x="650" y="74" text-anchor="middle" fill="var(--ink-soft)">内存 session</text>
+        <rect x="560" y="100" width="180" height="40" rx="8" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/><text class="ts" x="650" y="124" text-anchor="middle" fill="var(--ink-soft)">mark-graph</text>
+        <rect x="560" y="150" width="180" height="40" rx="8" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/><text class="ts" x="650" y="174" text-anchor="middle" fill="var(--ink-soft)">InferenceView</text>
+        <rect x="760" y="75" width="200" height="40" rx="8" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/><text class="ts" x="860" y="99" text-anchor="middle" fill="var(--ink-soft)">对话 buffer</text>
+        <rect x="760" y="150" width="200" height="40" rx="8" fill="none" stroke="var(--ink-faint)" stroke-dasharray="5 3"/><text class="ts" x="860" y="174" text-anchor="middle" fill="var(--ink-soft)">overlays 旁注</text>
+      </g>
+      <line x1="460" y1="120" x2="556" y2="120" stroke="var(--ink-faint)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#ar12)"/>
+      <text class="ts" x="508" y="110" text-anchor="middle" fill="var(--ink-faint)">现算</text>
+    </svg>
+    <figcaption>reload 后从账本重建：折叠 marks → 笔迹回屏 + pending session；折叠 ai_turns → 旁注回屏 + 重灌 buffer。派生物全部不持久。</figcaption>
+  </figure>
+</section>
+
+<section class="sec" id="s13">
+  <h2><span class="seal">13</span>设计纪律速查</h2>
+  <div class="plain"><span class="pt">白话</span>把全篇的规矩收成一张表，方便回查。这一节本身就是"可跳过"的速查参考。</div>
+  <div class="col-w"><p>整篇文档的纪律收成一张表——每一条都在前面某一层落地，也都是改动这套系统时不该破坏的不变量。</p></div>
+  <table class="wide">
+    <tr><th>#</th><th>纪律</th><th>落在哪</th></tr>
+    <tr><td>1</td><td>全程归一化坐标，像素只在采集/渲染两端</td><td><code>transform.ts</code></td></tr>
+    <tr><td>2</td><td>笔迹无损（含笔压）</td><td><code>ink.ts</code> getCoalescedEvents</td></tr>
+    <tr><td>3</td><td>模型只引用对象 id，绝不吐坐标</td><td>anchor-layer / inference-view</td></tr>
+    <tr><td>4</td><td>端侧成本阶梯：几何免费 → 识别按需 → 模型最后</td><td>classify ocrWorthy 门</td></tr>
+    <tr><td>5</td><td>连续标注静默，只 idle 或手写打破</td><td>main.ts 区域组装无时长上限</td></tr>
+    <tr><td>6</td><td>取证在落笔当时，提交时只读不重取</td><td>captureMark → mark.hmp</td></tr>
+    <tr><td>7</td><td>时空四象限：非 separate 即关联</td><td>mark-graph.quadrantOf</td></tr>
+    <tr><td>8</td><td>每笔单独几何分类后再合并判特征</td><td>resolveRegion per-stroke</td></tr>
+    <tr><td>9</td><td>markup 锚内容，freeform self_content 不锚正文</td><td>captureMark hmpTargets</td></tr>
+    <tr><td>10</td><td>旧标注空间召回但不进 graph.nodes</td><td>recall.ts</td></tr>
+    <tr><td>11</td><td>蒸馏丢坐标/stroke/分数，只给模型叙事</td><td>projectInferenceView</td></tr>
+    <tr><td>12</td><td>一套对象锚 + 两投影，跨视图不丢位置</td><td>surfaceIndex + sourceRunIds</td></tr>
+    <tr><td>13</td><td>reader 手势 = 正常 mark，bus 解耦</td><td>reader:gesture → resolveRegion</td></tr>
+    <tr><td>14</td><td>真相只在 marks/ai_turns 账本，余者现算</td><td>store.ts append-only + 水位线</td></tr>
+    <tr><td>15</td><td>翻页不是边界事件，会话跨页延续</td><td>resetAssembly vs cancelTimers</td></tr>
+  </table>
+
+  <div class="col-w"><h3>附录 · 关键常量</h3><span class="skip">实现细节 · 可跳过</span></div>
+  <table class="wide">
+    <tr><th>常量</th><th>值</th><th>作用</th></tr>
+    <tr><td>DEADZONE_PX</td><td>1.3 px</td><td>抖动死区</td></tr>
+    <tr><td>REGION_NEAR / REGION_QUIET_MS</td><td>0.06 / 6000ms</td><td>同区外扩 / 区域收口</td></tr>
+    <tr><td>IDLE_COMMIT_MS / BURST_GAP_MS</td><td>90000 / 12000ms</td><td>长停顿综合 / burst 间隔</td></tr>
+    <tr><td>tap 行程下限 / 最小尺寸闸</td><td>3.5mm / 3mm</td><td>误触门 / 圈划下限</td></tr>
+    <tr><td>circle·underline / arrow 阈</td><td>0.22 / 0.45</td><td>模板命中</td></tr>
+    <tr><td>markup 门</td><td>tplScore≥0.45 且 spanRatio≥0.6</td><td>特征判 markup</td></tr>
+    <tr><td>SPATIAL_NEAR / NEAR_TIME_MS</td><td>0.12 / 30000ms</td><td>空间近阈 / 时间近阈</td></tr>
+    <tr><td>RECALL_K / 空间子句封顶</td><td>3 / 3</td><td>召回 / 叙事去膨胀</td></tr>
+    <tr><td>滑窗上下文 / MAX_TURNS</td><td>~3000 字 / 24</td><td>页中心前后窗 / 对话滑窗</td></tr>
+  </table>
+
+  <div class="col-w"><h3>附录 · 文件地图</h3><span class="skip">实现细节 · 可跳过</span></div>
+  <table class="wide">
+    <tr><th>层</th><th>文件</th><th>职责</th></tr>
+    <tr><td rowspan="3">采集</td><td><code>capture/ink.ts</code></td><td>指针接口、笔/手分流、死区、归一化</td></tr>
+    <tr><td><code>capture/session.ts</code></td><td>Mark/Session 累积、时间常量</td></tr>
+    <tr><td><code>capture/classify.ts</code></td><td>几何模板 + 特征型分类 + OCR 门</td></tr>
+    <tr><td rowspan="2">编排</td><td><code>main.ts</code></td><td>区域组装、收口时序、触发、reload 重建</td></tr>
+    <tr><td><code>core/pipeline.ts</code></td><td>captureMark 取证 + commitSessionDiscussion 提交</td></tr>
+    <tr><td rowspan="3">取证</td><td><code>evidence/target.ts</code></td><td>字符级 SurfaceIndex、几何命中、buildHmp</td></tr>
+    <tr><td><code>evidence/mark-graph.ts</code> · <code>recall.ts</code></td><td>三类边 + 四象限 · 账本空间召回</td></tr>
+    <tr><td><code>evidence/inference-view.ts</code> · <code>ocr.ts</code></td><td>确定性蒸馏 · 画布裁图</td></tr>
+    <tr><td rowspan="2">AI</td><td><code>chat/buffer · classify-client · stream-client · core/api.ts</code></td><td>薄缓存 / respond·fold / 流式主模型 / 传输信封</td></tr>
+    <tr><td><code>server/infer.ts · server/prompts.ts</code></td><td>AI 代理端点 · role 提示词注册表 · 模型路由网关</td></tr>
+    <tr><td rowspan="2">呈现</td><td><code>surface/reflow · reflow-provider · reader</code></td><td>重排 + 跨视图桥 + reader 手势</td></tr>
+    <tr><td><code>surface/anchor-layer · whisper · renderer</code></td><td>落位 · 旁注 · PDF 渲染</td></tr>
+    <tr><td>持久</td><td><code>local/store.ts</code> · <code>core/contracts.ts</code></td><td>四件账本 · 全局契约</td></tr>
+  </table>
+</section>
+
+<footer class="foot">
+  InkLoop 前端标注链路 · 单文件技术文档 · 纸感墨迹版 · 配图均为 SVG 手绘、随文交互
+</footer>
+
+<script>
+(function(){
+  var setO=function(id,o){var e=document.getElementById(id);if(e)e.setAttribute('opacity',o);};
+  var setR=function(id,a){var e=document.getElementById(id);if(!e)return;e.setAttribute('x',a[0]);e.setAttribute('y',a[1]);e.setAttribute('width',a[2]);e.setAttribute('height',a[3]);e.setAttribute('opacity','0.95');};
+
+  var RG=[
+    {s:[],r1:null,r2:null,fl:false,t:'落笔前',c:'点"下一步"走一遍区域怎么长、怎么收口。',g:''},
+    {s:['rg-s1'],r1:[82,52,52,54],r2:null,fl:false,t:'第一笔落下',c:'在新位置起一个区域，REGION_QUIET 6s 冷却开始计时。',g:''},
+    {s:['rg-s1','rg-s2','rg-s3'],r1:[80,50,150,70],r2:null,fl:false,t:'邻近的笔并进来',c:'笔中心在区域 bbox 外扩 0.06 内 → 并进同一 mark；每来一笔重置 6s 冷却。',g:'REGION_NEAR 命中'},
+    {s:['rg-s1','rg-s2','rg-s3','rg-s4'],r1:[80,50,150,70],r2:[286,160,62,68],fl:true,t:'笔落到远处',c:'新笔超出外扩框 → far-stroke：旧区域立刻收口成 1 个 mark，此处另起新区域。',g:'flush · far-stroke'},
+    {s:['rg-s1','rg-s2','rg-s3','rg-s4'],r1:null,r2:[286,160,62,68],fl:false,t:'新区域停笔 6s',c:'第二个区域附近无新笔满 REGION_QUIET_MS → quiet-6s 收口成第二个 mark。',g:'flush · quiet-6s'}
+  ];
+  var ri=0, allS=['rg-s1','rg-s2','rg-s3','rg-s4'];
+  function rgRender(){
+    var st=RG[ri];
+    allS.forEach(function(s){setO(s, st.s.indexOf(s)>=0?'1':'0');});
+    if(st.r1)setR('rg-reg1',st.r1); else setO('rg-reg1','0');
+    if(st.r2)setR('rg-reg2',st.r2); else setO('rg-reg2','0');
+    setO('rg-flush', st.fl?'1':'0');
+    var stp=document.getElementById('rg-step'); if(stp)stp.textContent='步 '+ri+' / 4';
+    var ti=document.getElementById('rg-title'); if(ti)ti.textContent=st.t;
+    var cp=document.getElementById('rg-cap'); if(cp)cp.textContent=st.c;
+    var tg=document.getElementById('rg-trigger'); if(tg)tg.textContent=st.g;
+    var pv=document.getElementById('rg-prev'), nx=document.getElementById('rg-next');
+    if(pv)pv.disabled=(ri===0); if(nx)nx.textContent=(ri>=RG.length-1)?'重来 ↻':'下一步 ▸';
+  }
+  var nb=document.getElementById('rg-next'), pb=document.getElementById('rg-prev');
+  if(nb)nb.onclick=function(){ri=(ri>=RG.length-1)?0:ri+1;rgRender();};
+  if(pb)pb.onclick=function(){if(ri>0){ri--;rgRender();}};
+  rgRender();
+
+  var LAD={
+    in:'一团笔进来：先 per-stroke 几何分类，再合并判特征——不在合并乱线上重判，否则圈+划会互相毁掉模板信号。',
+    tap:'误触门（物理屏幕尺度）：采样点≤3、或总行程<3.5mm、或又短(<140ms)又走不远 → tap_region 丢弃，不进推理。成本：零。',
+    tpl:'几何模板：取最强模板笔，要 tplScore≥0.45 且它占整 mark 长边≥0.6（自相对闸）。成本：零网络。',
+    markup:'判为 markup（圈/划/箭头）：纯几何定型，锚它所标的内容。成本：零网络、零识别调用。',
+    ocr:'OCR 门 ocrWorthy = 非太小 且（多笔 或 复杂度>1.6）。门保守、偏向送识别——"手写 vs 画"没有干净模板，别漏真手写。',
+    drawing:'否 → 留 drawing 直接放过（单笔近直线/太小）。成本：零，且避免把线条误转写成字。',
+    recog:'是 → recognizeInk 一次云端：判手写 vs 画、转写文字、给画一句粗描述（抽象画解读就在这步）。成本：一次调用。'
+  };
+  var lastL=null, lout=document.getElementById('ladder-out');
+  Array.prototype.forEach.call(document.querySelectorAll('#ladderDemo .lnode'),function(g){
+    g.style.cursor='pointer';
+    g.onclick=function(){
+      if(lastL){var r=lastL.querySelector('rect'); if(r)r.style.strokeWidth='';}
+      var rr=g.querySelector('rect'); if(rr)rr.style.strokeWidth='2.8';
+      lastL=g;
+      if(lout)lout.textContent=LAD[g.getAttribute('data-k')]||'';
+    };
+  });
+
+  var svg=document.querySelector('#quadDemo svg'), dot=document.getElementById('q-dot'), qout=document.getElementById('quad-out');
+  var X0=150,X1=530,Y0=44,Y1=384,CX=340,CY=214;
+  function quadAt(x,y){
+    var nearSpace=x<CX, nearTime=y>CY;
+    if(nearTime&&nearSpace)return['q-bl','一口气 one_action','，随即','关联'];
+    if(nearTime&&!nearSpace)return['q-br','扫读 sweep','，接着往下','关联'];
+    if(!nearTime&&nearSpace)return['q-tl','回访 revisit','','关联'];
+    return['q-tr','另起 separate','；另外','无关'];
+  }
+  function quadRender(x,y){
+    var dist=(x-X0)/(X1-X0)*0.24, gap=(Y1-y)/(Y1-Y0)*60;
+    var q=quadAt(x,y);
+    ['q-tl','q-tr','q-bl','q-br'].forEach(function(id){var e=document.getElementById(id);if(e)e.setAttribute('opacity', id===q[0]?'0.92':'0.32');});
+    var conn=q[2]; if(q[0]==='q-tl')conn='，'+Math.max(1,Math.round(gap))+' 秒后回到';
+    if(qout)qout.textContent='间隔 '+gap.toFixed(0)+'s · 距离 '+dist.toFixed(3)+' → '+q[1]+'：连接词「'+conn+'」（'+q[3]+'）';
+  }
+  if(svg&&dot){
+    var drag=false;
+    var loc=function(e){var p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;return p.matrixTransform(svg.getScreenCTM().inverse());};
+    var move=function(e){if(!drag)return;e.preventDefault();var l=loc(e.touches?e.touches[0]:e);
+      var x=Math.max(X0+8,Math.min(X1-8,l.x)), y=Math.max(Y0+8,Math.min(Y1-8,l.y));
+      dot.setAttribute('cx',x);dot.setAttribute('cy',y);quadRender(x,y);};
+    var down=function(e){drag=true;dot.style.cursor='grabbing';move(e);};
+    var up=function(){drag=false;dot.style.cursor='grab';};
+    dot.addEventListener('pointerdown',down); window.addEventListener('pointermove',move); window.addEventListener('pointerup',up);
+    dot.addEventListener('touchstart',down,{passive:false}); window.addEventListener('touchmove',move,{passive:false}); window.addEventListener('touchend',up);
+    quadRender(+dot.getAttribute('cx'),+dot.getAttribute('cy'));
+  }
+})();
+</script>
+</body>
+</html>
