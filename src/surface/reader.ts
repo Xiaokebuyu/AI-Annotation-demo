@@ -65,6 +65,7 @@ function nearestBlockByBbox(bb: NormBBox): BlockRef | null {
 
 const inkStrokes: { x: number; y: number }[][] = []; // 已落的笔迹（内容坐标）
 let live: { x: number; y: number }[] | null = null;
+const READER_DEADZONE_PX = 1.3; // 死区(内容 px)：丢相邻 < 此值的抖动点；对齐原版页 ink.ts，避免合并采点产生大量重复点
 
 // ── 渲染 ──
 /** 把一个重排文本块建成 DOM 节点（标题/段落/列表）。流式追加与整页渲染共用，保证两条路样式一致。 */
@@ -399,7 +400,8 @@ function makeEvent(kind: EventType, pts: StrokePoint[]): AnnotationEvent {
 }
 
 function onPenUp(raw: { x: number; y: number }[]): void {
-  if (raw.length < 2) return;
+  // 保留单点笔（中文的点/顿快写只落一个点）：孤立点按仍由下游 tap 过滤滤掉，多笔手写里的点靠 keepShortStrokes 存活。
+  if (!raw.length) return;
   const hit = hitBlock(raw);
   if (!hit) return; // 没画在任何段上 → 不入
   if (!settings.gesture.enabled) return;
@@ -435,8 +437,16 @@ export function initReader(readerEl: HTMLElement): void {
   });
   el.addEventListener('pointermove', (e) => {
     if (!live) return;
-    live.push(contentPoint(e));
-    drawStroke(live.slice(-2));
+    // 无损采点：优先取合并事件（快写时一次 move 携多个采样点）——对齐原版页 ink.ts，治中文快写笔点稀疏/毛糙。
+    const coalesced = e.getCoalescedEvents ? (e.getCoalescedEvents() as PointerEvent[]) : [];
+    const list = coalesced.length ? coalesced : [e];
+    for (const ce of list) {
+      const p = contentPoint(ce);
+      const last = live[live.length - 1];
+      if (last && Math.hypot(p.x - last.x, p.y - last.y) < READER_DEADZONE_PX) continue; // 死区：丢 sub-px 抖动
+      live.push(p);
+      drawStroke(live.slice(-2));
+    }
   });
   const finish = (e: PointerEvent) => {
     if (!live) return;
