@@ -17,7 +17,7 @@ import type { AnnotationEvent, EventType, NormBBox } from './core/contracts';
 import { SCHEMA_VERSION } from './core/contracts';
 import { initRenderer, loadFile, reopenBook, gotoPage, setZoom, hasDocument } from './surface/renderer';
 import { renderChatSurface } from './surface/chat-surface';
-import { initInk } from './capture/ink';
+import { initInk, redrawInk } from './capture/ink';
 import { initWhisper } from './surface/whisper';
 import { initReader } from './surface/reader';
 import { initAnchorLayer } from './surface/anchor-layer';
@@ -240,6 +240,10 @@ bus.on('reader:gesture', (p) => {
   const arr = state.strokesByPage.get(event.page_id) ?? [];
   arr.push(stroke);
   state.strokesByPage.set(event.page_id, arr);
+  // 关键：把笔同步重绘到 #ink-layer。识别图(grabLayers)是从 #ink-layer 裁的，而重排面的笔只画在自己的
+  // #reader-ink 画布上 → 不重绘 #ink-layer 就会裁到**空白**、识别恒返 none、手写永远采集不到。
+  // #ink-layer 在重排模式下 display:none 但 canvas 位图照常可画（已验证）。redrawInk 读 strokesByPage[当前页]。
+  redrawInk();
   // 注：reader 的 trace_id 是逐笔的（reader.makeEvent 自带），不共享 sessionTrace——mark 身份是 repr.event_id，无下游影响。
   ingestStroke(event, stroke); // 与原版页同一前段 → 多笔组装、quiet-6s 收口、idle 综合全接通
 });
