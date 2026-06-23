@@ -77,7 +77,7 @@ function nearDiag(bb: NormBBox): Record<string, number> {
 }
 
 /** 区域收口的原因（进 dev 通道，定位"连续书写被切到新区"）。 */
-type FlushReason = 'far-stroke' | 'quiet-6s' | 'manual';
+type FlushReason = 'far-stroke' | 'quiet-6s' | 'manual' | 'view-switch';
 
 /** 收口当前区域 → 解析成一个 mark（异步识别在 resolveRegion 内）。reason/diag 镜像到遥测。 */
 function flushRegion(reason: FlushReason = 'manual', diag: Record<string, number> | null = null): void {
@@ -88,6 +88,33 @@ function flushRegion(reason: FlushReason = 'manual', diag: Record<string, number
   regEvents = []; regStrokes = []; regBbox = null; regFirstAt = 0; sessionTrace = null;
   bus.emit('region:clear'); // dev 可视：区域收口 → 清叠层
   if (events.length) void resolveRegion(events, strokes, { reason, heldMs, regBbox: regAt, ...(diag ?? {}) });
+}
+
+/**
+ * 进笔前段（**原版页与重排面共用**）：把一笔并进当前组装区域（空间连贯：挨着就并、走远先收口另起），
+ * 重置 quiet-6s 收口定时器与 idle 综合定时器。两条进笔路径（initInk 回调 / reader:gesture）都走这里，
+ * 重排面据此获得与原版页一致的「区域组装 + far-stroke + quiet-6s + idle」全套（此前重排面逐笔直冲后端、全跳过）。
+ * 传入的 evt.geometry.bbox 须为该笔的紧 bbox（归一化）——nearRegion/unionBb 按笔粒度判近邻。
+ */
+function ingestStroke(evt: AnnotationEvent, stroke: Stroke): void {
+  // 空间连贯：挨着当前区域就并进去（重置冷却）；落到远处 → 旧区先收口、此处另起一个区域。
+  if (regBbox && !nearRegion(evt.geometry.bbox)) flushRegion('far-stroke', nearDiag(evt.geometry.bbox));
+  regEvents.push(evt);
+  regStrokes.push(stroke); // 与 regEvents 对齐（落账本时取构成笔）
+  regBbox = regBbox ? unionBb(regBbox, evt.geometry.bbox) : evt.geometry.bbox;
+  if (!regFirstAt) regFirstAt = performance.now();
+  window.clearTimeout(regTimer);
+  // 收口只靠两个真实信号：走到别处(far-stroke) 或 停笔满 REGION_QUIET。不设书写时长上限——慢写整段保持静默。
+  regTimer = window.setTimeout(() => flushRegion('quiet-6s'), REGION_QUIET_MS);
+  bus.emit('region:update', { bbox: regBbox, near: REGION_NEAR }); // dev 可视：实时画当前组装区域
+
+  // 长停顿(~1–2min)无新笔 → 对整段 session 综合回复（连续标注期间界面静默）
+  if (settings.gesture.enabled) {
+    const bookId = state.documentId ?? 'book';
+    const idleMs = (settings.gesture.idleSeconds ?? IDLE_COMMIT_MS / 1000) * 1000;
+    window.clearTimeout(idleTimer);
+    idleTimer = window.setTimeout(() => { void commitSession(bookId, 'idle'); }, idleMs);
+  }
 }
 
 /** 翻页/缩放重渲：丢在途的笔（属旧页），但保留 session/idle（会话跨页、翻页不是边界事件）。 */
@@ -195,42 +222,26 @@ async function commitSession(bookId: string, reason: 'idle' | 'handwriting', tri
 }
 
 initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
-  if (!sessionTrace) sessionTrace = shortId('trc');
+  if (!sessionTrace) sessionTrace = shortId('trc'); // 一段区域的笔共享 trace（recordEvent 要打点/计延迟，原版页专属）
   const evt = recordEvent(stroke, sessionTrace, pointerType, penUpAt);
   if (!evt) return;
-
-  // 空间连贯：挨着当前区域就并进去（重置冷却）；落到远处 → 旧区先收口、此处另起一个区域。
-  if (regBbox && !nearRegion(evt.geometry.bbox)) flushRegion('far-stroke', nearDiag(evt.geometry.bbox));
-  regEvents.push(evt);
-  regStrokes.push(stroke); // 与 regEvents 对齐（落账本时取构成笔）
-  regBbox = regBbox ? unionBb(regBbox, evt.geometry.bbox) : evt.geometry.bbox;
-  if (!regFirstAt) regFirstAt = performance.now();
-  window.clearTimeout(regTimer);
-  // 收口只靠两个真实信号：走到别处(far-stroke) 或 停笔满 REGION_QUIET。不设书写时长上限——慢写整段保持静默。
-  regTimer = window.setTimeout(() => flushRegion('quiet-6s'), REGION_QUIET_MS);
-  bus.emit('region:update', { bbox: regBbox, near: REGION_NEAR }); // dev 可视：实时画当前组装区域
-
-  // 长停顿(~1–2min)无新笔 → 对整段 session 综合回复（连续标注期间界面静默）
-  if (settings.gesture.enabled) {
-    const bookId = state.documentId ?? 'book';
-    const idleMs = (settings.gesture.idleSeconds ?? IDLE_COMMIT_MS / 1000) * 1000;
-    window.clearTimeout(idleTimer);
-    idleTimer = window.setTimeout(() => { void commitSession(bookId, 'idle'); }, idleMs);
-  }
+  ingestStroke(evt, stroke); // 进共用组装前段：far-stroke / quiet-6s / idle
 });
 
 // 设置变化时取消在途计时（避免旧设置下的延迟触发）
 bus.on('settings:changed', cancelTimers);
 
-// 重排面手势 = 正常 page-ledger mark：reader 把命中块的 PDF-norm 事件发来，走与原版页同一条
-// resolveRegion（落账本 + 跨视图渲染 + 持久 + 同享 session/idle 综合）。坐标已在 reader 侧映回原页。
+// 重排面手势 = 正常 page-ledger mark：reader 把命中块的 PDF-norm 事件发来，走与原版页**同一条进笔前段**
+// （ingestStroke：区域组装 + far-stroke + quiet-6s + idle 综合），不再逐笔直冲后端 resolveRegion。
+// 坐标已在 reader 侧映回原页归一化空间；evt.geometry.bbox 为该笔紧 bbox（reader.makeEvent 已改）。
 bus.on('reader:gesture', (p) => {
   const { event, stroke } = p as { event: AnnotationEvent; stroke: Stroke };
   // 笔迹即时进 PDF 页 strokesByPage（原版页 redraw 用它）→ 切回原版立刻可见；reload 由 mark 账本重建。
   const arr = state.strokesByPage.get(event.page_id) ?? [];
   arr.push(stroke);
   state.strokesByPage.set(event.page_id, arr);
-  void resolveRegion([event], [stroke], { reason: 'reader' }); // 内含 strokeMarkIds.set → 擦/撤可定位
+  // 注：reader 的 trace_id 是逐笔的（reader.makeEvent 自带），不共享 sessionTrace——mark 身份是 repr.event_id，无下游影响。
+  ingestStroke(event, stroke); // 与原版页同一前段 → 多笔组装、quiet-6s 收口、idle 综合全接通
 });
 
 // page_id 形如 pg_{hash8}_{idx} → 取末段为页号
@@ -482,6 +493,9 @@ function applyViewMode(): void {
   btn.classList.toggle('active', isReader);
 }
 $('view-toggle').addEventListener('click', () => {
+  // 切面前先收口在途区域：此刻 pageId/surfaceIndex 仍是当前面，能正确落成 mark；否则 regBbox 跨面存活，
+  // 切过去第一笔会与旧面在途区域误并（跨面污染）。空区域时 flushRegion 有 events.length 守卫、是 no-op。
+  flushRegion('view-switch');
   settings.viewMode = settings.viewMode === 'reader' ? 'page' : 'reader';
   applyViewMode();
   bus.emit('view:changed');

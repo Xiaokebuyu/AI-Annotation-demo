@@ -383,11 +383,13 @@ function hitBlock(pts: { x: number; y: number }[]): BlockRef | null {
   return null;
 }
 
-function makeEvent(source: NormBBox, kind: EventType, pts: StrokePoint[]): AnnotationEvent {
+// geometry.bbox 用该笔的**紧 bbox**（PDF 归一化），与原版页一致——main.ingestStroke 的 nearRegion/unionBb 要按
+// 笔粒度判近邻才能正确组装（旧版传整块 bbox 会让组装退化到整块粒度）。pts 已由 onPenUp 映进命中块的 PDF 坐标。
+function makeEvent(kind: EventType, pts: StrokePoint[]): AnnotationEvent {
   return {
     event_id: shortId('evt'), trace_id: shortId('trc'),
     document_id: state.documentId ?? '', page_id: state.pageId ?? '',
-    event_type: kind, geometry: { bbox: source }, stroke_points: pts,
+    event_type: kind, geometry: { bbox: bboxOf(pts) }, stroke_points: pts,
     text_note: null, created_at: new Date().toISOString(),
     device_id: DEVICE_ID, session_id: SESSION_ID, pointer_type: 'reader', version: SCHEMA_VERSION,
   };
@@ -407,8 +409,8 @@ function onPenUp(raw: { x: number; y: number }[]): void {
     t: i, pressure: 0.5,
   }));
   const scored = classifyScored(pts, bboxOf(pts));
-  // 当正常 page-ledger mark：发 bus 给 main 走 resolveRegion（落账本 + 跨视图 + 持久 + 同享 session/idle）
-  bus.emit('reader:gesture', { event: makeEvent(ref.source, scored.type, pts), stroke: { tool: 'pen', points: pts } });
+  // 当正常 page-ledger mark：发 bus 给 main 走 ingestStroke（组装 + 跨视图 + 持久 + 同享 session/idle）
+  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts), stroke: { tool: 'pen', points: pts } });
 }
 
 export function initReader(readerEl: HTMLElement): void {
