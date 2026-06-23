@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 默认禁明文：生产代理走 https。 -->
+    <base-config cleartextTrafficPermitted="false" />
+    <!-- 内网代理(10.4.36.30:3000，npm run serve)走 http 明文。IP 变了改这里。 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">10.4.36.30</domain>
+    </domain-config>
+</network-security-config>

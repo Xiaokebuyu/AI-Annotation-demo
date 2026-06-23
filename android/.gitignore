@@ -1,0 +1,13 @@
+# Android 构建产物 / 本地配置
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+
+# 由 scripts/sync-android-assets.mjs 生成（dist + 端侧模型），不入库
+app/src/main/assets/
+
+# Phase 2 第三方库（徐智强 的 PaddleOCR AAR 等）
+app/libs/
