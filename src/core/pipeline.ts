@@ -15,7 +15,7 @@ import { trace } from './trace';
 import { bus, settings, state, type Stroke } from '../app/state';
 import { grabLayers, grabRegion } from '../evidence/ocr';
 import { ondeviceRecognizeInk, ondeviceOcrRegion } from '../evidence/ondevice';
-import { classifyIntentLocal } from '../evidence/intent-rules';
+import { classifyIntentLocal, classifyIntentExplained } from '../evidence/intent-rules';
 import { pageText, blocksToText, linesInBand, pointInPolygon } from '../evidence/focus';
 import { extractPageBlocks } from '../surface/renderer';
 import { pushInspect } from './inspect';
@@ -220,7 +220,7 @@ function mirrorRecognize(o: {
   feature_in: string; feature_out: string; ocrWorthy: boolean; hasInk: boolean;
   interpretCalled: boolean; gate: string;
   feat?: StrokeFeature;
-  kind?: string; reading?: string; description?: string;
+  kind?: string; reading?: string; description?: string; source?: string;
 }): void {
   devEmit('recognize', () => {
     // 几何判别 raw（"先量再改"：定 markup/underline 闸阈值用）——markup 把英文长横判 underline 吃掉的根因，
@@ -239,7 +239,7 @@ function mirrorRecognize(o: {
         stroke_count: r.strokeCount, complexity: +r.complexity.toFixed(2),
       } } : {}),
       // VLM 判定值字段名用 interp_kind，**不要叫 kind**——会和 envelope 的事件 kind 撞名。
-      ...(o.interpretCalled ? { interp_kind: o.kind ?? '', reading: o.reading ?? '', description: o.description ?? '' } : {}),
+      ...(o.interpretCalled ? { interp_kind: o.kind ?? '', reading: o.reading ?? '', description: o.description ?? '', source: o.source ?? '' } : {}),
     };
   });
 }
@@ -316,7 +316,9 @@ async function recognizeInk(
     kind: String(local.kind || 'none'), reading: String(local.reading || '').trim(),
     description: String(local.description || '').trim(), source: 'local_board',
   };
-  // dev：选了「端侧手写模型」→ 本地 OpenVINO 英文手写（白底笔迹图当一行）。失败/端点不在 → 落云端。
+  // dev：选了「端侧手写模型」→ 本地英文手写端点。统一契约：端点**自己**判"是否可信手写"，可信才回 reading、否则回空。
+  //   "怎么判"与具体模型强耦合（OpenVINO 英文 GNHK 的置信度+长度双门），封装在 server/hwr-dev.mjs 适配层，**不漏进这里**。
+  //   故此处与对待任何端侧识别一致：有 reading 就用、空就往下落云 /api/interpret（VLM 判 kind+转写+画描述）。换引擎时只改适配层。
   if (settings.interpretModel === LOCAL_HWR) {
     try {
       const j = await postJson<{ reading?: string }>('/api/interpret-hwr', { image: inkData });
@@ -437,7 +439,7 @@ export async function captureMark(
   mirrorRecognize({
     event_id: event.event_id, page_id: event.page_id, region: event.geometry.bbox,
     feature_in: feature.type, feature_out: resolved.type, ocrWorthy: !!feature.raw.ocrWorthy, hasInk: !!layers.ink,
-    interpretCalled: !!recog, gate: recogGate, feat: feature, kind: recog?.kind, reading: recog?.reading, description: recog?.description,
+    interpretCalled: !!recog, gate: recogGate, feat: feature, kind: recog?.kind, reading: recog?.reading, description: recog?.description, source: recog?.source,
   });
   const action = markActionOf(resolved.type, event.event_type, score);
   // markup 锚它所标的内容；freeform（手写/画）属 self_content——它本身就是内容，不锚到 bbox 碰巧蹭到的正文
@@ -613,8 +615,8 @@ export async function commitSessionDiscussion(
     const useLocalRules = settings.classifyModel === LOCAL_RULES;
     let decision: { respond: boolean; reason: string };
     if (useLocalRules) {
-      const intent = classifyIntentLocal('handwriting', view.question || view.marked || '');
-      decision = { respond: intentToRespond(intent), reason: `端侧规则 · intent=${intent}` };
+      const { intent, hit } = classifyIntentExplained('handwriting', view.question || view.marked || '');
+      decision = { respond: intentToRespond(intent), reason: `端侧规则 · ${intent}（${hit}）` };
     } else {
       decision = await classifyContext(view, bookMessages(bookId));
     }
@@ -774,7 +776,7 @@ export async function commitSessionDiscussion(
         { k: 'view_narrative', v: view.narrative || '—' },
         { k: 'marked', v: view.marked || '—' },
         { k: '对话历史', v: `${classifyConvoLen} 条` },
-        { k: '模型', v: settings.inferModel },
+        { k: '判定来源', v: settings.classifyModel === LOCAL_RULES ? '端侧规则 intent-rules（纯规则·无模型）' : `云端 ${settings.classifyModel || settings.inferModel}` },
       ],
       output: [
         { k: '判定', v: classifyDiag.respond ? '回应 respond ✓' : '折叠 fold ✗' },

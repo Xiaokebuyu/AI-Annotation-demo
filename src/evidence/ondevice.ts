@@ -3,7 +3,8 @@
  *
  * 安卓原生壳通过 androidx.webkit `WebViewCompat.addWebMessageListener` 注入一个全局通道对象
  * （约定名 `InkLoopOcr`）：`postMessage(string)` 发请求、`message` 事件回应答。本模块在其上封装
- * 一层带 id 关联 + 超时的小 RPC，暴露 recognizeInk / ocrRegion / classifyIntent / capabilities。
+ * 一层带 id 关联 + 超时的小 RPC，暴露 recognizeInk / ocrRegion / capabilities。
+ * （intent 判定在前端 TS intent-rules.ts 直接做，不走桥，故无 classifyIntent 包装。）
  *
  * Web / dev 环境没有该注入对象 → available()=false → 每个方法返回 null，各调用方据此**自动降级到云端**，
  * 行为与现状完全一致。契约即接口：Android 侧 `OcrBridge` 必须按下面的 REQ/RES 形状应答。
@@ -74,11 +75,6 @@ export function ondeviceRecognizeInk(
 /** Seam B：图像区域 OCR（圈/划命中图区或无文字对象时的兜底）。 */
 export function ondeviceOcrRegion(imagePng: string): Promise<{ text: string } | null> {
   return rpc('ocrRegion', { imagePng });
-}
-
-/** Seam C（A/B 影子）：POC 规则版 IntentClassifier，(action, text) → 6 标签之一。 */
-export function ondeviceClassifyIntent(action: string, text: string): Promise<{ intent: string } | null> {
-  return rpc('classifyIntent', { action, text });
 }
 
 /** 能力探测：gms=板上有无 Google Play 服务（决定 ML Kit Digital Ink 手写是否可用；无 gms 则手写留云）。
