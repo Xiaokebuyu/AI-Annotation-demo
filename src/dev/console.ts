@@ -21,7 +21,7 @@
 import { bus, state, settings, saveSettings, type Placement } from '../app/state';
 import { resetBook } from '../chat/buffer';
 import { listBooks, getBookAiTurns, getFoldedMarks, createWorkspace, listWorkspaces, getWorkspace, upsertFeishuWorkspace, createMeeting, listMeetings, listAllMeetings, getMeeting, updateMeeting, startSimMeeting } from '../local/store';
-import { reopenBook, renderBlankSurface } from '../surface/renderer';
+import { reopenBook, renderBlankSurface, openPdfFromUrl } from '../surface/renderer';
 import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting } from '../core/store-format';
 import type { HMP, PipelineStage, PipelineStageIO, SurfaceObject } from '../core/contracts';
 import { downloadTrace, traceCount } from '../core/trace';
@@ -417,6 +417,9 @@ function injectStyle(): void {
   .mtg-side-main { display: flex; flex-direction: column; min-width: 0; }
   .mtg-side-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mtg-side-time { font-size: 11px; color: #b3b3bd; margin-top: 1px; }
+  button.mtg-side-card { width: 100%; text-align: left; font-family: var(--sans); cursor: pointer; }
+  .mtg-side-blank { border-style: dashed !important; }
+  .mtg-side-card.loading { opacity: .55; pointer-events: none; }
   `;
   document.head.appendChild(s);
 }
@@ -531,6 +534,19 @@ const MTG_STATUS: Record<MeetingStatus, { t: string; c: string; bg: string }> = 
 
 // 独立飞书后端（feishu-service）。dev 默认 localhost:4321；服务不在就静默退回纯本地。
 const FEISHU_BASE = ((import.meta.env.VITE_FEISHU_BASE_URL as string | undefined) ?? 'http://localhost:4321').replace(/\/+$/, '');
+// 文档转换公共基础设施（convert-service）。任意可读文件 URL → 可标注 PDF。
+const CONVERT_BASE = ((import.meta.env.VITE_CONVERT_BASE_URL as string | undefined) ?? 'http://localhost:4330').replace(/\/+$/, '');
+/** 该群文件能不能直接转成可标注 PDF（v1 只 HTML）。 */
+const isConvertible = (f: FeishuMsg): boolean => f.msg_type === 'file' && /\.html?$/i.test(f.file_name || '');
+/** 群文件的飞书下载 URL（im:resource）。 */
+function feishuFileUrl(f: FeishuMsg): string {
+  const img = f.msg_type === 'image';
+  const key = img ? f.image_key : f.file_key;
+  const name = img ? '［图片］' : (f.file_name || '文件');
+  return `${FEISHU_BASE}/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
+}
+/** HTML 群文件 → convert-service 转出的可标注 PDF 的 URL。 */
+const convertedPdfUrl = (f: FeishuMsg): string => `${CONVERT_BASE}/convert/to-pdf?url=${encodeURIComponent(feishuFileUrl(f))}`;
 async function feishuGet<T>(path: string): Promise<T> {
   const r = await fetch(FEISHU_BASE + path);
   if (!r.ok) throw new Error('feishu-service ' + r.status);
@@ -655,15 +671,32 @@ async function exitMeeting(): Promise<void> {
   go('meeting');
 }
 
-/** 一张群资料预览卡（侧栏用，点开经 im:resource 下载查看）。 */
+/** 一张群资料预览卡。HTML→点开转成可标注 PDF 进画板读写；其它→新标签下载查看。 */
 function mtgSideCard(f: FeishuMsg): string {
-  const img = f.msg_type === 'image';
-  const key = img ? f.image_key : f.file_key;
-  const name = img ? '［图片］' : (f.file_name || '文件');
-  const url = `${FEISHU_BASE}/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
-  return `<a class="mtg-side-card" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(name)}">`
+  const name = f.msg_type === 'image' ? '［图片］' : (f.file_name || '文件');
+  const time = esc(fmtMs(f.create_time));
+  if (isConvertible(f)) {
+    const docId = `mtgdoc_${mtgMode?.meetingId ?? 'x'}_${f.message_id}`;
+    return `<button class="mtg-side-card" data-doc="${esc(docId)}" data-name="${esc(name)}" data-conv="${esc(convertedPdfUrl(f))}" title="打开批注：${esc(name)}">`
+      + `<span class="mtg-side-thumb">${icon('file')}</span>`
+      + `<span class="mtg-side-main"><span class="mtg-side-name">${esc(name)}</span><span class="mtg-side-time">${time} · 可批注</span></span></button>`;
+  }
+  return `<a class="mtg-side-card" href="${esc(feishuFileUrl(f))}" target="_blank" rel="noopener" title="${esc(name)}">`
     + `<span class="mtg-side-thumb">${icon('file')}</span>`
-    + `<span class="mtg-side-main"><span class="mtg-side-name">${esc(name)}</span><span class="mtg-side-time">${esc(fmtMs(f.create_time))}</span></span></a>`;
+    + `<span class="mtg-side-main"><span class="mtg-side-name">${esc(name)}</span><span class="mtg-side-time">${time}</span></span></a>`;
+}
+
+/** 点会中侧栏 HTML 资料：转成 PDF 进阅读器读写。docId 稳定 → 落库免重转、标注归它。 */
+async function openMtgMaterial(btn: HTMLElement): Promise<void> {
+  const doc = btn.dataset.doc, conv = btn.dataset.conv, name = btn.dataset.name || '资料';
+  if (!doc || !conv) return;
+  const nameEl = btn.querySelector('.mtg-side-name');
+  const orig = nameEl?.textContent ?? '';
+  if (nameEl) nameEl.textContent = '转换中…';
+  btn.classList.add('loading');
+  try { await openPdfFromUrl(doc, name, conv); }
+  catch (e) { window.alert('转换/打开失败：' + ((e as Error)?.message || e)); }
+  finally { if (nameEl) nameEl.textContent = orig; btn.classList.remove('loading'); }
 }
 
 /** 挂会中右侧资料栏（半掩·hover 展开）+ 常驻「退出会议」。资料 = 从群筛出的近期文件。 */
@@ -687,7 +720,11 @@ async function mountMtgSide(): Promise<void> {
       files = (res.messages || []).filter((x) => (x.msg_type === 'file' && x.file_key) || (x.msg_type === 'image' && x.image_key));
     } catch { /* feishu-service 不在 → 空 */ }
   }
-  body.innerHTML = files.length ? files.map(mtgSideCard).join('') : `<p class="mtg-side-empty">群里近期没有文件。</p>`;
+  // 顶上「空白笔记页」回到画板；下面是群资料（HTML 可点开批注）
+  const blank = `<button class="mtg-side-card mtg-side-blank" id="mtg-side-blank" title="回到空白手写页"><span class="mtg-side-thumb">${icon('pen')}</span><span class="mtg-side-main"><span class="mtg-side-name">空白笔记页</span><span class="mtg-side-time">画板</span></span></button>`;
+  body.innerHTML = blank + (files.length ? files.map(mtgSideCard).join('') : `<p class="mtg-side-empty">群里近期没有文件。</p>`);
+  body.querySelector('#mtg-side-blank')?.addEventListener('click', () => { if (mtgMode) renderBlankSurface('mtgboard_' + mtgMode.meetingId, mtgMode.title); });
+  body.querySelectorAll<HTMLElement>('.mtg-side-card[data-conv]').forEach((b) => b.addEventListener('click', () => { void openMtgMaterial(b); }));
 }
 
 /** 换页时联动会中浮层：只在阅读页 + 会中模式显示资料栏/退出钮。 */

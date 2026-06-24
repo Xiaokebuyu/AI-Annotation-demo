@@ -96,9 +96,9 @@ async function extractImageRegions(page: PDFPageProxy, vp: PageViewport): Promis
  *  · 阅读位置：openDoc 后从 last_read_page 恢复（新书=0）。
  * 注意 getDocument({data}) 可能 detach buf，故 Blob 拷贝在调用前由 loadFile 先建好。
  */
-async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob | null): Promise<void> {
+async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob | null, docId?: string): Promise<void> {
   state.fileHash = await sha256Hex(buf);
-  state.documentId = 'doc_' + state.fileHash.slice(0, 12); // hash 派生，重复导入 id 稳定
+  state.documentId = docId ?? ('doc_' + state.fileHash.slice(0, 12)); // 默认 hash 派生；docId 显式覆盖（会议资料按稳定 id 归档，转换非确定性也不漂）
   state.fileName = filename;
   state.surfaceType = 'pdf';
   // cMapUrl/standardFontDataUrl：救老中文 PDF —— 非嵌入 CID 字体 + 预定义 CJK CMap（如 GBK-EUC-H）
@@ -149,8 +149,21 @@ export async function reopenBook(documentId: string, filename: string): Promise<
   const blob = await loadPdfBlob(documentId);
   if (!blob) return false;
   const buf = await blob.arrayBuffer();
-  await loadIntoState(buf, filename, null);
+  await loadIntoState(buf, filename, null, documentId); // 按存档 id 重开（不靠 hash 复算，转换文档也稳）
   return true;
+}
+
+/**
+ * 打开一个「PDF 字节 URL」进阅读器（会议资料经 convert-service 转成的 PDF 走这条）。
+ * documentId 显式稳定（按资料派生）→ 这份 PDF 落库 + 标注归它、重开免重转。已存库则直接重开。
+ */
+export async function openPdfFromUrl(documentId: string, filename: string, pdfUrl: string): Promise<void> {
+  if (await reopenBook(documentId, filename)) return; // 之前转过 → 库里有，直接重开（免重转）
+  const r = await fetch(pdfUrl);
+  if (!r.ok) throw new Error('open pdf ' + r.status);
+  const buf = await r.arrayBuffer();
+  const blob = new Blob([buf.slice(0)], { type: 'application/pdf' }); // 拷贝：getDocument 可能 detach
+  await loadIntoState(buf, filename, blob, documentId);
 }
 
 /**
