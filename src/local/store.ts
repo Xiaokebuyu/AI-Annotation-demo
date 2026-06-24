@@ -8,7 +8,7 @@
  */
 import type { NormBBox, OverlayState, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { PersistedAiTurn, PersistedDoc, PersistedMark, PersistedPage, PersistedPdfBlob } from '../core/store-format';
+import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
 import { DB_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
 
@@ -17,6 +17,8 @@ const STORE = 'docs';
 const PDF_STORE = 'pdf_blobs';   // PDF 原始字节（重开免重导）
 const MARKS = 'marks';           // 页账本条目
 const TURNS = 'ai_turns';        // 书日志条目
+const WORKSPACES = 'workspaces'; // 会议工作区（≈群聊）
+const MEETINGS = 'meetings';     // 会议（属某 workspace）
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 function openDB(): Promise<IDBDatabase | null> {
@@ -30,9 +32,12 @@ function openDB(): Promise<IDBDatabase | null> {
         if (!db.objectStoreNames.contains(PDF_STORE)) db.createObjectStore(PDF_STORE, { keyPath: 'document_id' });
         if (!db.objectStoreNames.contains(MARKS)) db.createObjectStore(MARKS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
         if (!db.objectStoreNames.contains(TURNS)) db.createObjectStore(TURNS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
+        if (!db.objectStoreNames.contains(WORKSPACES)) db.createObjectStore(WORKSPACES, { keyPath: 'workspace_id' });
+        if (!db.objectStoreNames.contains(MEETINGS)) db.createObjectStore(MEETINGS, { keyPath: 'meeting_id' }).createIndex('by_ws', 'workspace_id', { unique: false });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
+      req.onblocked = () => console.warn('[store] IndexedDB 升级被阻塞——请关掉其它 InkLoop 标签页后重载');
     } catch {
       resolve(null);
     }
@@ -293,4 +298,113 @@ export function putImageExplain(i: number, bbox: NormBBox, explanation: string):
   const ex = p.images.find((im) => overlap(im.bbox, bbox) > 0.8);
   if (ex) ex.explanation = explanation; else p.images.push({ bbox, explanation });
   scheduleSave();
+}
+
+// ── 会议工作区（v4）：workspaces + meetings（CRUD，非 append-only，就地 put）──────
+
+function putInto(storeName: string, rec: object): Promise<void> {
+  return openDB().then((db) => {
+    if (!db) return;
+    return new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).put(rec);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch { resolve(); }
+    });
+  });
+}
+function getAllFrom<T>(storeName: string): Promise<T[]> {
+  return openDB().then((db) => {
+    if (!db) return [] as T[];
+    return new Promise<T[]>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+        r.onsuccess = () => resolve((r.result as T[]) ?? []);
+        r.onerror = () => resolve([] as T[]);
+      } catch { resolve([] as T[]); }
+    });
+  });
+}
+function getOneFrom<T>(storeName: string, key: string): Promise<T | null> {
+  return openDB().then((db) => {
+    if (!db) return null;
+    return new Promise<T | null>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).get(key);
+        r.onsuccess = () => resolve((r.result as T) ?? null);
+        r.onerror = () => resolve(null);
+      } catch { resolve(null); }
+    });
+  });
+}
+function byIndexFrom<T>(storeName: string, index: string, key: string): Promise<T[]> {
+  return openDB().then((db) => {
+    if (!db) return [] as T[];
+    return new Promise<T[]>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).index(index).getAll(IDBKeyRange.only(key));
+        r.onsuccess = () => resolve((r.result as T[]) ?? []);
+        r.onerror = () => resolve([] as T[]);
+      } catch { resolve([] as T[]); }
+    });
+  });
+}
+
+/** 新建工作区（群聊）。 */
+export async function createWorkspace(name: string): Promise<PersistedWorkspace> {
+  const now = new Date().toISOString();
+  const ws: PersistedWorkspace = { workspace_id: shortId('ws'), name: name.trim() || '未命名群聊', source: 'manual', created_at: now, updated_at: now };
+  await putInto(WORKSPACES, ws);
+  return ws;
+}
+/** 列出工作区（最近更新在前）。 */
+export function listWorkspaces(): Promise<PersistedWorkspace[]> {
+  return getAllFrom<PersistedWorkspace>(WORKSPACES).then((a) => a.sort((x, y) => (y.updated_at || '').localeCompare(x.updated_at || '')));
+}
+export function getWorkspace(id: string): Promise<PersistedWorkspace | null> {
+  return getOneFrom<PersistedWorkspace>(WORKSPACES, id);
+}
+/** 幂等 upsert 一个飞书来源工作区（id 由 chat_id 派生·稳定）。名字没变就不动 updated_at，避免列表抖动。 */
+export async function upsertFeishuWorkspace(chatId: string, name: string): Promise<PersistedWorkspace> {
+  const id = `ws_fs_${chatId}`;
+  const cur = await getOneFrom<PersistedWorkspace>(WORKSPACES, id);
+  if (cur && cur.name === name && cur.source === 'feishu') return cur;
+  const now = new Date().toISOString();
+  const ws: PersistedWorkspace = { workspace_id: id, name: name.trim() || '未命名群聊', source: 'feishu', feishu_chat_id: chatId, created_at: cur?.created_at ?? now, updated_at: now };
+  await putInto(WORKSPACES, ws);
+  return ws;
+}
+
+/** 新建会议（属某工作区）。status 据计划时间派生：过去=已结束，否则=待开始。 */
+export async function createMeeting(workspaceId: string, input: { title: string; scheduled_at: string }): Promise<PersistedMeeting> {
+  const now = new Date().toISOString();
+  const t = new Date(input.scheduled_at).getTime();
+  const status: MeetingStatus = Number.isFinite(t) && t < Date.now() ? 'ended' : 'upcoming';
+  const mtg: PersistedMeeting = {
+    meeting_id: shortId('mtg'), workspace_id: workspaceId, title: input.title.trim() || '未命名会议',
+    scheduled_at: input.scheduled_at, status, material_doc_ids: [], created_at: now, updated_at: now,
+  };
+  await putInto(MEETINGS, mtg);
+  return mtg;
+}
+/** 某工作区的会议（计划时间倒序）。 */
+export function listMeetings(workspaceId: string): Promise<PersistedMeeting[]> {
+  return byIndexFrom<PersistedMeeting>(MEETINGS, 'by_ws', workspaceId).then((a) => a.sort((x, y) => (y.scheduled_at || '').localeCompare(x.scheduled_at || '')));
+}
+/** 所有会议（日程聚合用）。 */
+export function listAllMeetings(): Promise<PersistedMeeting[]> {
+  return getAllFrom<PersistedMeeting>(MEETINGS);
+}
+export function getMeeting(id: string): Promise<PersistedMeeting | null> {
+  return getOneFrom<PersistedMeeting>(MEETINGS, id);
+}
+/** 局部更新一场会议（合并 patch + 刷新 updated_at）。 */
+export async function updateMeeting(id: string, patch: Partial<PersistedMeeting>): Promise<PersistedMeeting | null> {
+  const cur = await getOneFrom<PersistedMeeting>(MEETINGS, id);
+  if (!cur) return null;
+  const next: PersistedMeeting = { ...cur, ...patch, updated_at: new Date().toISOString() };
+  await putInto(MEETINGS, next);
+  return next;
 }

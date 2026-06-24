@@ -190,6 +190,7 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
     bbox, tool, color: tool === 'highlighter' ? 'rgba(212,207,202,0.85)' : '#1A1A1A',
     pointer_type: repr.pointer_type, device_id: repr.device_id, abs_timestamp: Date.now(),
     feature_type: feature.type, feature_confidence: feature.confidence,
+    kind: cap.kind, kind_source: cap.kindSource,
     scored_type: markScored.type, scored_score: markScored.score,
     hmp: cap.hmp ? { ...cap.hmp, crop_ref: undefined, vector_ref: undefined } : null,
     marked_text: cap.markedText, is_tombstone: false,
