@@ -140,6 +140,8 @@ export interface PersistedMeeting {
   title: string;
   scheduled_at: string;             // ISO 计划时间（日程聚合 + 状态派生用）
   status: MeetingStatus;
+  started_at?: string;              // ISO 真实「开始会议」墙钟（时间脊原点：会中每笔的相对时刻 = abs_timestamp − started_at；会后与飞书录音对轴的 t0）
+  ended_at?: string;                // ISO 真实「结束会议」墙钟
   material_doc_ids: string[];       // 可能有用的文件（指向 docs/pdf_blobs 的 document_id）
   summary?: string;                 // 会后「思路总结」（AI 综合，先空）
   created_at: string;

@@ -123,7 +123,7 @@ export const state = {
   // 徐智强「序列语义方案」：显式 SurfaceIndex（step①）+ HMP 取证记录（step④）
   surfaceIndex: null as SurfaceIndex | null, // 当前 surface 的轻量对象表（PDF 路径由 textBlocks/imageRegions 构建）
   lastHmps: [] as HMP[],                       // 最近 ~10 条 HMP 取证记录（dev-drawer 可读）
-  surfaceType: 'pdf' as 'pdf' | 'chat',        // 当前 surface 类型（决定 PDF 渲染 vs 合成聊天）
+  surfaceType: 'pdf' as 'pdf' | 'chat' | 'whiteboard', // 当前 surface 类型（PDF 渲染 / 合成聊天 / 空白手写页）
 
   strokesByPage: new Map<string, Stroke[]>(),
   overlays: [] as ScreenOverlay[],

@@ -408,3 +408,23 @@ export async function updateMeeting(id: string, patch: Partial<PersistedMeeting>
   await putInto(MEETINGS, next);
   return next;
 }
+
+/**
+ * 模拟会议（开发/演示用，非真实飞书 live 会议）：在一个**飞书来源**工作区下开一场 status=live 的会议，
+ * 好让会中工作台能从那个真实群里拉资料、把"除真正加入会议外的所有流程"都走真的。
+ * 已存在就复用（确保 live + 有 started_at）；没有飞书工作区返回 null。
+ */
+export async function startSimMeeting(): Promise<PersistedMeeting | null> {
+  const wss = await listWorkspaces();
+  const ws = wss.find((w) => w.source === 'feishu' && w.feishu_chat_id);
+  if (!ws) return null;
+  const existing = (await listMeetings(ws.workspace_id)).find((m) => m.title.startsWith('模拟会议'));
+  const now = new Date().toISOString();
+  if (existing) {
+    return existing.status === 'live' && existing.started_at
+      ? existing
+      : ((await updateMeeting(existing.meeting_id, { status: 'live', started_at: existing.started_at ?? now })) ?? existing);
+  }
+  const m = await createMeeting(ws.workspace_id, { title: `模拟会议 · ${ws.name}`, scheduled_at: now });
+  return (await updateMeeting(m.meeting_id, { status: 'live', started_at: now })) ?? m;
+}

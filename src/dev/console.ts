@@ -20,8 +20,8 @@
  */
 import { bus, state, settings, saveSettings, type Placement } from '../app/state';
 import { resetBook } from '../chat/buffer';
-import { listBooks, getBookAiTurns, getFoldedMarks, createWorkspace, listWorkspaces, getWorkspace, upsertFeishuWorkspace, createMeeting, listMeetings, listAllMeetings, getMeeting, updateMeeting } from '../local/store';
-import { reopenBook } from '../surface/renderer';
+import { listBooks, getBookAiTurns, getFoldedMarks, createWorkspace, listWorkspaces, getWorkspace, upsertFeishuWorkspace, createMeeting, listMeetings, listAllMeetings, getMeeting, updateMeeting, startSimMeeting } from '../local/store';
+import { reopenBook, renderBlankSurface } from '../surface/renderer';
 import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting } from '../core/store-format';
 import type { HMP, PipelineStage, PipelineStageIO, SurfaceObject } from '../core/contracts';
 import { downloadTrace, traceCount } from '../core/trace';
@@ -337,13 +337,18 @@ function injectStyle(): void {
   .mtg-shelf { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
   .mtg-mat { display: flex; align-items: center; gap: 12px; text-align: left; padding: 14px 15px; border: 1px solid #ececec; border-radius: 14px; background: #fff; color: #0d0d0d; cursor: pointer; font-family: var(--sans); transition: border-color .12s ease, box-shadow .12s ease; }
   .mtg-mat:hover { border-color: #d7d7dc; box-shadow: 0 2px 12px rgba(0,0,0,.05); }
+  a.mtg-mat { text-decoration: none; color: #0d0d0d; }
   .mtg-mat .ico { width: 19px; height: 19px; color: #8e8ea0; }
   .mtg-mat-body { display: flex; flex-direction: column; min-width: 0; }
   .mtg-mat-name { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mtg-mat-meta { font-size: 11.5px; color: #9a9aa6; margin-top: 2px; }
-  /* 会议行（日程 / 工作区会议列表）*/
-  .mtg-mrow { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 12px 14px; border: 1px solid #ececec; border-radius: 12px; background: #fff; color: #0d0d0d; cursor: pointer; font-family: var(--sans); margin-bottom: 8px; transition: border-color .12s ease, box-shadow .12s ease; }
+  /* 会议行（日程 / 工作区会议列表）：主体=进入会议，尾部小钮=详情 */
+  .mtg-mrow { display: flex; align-items: stretch; border: 1px solid #ececec; border-radius: 12px; background: #fff; margin-bottom: 8px; overflow: hidden; transition: border-color .12s ease, box-shadow .12s ease; }
   .mtg-mrow:hover { border-color: #d7d7dc; box-shadow: 0 2px 12px rgba(0,0,0,.05); }
+  .mtg-mrow-hit { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; text-align: left; padding: 12px 14px; background: none; border: none; color: #0d0d0d; cursor: pointer; font-family: var(--sans); }
+  .mtg-mrow-detail { flex-shrink: 0; width: 44px; border: none; border-left: 1px solid #f2f2f4; background: none; color: #c4c4cc; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .mtg-mrow-detail:hover { background: #f7f7f8; color: #8e8ea0; }
+  .mtg-mrow-detail .ico { width: 16px; height: 16px; }
   .mtg-st { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; }
   .mtg-mrow-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
   .mtg-mrow-title { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -371,6 +376,47 @@ function injectStyle(): void {
   .mtg-feed-text { color: #2a2a32; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mtg-feed-tag { font-size: 10px; color: #9a6b00; background: #fdf3df; border-radius: 5px; padding: 1px 6px; flex-shrink: 0; }
   .mtg-feed-time { color: #b3b3bd; font-size: 11px; flex-shrink: 0; }
+  /* 飞书日历日程：只读行（不可点）+ 已连接徽标 */
+  .mtg-mrow.mtg-mrow-static { cursor: default; }
+  .mtg-mrow.mtg-mrow-static:hover { border-color: #ececec; box-shadow: none; }
+  .mtg-fs-ok { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #2563a8; background: #e8f1fb; border: 1px solid #d6e6fa; border-radius: 8px; padding: 5px 11px; white-space: nowrap; }
+  .mtg-fs-ok .ico { width: 14px; height: 14px; }
+  /* 会议日程 横向时间线 */
+  .mtl { position: relative; padding: 4px 2px 2px; }
+  .mtl-line { position: absolute; left: 10px; right: 10px; top: 102px; height: 2px; background: #ececec; z-index: 0; }
+  .mtl-cols { position: relative; display: flex; z-index: 1; }
+  .mtl-col { flex: 1; display: grid; grid-template-rows: 92px 22px 92px; min-width: 0; }
+  .mtl-up { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; }
+  .mtl-dn { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+  .mtl-mid { display: flex; align-items: center; justify-content: center; }
+  .mtl-card { width: 112px; box-sizing: border-box; background: #fff; border: 1px solid #ececec; border-radius: 10px; padding: 7px 9px; text-align: left; }
+  .mtl-conn { width: 1px; height: 12px; background: #dcdce0; }
+  .mtl-dot { width: 13px; height: 13px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #ececec; z-index: 2; }
+  .mtl-dt { font-size: 11px; color: #9a9aa6; white-space: nowrap; }
+  .mtl-tm { font-size: 15px; font-weight: 600; color: #0d0d0d; line-height: 1.15; margin-top: 1px; }
+  .mtl-ti { font-size: 12px; color: #2a2a32; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mtl-bd { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 5px; margin-top: 5px; }
+  .mtl-bd.rec { background: #e8f1fb; color: #2563a8; }
+  .mtl-bd.one { background: #f5f5f6; color: #5b5b66; }
+  .mtl-origin { font-size: 11px; color: #9a9aa6; text-align: center; line-height: 1.4; margin-top: 5px; white-space: nowrap; }
+  .mtl-more { text-align: right; font-size: 11.5px; color: #9a9aa6; padding: 6px 6px 0; }
+  .mtl-local { margin-top: 16px; }
+  /* 会中浮层：常驻退出钮 + 右侧半掩资料栏（hover 展开）*/
+  .mtg-exit { position: fixed; top: 13px; right: 18px; z-index: 60; display: inline-flex; align-items: center; gap: 6px; font: 13px var(--sans); color: #5b5b66; background: #fff; border: 1px solid #e6e6e6; border-radius: 8px; padding: 6px 12px; cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,.07); }
+  .mtg-exit:hover { background: #f7f7f8; }
+  .mtg-exit .ico { width: 15px; height: 15px; }
+  .mtg-side { position: fixed; top: 54px; right: 0; bottom: 0; width: 224px; z-index: 50; background: #fff; border-left: 1px solid #ececec; box-shadow: -8px 0 22px rgba(0,0,0,.06); display: flex; flex-direction: column; font-family: var(--sans); transform: translateX(160px); transition: transform .18s ease; }
+  .mtg-side:hover, .mtg-side:focus-within { transform: translateX(0); }
+  .mtg-side-h { font-size: 12px; font-weight: 600; color: #0d0d0d; padding: 12px 14px; border-bottom: 1px solid #f2f2f4; display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .mtg-side-h .ico { width: 15px; height: 15px; color: #8e8ea0; }
+  .mtg-side-body { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .mtg-side-empty { color: #9a9aa6; font-size: 12px; padding: 10px; }
+  .mtg-side-card { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid #ececec; border-radius: 10px; text-decoration: none; color: #0d0d0d; background: #fff; }
+  .mtg-side-card:hover { border-color: #d7d7dc; box-shadow: 0 2px 10px rgba(0,0,0,.05); }
+  .mtg-side-thumb .ico { width: 18px; height: 18px; color: #8e8ea0; }
+  .mtg-side-main { display: flex; flex-direction: column; min-width: 0; }
+  .mtg-side-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mtg-side-time { font-size: 11px; color: #b3b3bd; margin-top: 1px; }
   `;
   document.head.appendChild(s);
 }
@@ -449,6 +495,7 @@ function go(id: PageId): void {
 function showPage(id: PageId): void {
   activePage = id;
   highlight();
+  syncMtgChrome(); // 会中浮层（资料栏/退出钮）只在阅读页+会中模式显示
   if (DEV_NAV.includes(id)) setDevExpanded(true); // 进 dev 子页时保持抽屉展开，露出高亮项
   const pages = document.getElementById('app-pages');
   if (!pages) return;
@@ -493,6 +540,50 @@ async function feishuGet<T>(path: string): Promise<T> {
 interface FeishuMsg { message_id: string; msg_type: string; sender_id?: string; create_time?: string; text?: string; file_name?: string; file_key?: string; image_key?: string; }
 const fmtMs = (ms?: string): string => { const n = Number(ms); return Number.isFinite(n) && n > 0 ? fmtDateTime(new Date(n).toISOString()) : ''; };
 
+// 飞书日历日程（user OAuth 拉到的「我本人」日程；后端已展开循环会成每次 occurrence，只读源）
+interface FeishuEvent { event_id: string; summary?: string; start_time?: { timestamp?: string; date?: string }; event_organizer?: { display_name?: string }; recurring?: boolean }
+/** 日程开始墙钟（ms）：优先 timestamp(秒)，全天日程用 date。 */
+const fsEventWhen = (e: FeishuEvent): number => {
+  const ts = e.start_time?.timestamp;
+  if (ts) return Number(ts) * 1000;
+  const d = e.start_time?.date;
+  return d ? new Date(d.replace(/-/g, '/')).getTime() : 0;
+};
+const WD = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+/** 相对天 + 月/日 周几（今天/明天/后天高亮）。 */
+function fsDayLabel(ms: number): string {
+  const d = new Date(ms), t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const d0 = new Date(ms); d0.setHours(0, 0, 0, 0);
+  const diff = Math.round((d0.getTime() - t0.getTime()) / 86400000);
+  const rel = diff === 0 ? '今天' : diff === 1 ? '明天' : diff === 2 ? '后天' : '';
+  const base = `${d.getMonth() + 1}/${d.getDate()} ${WD[d.getDay()]}`;
+  return rel ? `${rel} · ${base}` : base;
+}
+const fsHHMM = (ms: number): string => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+/** 一列时间线节点（上/下交错；蓝=每周循环、灰=单次）。 */
+function fsTlCol(e: FeishuEvent, above: boolean): string {
+  const ms = fsEventWhen(e), rec = !!e.recurring;
+  const card = `<div class="mtl-card"><div class="mtl-dt">${esc(fsDayLabel(ms))}</div>`
+    + `<div class="mtl-tm">${esc(fsHHMM(ms))}</div>`
+    + `<div class="mtl-ti" title="${esc(e.summary || '')}">${esc(e.summary || '(无标题日程)')}</div>`
+    + `<span class="mtl-bd ${rec ? 'rec' : 'one'}">${rec ? '每周' : '单次'}</span></div>`;
+  const dot = `<div class="mtl-mid"><div class="mtl-dot" style="background:${rec ? '#2563a8' : '#9a9aa6'}"></div></div>`;
+  return above
+    ? `<div class="mtl-col"><div class="mtl-up">${card}<div class="mtl-conn"></div></div>${dot}<div></div></div>`
+    : `<div class="mtl-col"><div></div>${dot}<div class="mtl-dn"><div class="mtl-conn"></div>${card}</div></div>`;
+}
+/** 横向时间线（会议日程区；契合日程宽度，从「今天」起展示最近 max 场）。 */
+function feishuTimeline(events: FeishuEvent[], max = 6): string {
+  const items = events.slice(0, max);
+  if (!items.length) return '';
+  const today = fsDayLabel(Date.now()).split(' · ').pop() || '';
+  const origin = `<div class="mtl-col"><div></div><div class="mtl-mid"><div class="mtl-dot" style="background:#0d0d0d"></div></div>`
+    + `<div class="mtl-dn"><div class="mtl-conn"></div><div class="mtl-origin">今天<br>${esc(today)}</div></div></div>`;
+  const cols = items.map((e, i) => fsTlCol(e, i % 2 === 0)).join('');
+  const more = events.length > max ? `<div class="mtl-more">还有 ${events.length - max} 场</div>` : '';
+  return `<div class="mtl"><div class="mtl-line"></div><div class="mtl-cols">${origin}${cols}</div>${more}</div>`;
+}
+
 /** 群消息 → 群动态 section（文件/图片标「资料」）。 */
 function renderFeed(msgs: FeishuMsg[], nameOf: Map<string, string>): string {
   if (!msgs.length) return '';
@@ -533,18 +624,95 @@ function mtgGoHome(): void { mtgView = { level: 'home' }; rerenderMeeting(); }
 function mtgGoWorkspace(wsId: string): void { mtgView = { level: 'workspace', wsId }; rerenderMeeting(); }
 function mtgGoMeeting(mtgId: string, wsId?: string): void { mtgView = { level: 'meeting', mtgId, wsId: wsId ?? mtgView.wsId }; rerenderMeeting(); }
 
+/* ── 会中工作台：点会议=直达画板（方案A：进存档主阅读 / 退还原）+ 右侧半掩群资料栏 ──────────── */
+let mtgMode: { meetingId: string; wsId: string; chatId?: string; title: string } | null = null;
+let savedReaderDoc: { id: string; name: string } | null = null; // 进会议前主阅读在看的真书，退出还原
+
+/** 进入会议 = 直达画板（不经详情页）。方案A：存下主阅读正看的真书；渲染会议空白手写页；挂右侧资料栏。 */
+async function enterMeeting(mtgId: string): Promise<void> {
+  const m = await getMeeting(mtgId);
+  if (!m) return;
+  const ws = await getWorkspace(m.workspace_id);
+  // 方案A：只在当前是真书（PDF、非白板）时存档，退出 reopenBook 还原
+  savedReaderDoc = (state.documentId && state.surfaceType === 'pdf' && !state.documentId.startsWith('mtgboard_'))
+    ? { id: state.documentId, name: state.fileName } : null;
+  if (m.status !== 'live' || !m.started_at) await updateMeeting(mtgId, { status: 'live', started_at: m.started_at ?? new Date().toISOString() }); // 时间脊原点
+  mtgMode = { meetingId: mtgId, wsId: m.workspace_id, chatId: ws?.feishu_chat_id, title: m.title };
+  go('reader');
+  renderBlankSurface('mtgboard_' + mtgId, m.title);
+  await mountMtgSide();
+}
+
+/** 退出会议：拆资料栏 + 还原主阅读（如有）+ 回到该群会议列表。 */
+async function exitMeeting(): Promise<void> {
+  const wsId = mtgMode?.wsId;
+  mtgMode = null;
+  document.getElementById('mtg-side')?.remove();
+  document.getElementById('mtg-exit')?.remove();
+  const saved = savedReaderDoc; savedReaderDoc = null;
+  if (saved) await reopenBook(saved.id, saved.name); // 主阅读还原（留在阅读页）
+  if (wsId) mtgView = { level: 'workspace', wsId };
+  go('meeting');
+}
+
+/** 一张群资料预览卡（侧栏用，点开经 im:resource 下载查看）。 */
+function mtgSideCard(f: FeishuMsg): string {
+  const img = f.msg_type === 'image';
+  const key = img ? f.image_key : f.file_key;
+  const name = img ? '［图片］' : (f.file_name || '文件');
+  const url = `${FEISHU_BASE}/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
+  return `<a class="mtg-side-card" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(name)}">`
+    + `<span class="mtg-side-thumb">${icon('file')}</span>`
+    + `<span class="mtg-side-main"><span class="mtg-side-name">${esc(name)}</span><span class="mtg-side-time">${esc(fmtMs(f.create_time))}</span></span></a>`;
+}
+
+/** 挂会中右侧资料栏（半掩·hover 展开）+ 常驻「退出会议」。资料 = 从群筛出的近期文件。 */
+async function mountMtgSide(): Promise<void> {
+  document.getElementById('mtg-side')?.remove();
+  document.getElementById('mtg-exit')?.remove();
+  if (!mtgMode) return;
+  const exit = document.createElement('button');
+  exit.id = 'mtg-exit'; exit.className = 'mtg-exit'; exit.innerHTML = `${icon('back')} 退出会议`;
+  exit.addEventListener('click', () => { void exitMeeting(); });
+  document.body.appendChild(exit);
+  const side = document.createElement('aside');
+  side.id = 'mtg-side'; side.className = 'mtg-side';
+  side.innerHTML = `<div class="mtg-side-h">${icon('file')} 可能有用的文件</div><div class="mtg-side-body" id="mtg-side-body"><p class="mtg-side-empty">加载中…</p></div>`;
+  document.body.appendChild(side);
+  const body = side.querySelector('#mtg-side-body') as HTMLElement;
+  let files: FeishuMsg[] = [];
+  if (mtgMode.chatId) {
+    try {
+      const res = await feishuGet<{ messages: FeishuMsg[] }>(`/api/feishu/workspaces/${mtgMode.chatId}/messages?limit=50`);
+      files = (res.messages || []).filter((x) => (x.msg_type === 'file' && x.file_key) || (x.msg_type === 'image' && x.image_key));
+    } catch { /* feishu-service 不在 → 空 */ }
+  }
+  body.innerHTML = files.length ? files.map(mtgSideCard).join('') : `<p class="mtg-side-empty">群里近期没有文件。</p>`;
+}
+
+/** 换页时联动会中浮层：只在阅读页 + 会中模式显示资料栏/退出钮。 */
+function syncMtgChrome(): void {
+  const on = activePage === 'reader' && !!mtgMode;
+  const side = document.getElementById('mtg-side');
+  const exit = document.getElementById('mtg-exit');
+  if (side) side.style.display = on ? '' : 'none';
+  if (exit) exit.style.display = on ? '' : 'none';
+}
+
 function mtgShell(title: string, actions: string, body: string): string {
   return `<div class="mtg-page"><header class="mtg-top">${title}<div class="mtg-actions">${actions}</div></header>`
     + `<div class="mtg-scroll"><div class="mtg-wrap">${body}</div></div></div>`;
 }
-/** 一条会议行（日程 / 工作区里复用）。wsLabel 给日程聚合标群聊。 */
+/** 一条会议行（日程 / 工作区里复用）。主体点击=进入会议(直达画板)；尾部小钮=会议详情(单独入口)。 */
 function meetingRow(m: PersistedMeeting, wsLabel?: string): string {
   const s = MTG_STATUS[m.status];
   const sub = `${icon('clock')} ${esc(fmtDateTime(m.scheduled_at))}` + (wsLabel ? ` · ${esc(wsLabel)}` : '');
-  return `<button class="mtg-mrow" data-mtg="${esc(m.meeting_id)}">`
+  return `<div class="mtg-mrow">`
+    + `<button class="mtg-mrow-hit" data-enter="${esc(m.meeting_id)}" title="进入会议（画板）">`
     + `<span class="mtg-st" style="color:${s.c};background:${s.bg}">${s.t}</span>`
-    + `<span class="mtg-mrow-main"><span class="mtg-mrow-title">${esc(m.title)}</span><span class="mtg-mrow-sub">${sub}</span></span>`
-    + `<span class="mtg-chev">${icon('chevron')}</span></button>`;
+    + `<span class="mtg-mrow-main"><span class="mtg-mrow-title">${esc(m.title)}</span><span class="mtg-mrow-sub">${sub}</span></span></button>`
+    + `<button class="mtg-mrow-detail" data-detail="${esc(m.meeting_id)}" data-ws="${esc(m.workspace_id)}" title="会议详情 / 档案">${icon('file')}</button>`
+    + `</div>`;
 }
 /** 一份资料卡（文件区 / 手写档案区复用）。 */
 function materialCard(b: PersistedDoc, iconName: string, meta: string): string {
@@ -573,9 +741,15 @@ function renderMeeting(c: HTMLDivElement): void {
 async function renderMtgHome(c: HTMLDivElement): Promise<void> {
   const title = `<h2 class="mtg-title">${icon('calendar')} 会议</h2>`;
   const actions = `<button class="mtg-ghost" id="mtg-refresh">${icon('refresh')} 刷新</button>`
+    + `<button class="mtg-ghost" id="mtg-sim">${icon('play')} 模拟会议</button>`
     + `<button class="mtg-ghost primary" id="mtg-new-ws">${icon('plus')} 新建群聊</button>`;
   c.innerHTML = mtgShell(title, actions, `<div id="mtg-body"><p class="mtg-empty">加载中…</p></div>`);
   c.querySelector('#mtg-refresh')?.addEventListener('click', () => rerenderMeeting());
+  c.querySelector('#mtg-sim')?.addEventListener('click', async () => {
+    const m = await startSimMeeting();
+    if (!m) { window.alert('先连一个飞书群（机器人所在群会自动同步成工作区）再开模拟会议。'); return; }
+    mtgGoMeeting(m.meeting_id, m.workspace_id);
+  });
   c.querySelector('#mtg-new-ws')?.addEventListener('click', async () => {
     const name = window.prompt('新建群聊 / 工作区名称');
     if (name == null) return;
@@ -589,15 +763,33 @@ async function renderMtgHome(c: HTMLDivElement): Promise<void> {
     for (const w of res.workspaces || []) if (w.chat_status === 'normal') await upsertFeishuWorkspace(w.chat_id, w.name);
   } catch { /* feishu-service 不可用 → 仅本地工作区 */ }
 
+  // 飞书日历(user OAuth) → 会议日程源:已连接就拉「我本人」近期日程
+  let fsConnected = false, fsEvents: FeishuEvent[] = [];
+  try {
+    const st = await feishuGet<{ connected: boolean }>('/api/feishu/oauth/status');
+    fsConnected = !!st.connected;
+    if (fsConnected) {
+      const ev = await feishuGet<{ events: FeishuEvent[] }>('/api/feishu/my/events');
+      fsEvents = (ev.events || []).slice().sort((a, b) => fsEventWhen(a) - fsEventWhen(b));
+    }
+  } catch { /* feishu-service 不在 → 跳过日历 */ }
+
   const [workspaces, allMeetings] = await Promise.all([listWorkspaces(), listAllMeetings()]);
   const wsName = new Map(workspaces.map((w) => [w.workspace_id, w.name]));
   const count = new Map<string, number>();
   for (const m of allMeetings) count.set(m.workspace_id, (count.get(m.workspace_id) ?? 0) + 1);
   const sched = allMeetings.filter((m) => m.status !== 'ended').sort((a, b) => (a.scheduled_at || '').localeCompare(b.scheduled_at || ''));
 
-  const schedHtml = sched.length
-    ? sched.map((m) => meetingRow(m, wsName.get(m.workspace_id))).join('')
-    : `<div class="mtg-sched"><p class="mtg-empty">暂无待开始 / 进行中的会议。<br>进某个群聊「新建会议」即可；来源接飞书日历后这里自动汇总。</p></div>`;
+  // 连接状态控件(放日程区标题右侧):未连→按钮跳授权;已连→徽标 + 条数
+  const connectCtl = fsConnected
+    ? `<span class="mtg-fs-ok">${icon('calendar')} 飞书日历已连接${fsEvents.length ? ` · ${fsEvents.length} 条` : ''}</span>`
+    : `<button class="mtg-ghost" id="mtg-fs-connect" style="margin-left:auto">${icon('calendar')} 连接飞书日历</button>`;
+  const localRows = sched.map((m) => meetingRow(m, wsName.get(m.workspace_id))).join('');
+  const schedHtml = (fsEvents.length || sched.length)
+    ? feishuTimeline(fsEvents) + (localRows ? `<div class="mtl-local">${localRows}</div>` : '')
+    : `<div class="mtg-sched"><p class="mtg-empty">${fsConnected
+        ? '飞书日历近期没有日程，本地也还没有会议。'
+        : '还没接飞书日历。点右上「连接飞书日历」拉你的真实日程；或进群聊「新建会议」。'}</p></div>`;
   const wsHtml = workspaces.length
     ? `<div class="mtg-ws-grid">` + workspaces.map((w) =>
         `<button class="mtg-ws" data-ws="${esc(w.workspace_id)}">${icon('users')}<span class="mtg-mat-body"><span class="mtg-mat-name">${esc(w.name)}${w.source === 'feishu' ? '<span class="mtg-fs-badge">飞书</span>' : ''}</span><span class="mtg-mat-meta">${count.get(w.workspace_id) ?? 0} 场会议</span></span></button>`
@@ -607,10 +799,17 @@ async function renderMtgHome(c: HTMLDivElement): Promise<void> {
   const body = document.getElementById('mtg-body');
   if (!body) return;
   body.innerHTML =
-    `<section class="mtg-sec"><div class="mtg-sec-h">${icon('calendar')} 会议日程 <span class="mtg-soon">所有群聊 · 待开始 / 进行中</span></div>${schedHtml}</section>`
+    `<section class="mtg-sec"><div class="mtg-sec-h">${icon('calendar')} 会议日程 <span class="mtg-soon">飞书日历 + 本地 · 待开始 / 进行中</span>${connectCtl}</div>${schedHtml}</section>`
     + `<section class="mtg-sec"><div class="mtg-sec-h">${icon('library')} 群聊书架 <span class="mtg-soon">以群聊为单位</span></div>${wsHtml}</section>`;
+  body.querySelector('#mtg-fs-connect')?.addEventListener('click', () => { window.open(FEISHU_BASE + '/api/feishu/oauth/login', '_blank', 'noopener'); });
   body.querySelectorAll<HTMLButtonElement>('.mtg-ws[data-ws]').forEach((b) => b.addEventListener('click', () => mtgGoWorkspace(b.dataset.ws!)));
-  body.querySelectorAll<HTMLButtonElement>('.mtg-mrow[data-mtg]').forEach((r) => r.addEventListener('click', () => mtgGoMeeting(r.dataset.mtg!)));
+  wireMeetingRows(body);
+}
+
+/** 会议行的两个入口：主体=进入会议(直达画板)，尾部小钮=会议详情。 */
+function wireMeetingRows(root: HTMLElement): void {
+  root.querySelectorAll<HTMLButtonElement>('.mtg-mrow-hit[data-enter]').forEach((b) => b.addEventListener('click', () => { void enterMeeting(b.dataset.enter!); }));
+  root.querySelectorAll<HTMLButtonElement>('.mtg-mrow-detail[data-detail]').forEach((b) => b.addEventListener('click', () => mtgGoMeeting(b.dataset.detail!, b.dataset.ws)));
 }
 
 /* ── 二级：一个群聊里的会议（进行中 / 待开始 / 已结束）────────────────────────── */
@@ -653,7 +852,7 @@ async function renderMtgWorkspace(c: HTMLDivElement, wsId: string): Promise<void
     } catch { membersHtml = `<section class="mtg-sec"><div class="mtg-sec-h">${icon('users')} 参会人</div><p class="mtg-empty" style="text-align:left;padding:8px 2px">加载失败（feishu-service 未运行 / 权限不足？）</p></section>`; }
   }
   body.innerHTML = membersHtml + feedHtml + (secs || `<p class="mtg-empty" style="text-align:left;padding:14px 2px">这个群聊还没有会议。点右上「新建会议」建一个。</p>`);
-  body.querySelectorAll<HTMLButtonElement>('.mtg-mrow[data-mtg]').forEach((r) => r.addEventListener('click', () => mtgGoMeeting(r.dataset.mtg!, wsId)));
+  wireMeetingRows(body);
 }
 
 /* ── 三级：一场会议（文件 / 手写档案 / 思路总结）────────────────────────────── */
@@ -665,9 +864,11 @@ async function renderMtgDetail(c: HTMLDivElement, mtgId: string): Promise<void> 
     + `<h2 class="mtg-title">${esc(m.title)} <span class="mtg-st" style="color:${s.c};background:${s.bg}">${s.t}</span></h2>`;
   const statusBtn = m.status === 'upcoming' ? `<button class="mtg-ghost" id="mtg-start">${icon('play')} 开始会议</button>`
     : m.status === 'live' ? `<button class="mtg-ghost" id="mtg-end">${icon('stop')} 结束会议</button>` : '';
-  const actions = statusBtn + `<button class="mtg-ghost" id="mtg-add-mat">${icon('plus')} 添加资料</button>`;
+  const actions = `<button class="mtg-ghost primary" id="mtg-enter">${icon('pen')} 进入会议</button>` + statusBtn + `<button class="mtg-ghost" id="mtg-add-mat">${icon('plus')} 添加资料</button>`;
   c.innerHTML = mtgShell(title, actions, `<div id="mtg-body"><p class="mtg-empty">加载中…</p></div>`);
   c.querySelector('#mtg-back')?.addEventListener('click', () => mtgGoWorkspace(m.workspace_id));
+  // 进入会议 = 直达画板（enterMeeting：方案A 存档主阅读 + 会议空白页 + 右侧群资料栏）。详情页此处只是另一处入口。
+  c.querySelector('#mtg-enter')?.addEventListener('click', () => { void enterMeeting(mtgId); });
   c.querySelector('#mtg-start')?.addEventListener('click', async () => { await updateMeeting(mtgId, { status: 'live' }); rerenderMeeting(); });
   c.querySelector('#mtg-end')?.addEventListener('click', async () => { await updateMeeting(mtgId, { status: 'ended' }); rerenderMeeting(); });
   c.querySelector('#mtg-add-mat')?.addEventListener('click', async () => {
@@ -701,12 +902,39 @@ async function renderMtgDetail(c: HTMLDivElement, mtgId: string): Promise<void> 
     : `<div class="mtg-sched"><p class="mtg-empty">${m.status === 'ended' ? '还没生成思路总结。' : '会议结束后可对手写档案做思路总结。'}<br>会后 AI 综合（送云端处理）——接线后置。</p></div>`;
   const genBtn = `<button class="mtg-ghost" id="mtg-gen-sum" style="margin-left:auto"${m.status === 'ended' ? '' : ' disabled'}>${icon('lightbulb')} 生成思路总结</button>`;
 
+  // 飞书工作区（含模拟会议）：从群里真实拉资料（文件/图片消息）→ 会前「群里收集到的资料」。点击经 im:resource 下载查看。
+  const ws = await getWorkspace(m.workspace_id);
+  let groupHtml = '';
+  if (ws?.source === 'feishu' && ws.feishu_chat_id) {
+    try {
+      const res = await feishuGet<{ messages: FeishuMsg[] }>(`/api/feishu/workspaces/${ws.feishu_chat_id}/messages?limit=50`);
+      const files = (res.messages || []).filter((x) => (x.msg_type === 'file' && x.file_key) || (x.msg_type === 'image' && x.image_key));
+      groupHtml = files.length
+        ? `<div class="mtg-shelf">` + files.map((f) => {
+            const img = f.msg_type === 'image';
+            const key = img ? f.image_key : f.file_key;
+            const name = img ? '［图片］' : (f.file_name || '文件');
+            const url = `${FEISHU_BASE}/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
+            return `<a class="mtg-mat" href="${esc(url)}" target="_blank" rel="noopener" title="从群下载查看（im:resource）">`
+              + `${icon('file')}<span class="mtg-mat-body"><span class="mtg-mat-name">${esc(name)}</span>`
+              + `<span class="mtg-mat-meta">群文件 · ${esc(fmtMs(f.create_time))}</span></span></a>`;
+          }).join('') + `</div>`
+        : `<p class="mtg-empty" style="text-align:left;padding:10px 2px">群里近期没有文件。</p>`;
+    } catch { groupHtml = `<p class="mtg-empty" style="text-align:left;padding:10px 2px">拉取群资料失败（feishu-service 未运行？）</p>`; }
+  }
+  const groupSec = ws?.source === 'feishu'
+    ? `<section class="mtg-sec"><div class="mtg-sec-h">${icon('message')} 群里收集到的资料 <span class="mtg-soon">机器人自动捞取 · ${esc(ws.name)}</span></div>${groupHtml}</section>`
+    : '';
+
   body.innerHTML =
     `<section class="mtg-sec"><div class="mtg-sec-h">${icon('file')} 可能有用的文件 <span class="mtg-soon">${mats.length}</span></div>${filesHtml}</section>`
+    + groupSec
     + `<section class="mtg-sec"><div class="mtg-sec-h">${icon('pen')} 你的手写档案</div>${archiveHtml}</section>`
     + `<section class="mtg-sec"><div class="mtg-sec-h">${icon('lightbulb')} 思路总结 ${genBtn}</div>${summaryHtml}</section>`;
   wireMaterialCards(body);
-  document.getElementById('mtg-gen-sum')?.addEventListener('click', () => window.alert('思路总结：会后把手写档案 + 转写送云端 AI 综合——待接入。'));
+  // 思路总结：架构决议(2026-06-24)= 暴露成 MCP（公共基础设施，阅读+会议共用）——底座层开个 MCP 面
+  // （读 marks/ai_turns、按 surface/meeting 取、请求综合），外部 agent 走 MCP 来。这轮不做，记为底座目标。
+  document.getElementById('mtg-gen-sum')?.addEventListener('click', () => window.alert('思路总结：会后经 MCP 把手写档案 + 转写交外部 agent 综合（公共基础设施，阅读也用同一个）——待接入。'));
 }
 
 /* ── AI 会话页（ChatGPT 式对话流）─────────────────────────────────────────── */

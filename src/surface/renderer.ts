@@ -153,6 +153,60 @@ export async function reopenBook(documentId: string, filename: string): Promise<
   return true;
 }
 
+/**
+ * 空白手写 surface —— 会议「进入会议」的那张白纸。
+ * 同 chat-surface 思路：app 直接渲染表面 + 原生 emit 一份 SurfaceIndex，墨迹/标注/账本/重绘整条链路全复用 PDF 路径那套。
+ * 表面是一整张空白（一个覆盖全页的 blank_region，在哪写都命中 self_content）。documentId 稳定 →
+ * marks 账本归它、document:loaded 触发 restoreFromLedger 自动重绘已存的笔，重开免重导、跨 reload 不丢。
+ *
+ * ⚠️架构决议(2026-06-24)：会议的阅读应是「单独阅读实例」。当前阅读器是深度单例（全局 state + 绑死
+ * #stage/#ink DOM + 单例 ink），故现采用 **方案 A**：仍用这一套单引擎，由调用方在进/出会议时存档·恢复
+ * context（主阅读的书/态）来达到「独立实例」的体验。**方案 B**=把阅读器重构成可实例化的「可标注 surface
+ * 组件」（底座层，阅读+每会议各持独立实例）记为后面做，别在阅读上板前动引擎结构。
+ */
+export function renderBlankSurface(documentId: string, title = '空白页'): void {
+  pdf = null; // 脱离上一份 PDF（防 zoom/翻页误渲旧页）
+  state.fileHash = documentId;
+  state.documentId = documentId;
+  state.fileName = title;
+  state.surfaceType = 'whiteboard';
+  state.pageCount = 1;
+  state.pageIndex = 0;
+  state.strokesByPage.clear();
+  state.docMeta = null;
+  state.outline = null;
+
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.min(860, Math.max(480, stageWrap.clientWidth - 56 - GUTTER_W));
+  const H = Math.round(W * 1.32); // 一张竖向「纸」
+  for (const cv of [pageCv, inkCv]) {
+    cv.width = W * dpr; cv.height = H * dpr;
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  }
+  stage.style.width = (W + GUTTER_W) + 'px';
+  stage.style.height = H + 'px';
+  stage.style.setProperty('--page-w', W + 'px');
+  setPageSize(W, H);
+
+  const ctx = pageCv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1; // 极淡稿纸线（纯装饰，不进 SurfaceIndex）
+  for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+
+  const pageId = `${documentId}_0`;
+  state.pageId = pageId;
+  state.pageRecord = { page_id: pageId, document_id: documentId, page_index: 0, width: W, height: H, unit: 'pt', rotation: 0, render_dpi: 96, version: SCHEMA_VERSION };
+  state.overlays = [];
+  state.textBlocks = [];
+  state.imageRegions = [];
+  state.surfaceIndex = { surface_id: pageId, surface_type: 'whiteboard', page_index: 0, objects: [{ id: 'blank_0', type: 'blank_region', bbox: [0, 0, 1, 1], source: 'structure' }] };
+
+  bus.emit('document:loaded'); // → restoreFromLedger() 自动重绘本白板已存的笔
+  bus.emit('page:rendered');
+  bus.emit('surface:indexed', state.surfaceIndex);
+}
+
 /** 抽取一页的文本块（归一化 bbox，zoom/rotation 无关）。渲染与预处理共用。 */
 async function extractTextBlocks(page: PDFPageProxy, vp: PageViewport): Promise<OcrTextBlock[]> {
   try {
