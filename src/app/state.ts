@@ -89,16 +89,73 @@ export const settings: Settings = {
   showRelations: true,  // dev 关联框：默认开（提交后看哪些标注被判为内容关联的一组）。
 };
 
-/** 持久化 dev 旋钮：刷新不丢（免每次手动重设）。模块加载即回填，故所有消费方从一开始就拿到持久值。 */
-const PREFS_KEY = 'inkloop.settings.v1';
-try {
-  const saved = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null');
-  if (saved && typeof saved === 'object') Object.assign(settings, saved); // 缺字段保留默认；多余字段无害
-} catch { /* localStorage 不可用/损坏：用默认值 */ }
+/**
+ * 设置持久化（C4）：拆「产品设置」与「dev/AB 旋钮」两键，各带 schema 版本 + 类型守卫。
+ *  · 产品键 inkloop.prefs.v1    —— 用户偏好（落点/阅读面/手势/重排引擎）。
+ *  · dev 键 inkloop.devflags.v1 —— 模型/AB/调试旋钮。**这半即将来 remote manifest 可覆盖的接缝**
+ *    （远程只动 dev 子集，不踩用户偏好；D1 复用 applyKnownSettings + DEV_FIELDS）。
+ * 旧扁平键 inkloop.settings.v1 首次升级时一次性导入，不丢已存设置。settings 在内存仍是统一对象，消费方零改。
+ */
+const SETTINGS_SCHEMA = 1;
+const PRODUCT_KEY = 'inkloop.prefs.v1';
+const DEV_KEY = 'inkloop.devflags.v1';
+const LEGACY_KEY = 'inkloop.settings.v1';
+const PRODUCT_FIELDS = ['placement', 'viewMode', 'reflowProvider', 'gesture'] as const;
+export const DEV_FIELDS = ['reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations'] as const;
+
+type SettingsRec = Record<string, unknown>;
+
+/** 把 src 的「已知字段」按类型守卫合并进 settings：typeof 不一致丢弃（防旧字符串污染新对象字段）。 */
+export function applyKnownSettings(src: SettingsRec, fields: readonly string[]): void {
+  const t = settings as unknown as SettingsRec;
+  for (const k of fields) {
+    if (!(k in src)) continue;
+    const cur = t[k], next = src[k];
+    if (typeof cur !== typeof next) continue;
+    if (typeof cur === 'object' && cur && next) Object.assign(cur as object, next as object); // 嵌套(gesture/preprocess)浅合并
+    else if (typeof cur !== 'object') t[k] = next;
+  }
+}
+
+/** 读带信封 {v,data} 的设置键；版本不符/损坏 → null。 */
+function loadSettingsBlob(key: string): SettingsRec | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || 'null');
+    if (raw && typeof raw === 'object' && raw.v === SETTINGS_SCHEMA && raw.data && typeof raw.data === 'object') return raw.data as SettingsRec;
+  } catch { /* 损坏：忽略 */ }
+  return null;
+}
+
+function pickSettings(fields: readonly string[]): SettingsRec {
+  const t = settings as unknown as SettingsRec, out: SettingsRec = {};
+  for (const k of fields) out[k] = t[k];
+  return out;
+}
 
 export function saveSettings(): void {
-  try { localStorage.setItem(PREFS_KEY, JSON.stringify(settings)); } catch { /* 忽略 */ }
+  try {
+    localStorage.setItem(PRODUCT_KEY, JSON.stringify({ v: SETTINGS_SCHEMA, data: pickSettings(PRODUCT_FIELDS) }));
+    localStorage.setItem(DEV_KEY, JSON.stringify({ v: SETTINGS_SCHEMA, data: pickSettings(DEV_FIELDS) }));
+  } catch { /* 忽略 */ }
 }
+
+// 模块加载即回填：消费方从一开始就拿到持久值。
+(() => {
+  const prod = loadSettingsBlob(PRODUCT_KEY);
+  const dev = loadSettingsBlob(DEV_KEY);
+  if (prod) applyKnownSettings(prod, PRODUCT_FIELDS);
+  if (dev) applyKnownSettings(dev, DEV_FIELDS);
+  if (!prod && !dev) { // 首次升级：从旧扁平 inkloop.settings.v1 导入并落到新双键
+    try {
+      const legacy = JSON.parse(localStorage.getItem(LEGACY_KEY) || 'null');
+      if (legacy && typeof legacy === 'object') {
+        applyKnownSettings(legacy as SettingsRec, PRODUCT_FIELDS);
+        applyKnownSettings(legacy as SettingsRec, DEV_FIELDS);
+        saveSettings();
+      }
+    } catch { /* 忽略 */ }
+  }
+})();
 
 export interface Stroke {
   tool: Tool;
