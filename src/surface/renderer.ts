@@ -101,7 +101,7 @@ async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob |
   state.fileHash = await sha256Hex(buf);
   state.documentId = docId ?? ('doc_' + state.fileHash.slice(0, 12)); // 默认 hash 派生；docId 显式覆盖（会议资料按稳定 id 归档，转换非确定性也不漂）
   state.fileName = filename;
-  state.surfaceType = 'pdf';
+  state.surfaceType = 'article';
   // cMapUrl/standardFontDataUrl：救老中文 PDF —— 非嵌入 CID 字体 + 预定义 CJK CMap（如 GBK-EUC-H）
   // 需要 CMap 表才能把字符码映射成字形，否则中文画布渲染与 getTextContent 都出空白/乱码。
   // 资产在 public/（cp 自 pdfjs-dist），dev 与 build 均自动服务于根路径。

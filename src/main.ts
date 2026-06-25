@@ -393,7 +393,7 @@ bus.on('document:loaded', () => { void restoreFromLedger(); });
 // 白板/聊天 surface 由调用方（enterMeeting）显式 renderBlankSurface 处理；空实例（无书）→ 回空屏。
 bus.on('context:switched', (ctx) => {
   const c = ctx as ReaderContext;
-  if (c.pdf && c.surfaceType === 'pdf') {
+  if (c.pdf && c.surfaceType === 'article') {
     void renderPage().then(() => restoreFromLedger());
   } else if (!c.documentId) {
     document.body.classList.remove('doc-loaded');

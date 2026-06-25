@@ -9,7 +9,7 @@
  */
 import type { NormBBox, SurfaceObject } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
-import { bus, state } from '../app/state';
+import { bus, state, getActiveContext } from '../app/state';
 import { setPageSize, GUTTER_W } from '../core/transform';
 import { trace } from '../core/trace';
 
@@ -68,6 +68,11 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 
 /** 载入示例聊天：渲染气泡 + 原生构建并 emit SurfaceIndex。 */
 export function renderChatSurface(): void {
+  // B1：示例聊天是阅读态 demo，直写 state.* 会落到「当前激活实例」。若正在会议里点它，会污染会议实例
+  // （documentId 被改成 chat_sample、账本归属错乱）。故只在主阅读实例载入。
+  // （真正把 chat 做成独立 surface 实例 = C1 的 SurfaceContext 泛化。）
+  if (getActiveContext().role !== 'reader') return;
+
   const pageCv = document.getElementById('page-layer') as HTMLCanvasElement | null;
   const inkCv = document.getElementById('ink-layer') as HTMLCanvasElement | null;
   const stage = document.getElementById('stage') as HTMLElement | null;

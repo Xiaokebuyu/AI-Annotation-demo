@@ -1,5 +1,5 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import type { HMP, NormBBox, OcrTextBlock, PDFPageRecord, ScreenOverlay, SurfaceIndex } from '../core/contracts';
+import type { HMP, NormBBox, OcrTextBlock, PDFPageRecord, ScreenOverlay, SurfaceIndex, SurfaceType } from '../core/contracts';
 import type { Stroke } from './state';
 
 /**
@@ -9,8 +9,9 @@ import type { Stroke } from './state';
  * 收进一个可实例化对象。`阅读` 模式持一个 readerCtx，每个会议各持一个 meetingCtx；
  * 进/退会议 = 切换「激活哪个 context」（见 state.ts 的 setActiveContext / 委托）。
  *
- * 单 DOM：一次只渲染一个激活 context（Stage 1）。真双 DOM 同屏是 Stage 2，本类已为其打底。
- * 留在全局 `state` 上的 tool/zoom/inferProvider（属「用户的手」非文档）不进这里。
+ * 单 DOM：一次只渲染一个激活 context（Stage 1）。真双 DOM 同屏已弃（用户拍板），但实例隔离仍要正确。
+ * 留在全局 `state` 上的 tool/inferProvider（属「用户的手」非文档）不进这里；
+ * zoom 属「这本书/这个面读多大」随实例走（B1：退会议切回不再被会议期缩放污染）。
  */
 export class ReaderContext {
   /** 实例标识：主阅读 '__reader__'；会议 'mtg_<meetingId>'。 */
@@ -26,6 +27,7 @@ export class ReaderContext {
   documentId: string | null = null;
   pageCount = 0;
   pageIndex = 0;
+  zoom = 1;                       // 缩放随实例（B1：每本书/每个面各自的阅读缩放，不再全局污染）
   pageId: string | null = null;
   pageRecord: PDFPageRecord | null = null;
   docMeta: Record<string, unknown> | null = null;
@@ -34,7 +36,7 @@ export class ReaderContext {
   imageRegions: NormBBox[] = [];
   surfaceIndex: SurfaceIndex | null = null;
   lastHmps: HMP[] = [];
-  surfaceType: 'pdf' | 'chat' | 'whiteboard' = 'pdf';
+  surfaceType: SurfaceType = 'article'; // 渲染/语义类型，统一用 contracts.SurfaceType（article=PDF/有文层）
   strokesByPage: Map<string, Stroke[]> = new Map();
   overlays: ScreenOverlay[] = [];
 

@@ -1,4 +1,4 @@
-import type { HMP, NormBBox, OcrTextBlock, PDFPageRecord, ScreenOverlay, StrokePoint, SurfaceIndex } from '../core/contracts';
+import type { HMP, NormBBox, OcrTextBlock, PDFPageRecord, ScreenOverlay, StrokePoint, SurfaceIndex, SurfaceType } from '../core/contracts';
 import { ReaderContext } from './reader-context';
 
 type Handler = (...args: unknown[]) => void;
@@ -124,7 +124,7 @@ export const state = {
   // 徐智强「序列语义方案」：显式 SurfaceIndex（step①）+ HMP 取证记录（step④）
   surfaceIndex: null as SurfaceIndex | null, // 当前 surface 的轻量对象表（PDF 路径由 textBlocks/imageRegions 构建）
   lastHmps: [] as HMP[],                       // 最近 ~10 条 HMP 取证记录（dev-drawer 可读）
-  surfaceType: 'pdf' as 'pdf' | 'chat' | 'whiteboard', // 当前 surface 类型（PDF 渲染 / 合成聊天 / 空白手写页）
+  surfaceType: 'article' as SurfaceType, // 当前 surface 类型（article=PDF/有文层 / chat 合成聊天 / whiteboard 空白手写页）
 
   strokesByPage: new Map<string, Stroke[]>(),
   overlays: [] as ScreenOverlay[],
@@ -132,14 +132,14 @@ export const state = {
 };
 
 /**
- * 方案 B 解耦 Stage 1：`state` 的 16 个「随文档/surface 走」字段委托到「当前激活的 ReaderContext」。
- * tool/zoom/inferProvider 仍是 state 自有属性（属用户的手、非文档）。消费方零改：仍 `state.documentId` 即可。
+ * 方案 B 解耦 Stage 1：`state` 的 17 个「随文档/surface 走」字段委托到「当前激活的 ReaderContext」。
+ * tool/inferProvider 仍是 state 自有属性（属用户的手、非文档）。消费方零改：仍 `state.documentId` 即可。
  * 进/退会议 = setActiveContext 切换激活实例；上面字面量给的初值只为类型推导，运行时被 activeCtx 的同名初值替代（等价）。
  */
 let activeCtx = new ReaderContext('__reader__', 'reader');
 
 const DOC_FIELDS = [
-  'fileName', 'fileHash', 'documentId', 'pageCount', 'pageIndex', 'pageId', 'pageRecord',
+  'fileName', 'fileHash', 'documentId', 'pageCount', 'pageIndex', 'zoom', 'pageId', 'pageRecord',
   'docMeta', 'outline', 'textBlocks', 'imageRegions', 'surfaceIndex', 'lastHmps', 'surfaceType',
   'strokesByPage', 'overlays',
 ] as const;
