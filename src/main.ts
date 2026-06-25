@@ -10,12 +10,13 @@ import { trace } from './core/trace';
 import { devEmit } from './core/dev-telemetry';
 import { shortId, DEVICE_ID } from './core/ids';
 import { bus, state, settings, strokeMarkIds, type Stroke, type Tool } from './app/state';
+import type { ReaderContext } from './app/reader-context';
 import { appendMarkEntry, getBookAiTurns, getFoldedMarks, getPendingMarks, listBooks, setLastReadPage, updateOverlayState } from './local/store';
 import type { PersistedMark } from './core/store-format';
 import type { ScreenOverlay } from './core/contracts';
 import type { AnnotationEvent, EventType, NormBBox } from './core/contracts';
 import { SCHEMA_VERSION } from './core/contracts';
-import { initRenderer, loadFile, reopenBook, gotoPage, setZoom, hasDocument } from './surface/renderer';
+import { initRenderer, loadFile, reopenBook, renderPage, gotoPage, setZoom, hasDocument } from './surface/renderer';
 import { renderChatSurface } from './surface/chat-surface';
 import { initInk, redrawInk } from './capture/ink';
 import { initWhisper } from './surface/whisper';
@@ -26,6 +27,7 @@ import { initInsightPanel } from './surface/insight-panel';
 import { initToolbar } from './surface/toolbar';
 import { initDevOverlay } from './dev/dev-overlay';
 import { initNavShell } from './dev/console';
+import { initEinkMirror } from './surface/eink';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -285,6 +287,9 @@ initInsightPanel({
 });
 initDevOverlay(); // 画布叠层（独立于旧 dev 抽屉，由设置页 devOverlay/showRegion/showRelations 控）
 initNavShell();   // 全局导航壳：阅读 / AI 会话 / 采集取证 / 设置（旧 #dev 抽屉已退役）
+// 窄屏(电纸屏竖向 / 手机)：导航栏默认收起为抽屉，避免在 ~405px 宽挤占正文（点 ☰ 以浮层拉出）
+if (window.matchMedia('(max-width: 640px)').matches) document.body.classList.add('rail-collapsed');
+initEinkMirror(); // 电纸屏镜像：套壳内容变化(page:rendered/view/overlay) → 推 IT8951（web/dev 无桥则 no-op）
 
 const fileIn = $<HTMLInputElement>('file-in');
 fileIn.addEventListener('change', () => {
@@ -381,6 +386,19 @@ reading.addEventListener('drop', (e) => {
 });
 
 bus.on('document:loaded', () => { void restoreFromLedger(); });
+
+// 方案 B Stage 1：切换激活实例（进/退会议）后的重绘。
+// 切回已加载的 PDF 实例（如退会议回主阅读）→ 重渲当前页 + 复原 chrome/墨迹/旁注，全程不重新 fetch/decode。
+// 白板/聊天 surface 由调用方（enterMeeting）显式 renderBlankSurface 处理；空实例（无书）→ 回空屏。
+bus.on('context:switched', (ctx) => {
+  const c = ctx as ReaderContext;
+  if (c.pdf && c.surfaceType === 'pdf') {
+    void renderPage().then(() => restoreFromLedger());
+  } else if (!c.documentId) {
+    document.body.classList.remove('doc-loaded');
+    $('empty-state').style.display = '';
+  }
+});
 
 /** reload/重开后从账本重建：笔迹(folded marks) + AI 旁注/对话 buffer(book log) + pending session(水位线后)。 */
 async function restoreFromLedger(): Promise<void> {
