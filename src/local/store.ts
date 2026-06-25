@@ -21,22 +21,41 @@ const WORKSPACES = 'workspaces'; // 会议工作区（≈群聊）
 const MEETINGS = 'meetings';     // 会议（属某 workspace）
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
+/** 幂等建 store（连同建表时的初始 index）。已存在则跳过——自愈"版本到位却缺表"。 */
+function ensureStore(db: IDBDatabase, name: string, keyPath: string, index?: [string, string]): void {
+  if (db.objectStoreNames.contains(name)) return;
+  const store = db.createObjectStore(name, { keyPath });
+  if (index) store.createIndex(index[0], index[1], { unique: false });
+}
+
+/** 幂等给已存在 store 加 index（onupgradeneeded 内、versionchange 事务）。 */
+function ensureIndex(tx: IDBTransaction, storeName: string, indexName: string, keyPath: string): void {
+  const store = tx.objectStore(storeName);
+  if (!store.indexNames.contains(indexName)) store.createIndex(indexName, keyPath, { unique: false });
+}
+
 function openDB(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve) => {
     try {
-      const req = indexedDB.open(DB_NAME, DB_VERSION); // v3：docs + pdf_blobs + marks + ai_turns
-      req.onupgradeneeded = () => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (event) => {
         const db = req.result;
-        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'document_id' });
-        if (!db.objectStoreNames.contains(PDF_STORE)) db.createObjectStore(PDF_STORE, { keyPath: 'document_id' });
-        if (!db.objectStoreNames.contains(MARKS)) db.createObjectStore(MARKS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
-        if (!db.objectStoreNames.contains(TURNS)) db.createObjectStore(TURNS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
-        if (!db.objectStoreNames.contains(WORKSPACES)) db.createObjectStore(WORKSPACES, { keyPath: 'workspace_id' });
-        if (!db.objectStoreNames.contains(MEETINGS)) db.createObjectStore(MEETINGS, { keyPath: 'meeting_id' }).createIndex('by_ws', 'workspace_id', { unique: false });
-        // v6：marks 加 by_context 索引（时间脊：按 surface 会话取本会话的笔）。幂等：老库升级也补建。
-        const marksStore = req.transaction!.objectStore(MARKS);
-        if (!marksStore.indexNames.contains('by_context')) marksStore.createIndex('by_context', 'context_id', { unique: false });
+        const tx = req.transaction!;   // versionchange 事务：给已存在 store 加 index 用
+        const oldV = event.oldVersion; // 0 = 全新库
+
+        // ① 幂等结构基线：确保六个核心 store 存在（连建表时的初始 index）。不依赖 oldVersion，
+        //    自愈历史 HMR 坏库（"版本到位却缺表"）。
+        ensureStore(db, STORE, 'document_id');
+        ensureStore(db, PDF_STORE, 'document_id');
+        ensureStore(db, MARKS, 'entry_id', ['by_doc', 'document_id']);
+        ensureStore(db, TURNS, 'entry_id', ['by_doc', 'document_id']);
+        ensureStore(db, WORKSPACES, 'workspace_id');
+        ensureStore(db, MEETINGS, 'meeting_id', ['by_ws', 'workspace_id']);
+
+        // ② 阶梯迁移：每次 DB_VERSION 升级追加一块 if (oldV < N) {...}——给已存在 store 加 index /
+        //    字段级 backfill（须恰好跑一次的数据迁移放这）。
+        if (oldV < 6) ensureIndex(tx, MARKS, 'by_context', 'context_id'); // v6 时间脊（C2）
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
