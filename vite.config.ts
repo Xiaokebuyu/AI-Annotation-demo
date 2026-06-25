@@ -99,7 +99,18 @@ export default defineConfig(({ mode }) => {
     // dev 下相对基址同样工作；public 资产仍服务于根，配合 renderer 的 BASE_URL 相对解析。
     base: './',
     server: { port: 8765, strictPort: true },
-    build: { target: 'es2022' },
+    build: {
+      target: 'es2022',
+      rollupOptions: {
+        output: {
+          // pdfjs-dist 本体(~数百KB)拆出主包，否则 index.js 触发 >500KB 警告。
+          // worker(.mjs)本就独立加载，这里拆的是主线程那半。
+          manualChunks(id) {
+            if (id.includes('node_modules/pdfjs-dist')) return 'pdfjs';
+          },
+        },
+      },
+    },
     plugins: [inferenceProxy(env)],
   };
 });
