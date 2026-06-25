@@ -12,13 +12,15 @@
  *   REQ  {"id":"r1","method":"recognizeInk","args":{...}}
  *   RES  {"id":"r1","ok":true,"result":{...}}   // 或 {"id":"r1","ok":false,"error":"..."}
  */
+import { z } from 'zod';
+import { bridgeRpcRes, ondeviceResult, type BridgeRpcRes } from '../core/schemas';
 
 interface NativeChannel {
   postMessage(data: string): void;
   addEventListener?(type: 'message', cb: (e: { data: string }) => void): void;
   onmessage?: ((e: { data: string }) => void) | null;
 }
-interface RpcRes { id: string; ok: boolean; result?: unknown; error?: string }
+type RpcRes = BridgeRpcRes;
 
 function channel(): NativeChannel | null {
   const w = window as unknown as { InkLoopOcr?: NativeChannel };
@@ -37,8 +39,11 @@ let wired = false;
 function ensureWired(ch: NativeChannel): void {
   if (wired) return;
   const handler = (e: { data: string }): void => {
-    let msg: RpcRes;
-    try { msg = JSON.parse(e.data) as RpcRes; } catch { return; }
+    let raw: unknown;
+    try { raw = JSON.parse(e.data); } catch { return; }
+    const parsed = bridgeRpcRes.safeParse(raw); // C5：桥应答畸形即丢弃，防 Kotlin 契约漂移污染下游
+    if (!parsed.success) return;
+    const msg = parsed.data;
     const r = pending.get(msg.id);
     if (r) { pending.delete(msg.id); r(msg); }
   };
@@ -48,14 +53,19 @@ function ensureWired(ch: NativeChannel): void {
 }
 
 /** 发一次 RPC；无桥/未启用/超时/出错/应答 ok=false 一律解析为 null（让调用方降级）。 */
-function rpc<T>(method: string, args: unknown, timeoutMs = 6000): Promise<T | null> {
+function rpc<T>(method: string, args: unknown, resultSchema: z.ZodType<T>, timeoutMs = 6000): Promise<T | null> {
   const ch = channel();
   if (!ch || !enabled) return Promise.resolve(null);
   ensureWired(ch);
   const id = `r${++seq}`;
   return new Promise<T | null>((resolve) => {
     const to = setTimeout(() => { pending.delete(id); resolve(null); }, timeoutMs);
-    pending.set(id, (res) => { clearTimeout(to); resolve(res.ok ? (res.result as T) : null); });
+    pending.set(id, (res) => {
+      clearTimeout(to);
+      if (!res.ok) return resolve(null);
+      const parsed = resultSchema.safeParse(res.result); // C5：结果不符约定形状 → null → 调用方降级云端
+      resolve(parsed.success ? parsed.data : null);
+    });
     try { ch.postMessage(JSON.stringify({ id, method, args })); }
     catch { clearTimeout(to); pending.delete(id); resolve(null); }
   });
@@ -69,16 +79,16 @@ export function ondeviceRecognizeInk(
   inkPng: string | undefined, strokes?: unknown,
 ): Promise<{ kind: string; reading: string; description: string } | null> {
   if (!inkPng) return Promise.resolve(null);
-  return rpc('recognizeInk', { inkPng, strokes });
+  return rpc('recognizeInk', { inkPng, strokes }, ondeviceResult.recognizeInk);
 }
 
 /** Seam B：图像区域 OCR（圈/划命中图区或无文字对象时的兜底）。 */
 export function ondeviceOcrRegion(imagePng: string): Promise<{ text: string } | null> {
-  return rpc('ocrRegion', { imagePng });
+  return rpc('ocrRegion', { imagePng }, ondeviceResult.ocrRegion);
 }
 
 /** 能力探测：gms=板上有无 Google Play 服务（决定 ML Kit Digital Ink 手写是否可用；无 gms 则手写留云）。
  *  印刷区域 OCR（ML Kit text-recognition，模型打进 APK）不依赖 gms、恒可用——端侧真正能承载的就是它。 */
 export function ondeviceCapabilities(): Promise<{ gms?: boolean } | null> {
-  return rpc('capabilities', {});
+  return rpc('capabilities', {}, ondeviceResult.capabilities);
 }

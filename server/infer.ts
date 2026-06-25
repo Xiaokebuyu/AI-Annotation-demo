@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { SYSTEM_PROMPTS, type PromptRole } from './prompts';
 
 /**
@@ -185,6 +186,18 @@ function extractJson(text: string): any {
   return { result_type: rt ? rt[1] : undefined, content: cm ? cm[1] : text, confidence: cf ? Number(cf[1]) : undefined };
 }
 
+// C5：AI 返回的声明式 schema（替代手写 String()/默认兜底，行为等价）。每字段 .catch 默认 = 缺/坏字段回退，
+// 故 .parse 对 extractJson 的任意对象都不抛；跨字段逻辑（kind 依赖 reading 等）仍留在各函数内。
+const interpretRawSchema = z.object({
+  reading: z.string().catch(''),
+  kind: z.string().catch(''),
+  description: z.string().catch(''),
+});
+const classifyRawSchema = z.object({
+  respond: z.boolean().catch(true), // 缺/非布尔 → true（等价旧 respond !== false）
+  reason: z.string().catch(''),
+});
+
 
 
 
@@ -200,11 +213,11 @@ export async function runInterpret(payload: any): Promise<{ reading: string; kin
   // 画（sketch/mixed）另给一句"大概像什么"的粗描述（笑脸/箭头/方框…）——只描述长相，不揣测意图（意图交推理模型）。
   const system = SYSTEM_PROMPTS.ink_classifier;
   const raw = await gateway(system, 'Classify, transcribe and describe this ink:', 300, image, payload?.model);
-  const j = extractJson(raw);
-  const reading = String(j.reading || '').trim();
+  const j = interpretRawSchema.parse(extractJson(raw)); // 全 string，缺/坏字段 → ''
+  const reading = j.reading.trim();
   const KINDS = ['handwriting', 'sketch', 'mixed', 'none'];
   const kind = KINDS.includes(j.kind) ? j.kind : (reading ? 'handwriting' : 'none'); // 缺 kind 时按有无文字兜底
-  const description = (kind === 'sketch' || kind === 'mixed') ? String(j.description || '').trim() : '';
+  const description = (kind === 'sketch' || kind === 'mixed') ? j.description.trim() : '';
   return { reading, kind, description };
 }
 
@@ -229,8 +242,8 @@ export async function runClassifyContext(payload: any): Promise<{ respond: boole
     (history ? `\n最近对话：\n${history}\n` : '') +
     '\n该不该现在回应？';
   const raw = await gateway(system, user, 200, undefined, payload?.model);
-  const j = extractJson(raw);
-  return { respond: j?.respond !== false, reason: String(j?.reason || '').slice(0, 120) };
+  const j = classifyRawSchema.parse(extractJson(raw));
+  return { respond: j.respond, reason: j.reason.slice(0, 120) };
 }
 
 
