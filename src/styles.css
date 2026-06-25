@@ -15,6 +15,24 @@
   --serif: "Noto Serif SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
   --sans: -apple-system, "PingFang SC", "Noto Sans SC", "Helvetica Neue", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* 间距 / 圆角 / 描边（E1：补 token 化，逐步替代散落字面量） */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-6: 24px; --sp-8: 32px;
+  --radius-s: 6px; --radius-m: 10px; --stroke-hair: 1px;
+
+  /* 锚点旁注配色（E1：anchor-layer 硬编码色纳入 token；body.eink-bw 可整体覆盖） */
+  --anchor-ink: #1d1b18; --anchor-bg: #fffdf9; --anchor-line: #d6e7e8;
+  --anchor-accent: #2f6b73; --anchor-accent-margin: #b86b3c; --anchor-accent-link: #607780;
+}
+
+/* 墨水屏纯黑白模式（E1）：壳/移动版给 <body> 加 .eink-bw → 暖纸感令牌整体压成中性黑白灰。
+   这是「调色板模式」(只覆盖 color 令牌)，不是被弃的桌面布局套皮——布局各自负责。 */
+body.eink-bw {
+  --paper: #ffffff; --page: #ffffff; --ink: #000000; --mut: #444444; --hint: #666666;
+  --line: #cccccc; --ai-bg: #f4f4f4; --ai-line: #999999; --hl: #e6e6e6; --sel: #000000;
+  --ok: #000000; --bad: #000000;
+  --anchor-ink: #000000; --anchor-bg: #ffffff; --anchor-line: #cccccc;
+  --anchor-accent: #000000; --anchor-accent-margin: #000000; --anchor-accent-link: #555555;
 }
 
 * { box-sizing: border-box; }
@@ -464,10 +482,10 @@ body.doc-loaded #stage::after {
 /* 锚点落位层（v3 anchor-layer）：AI 输出按 HMP 锚点贴回原页，点击溯源回原文 */
 #anchor-layer .anchor-note {
   font: 13px/1.5 -apple-system, "Noto Sans CJK SC", sans-serif;
-  color: #1d1b18; background: #fffdf9; border: 1px solid #d6e7e8;
-  border-left: 3px solid #2f6b73; border-radius: 7px; padding: 8px 11px;
+  color: var(--anchor-ink); background: var(--anchor-bg); border: 1px solid var(--anchor-line);
+  border-left: 3px solid var(--anchor-accent); border-radius: 7px; padding: 8px 11px;
   box-shadow: 0 2px 10px rgba(20,30,30,.08); cursor: pointer; max-width: 230px;
 }
-#anchor-layer .anchor-note[data-kind="margin"] { border-left-color: #b86b3c; }
-#anchor-layer .anchor-note[data-kind="link"] { border-left-color: #607780; font-style: italic; }
+#anchor-layer .anchor-note[data-kind="margin"] { border-left-color: var(--anchor-accent-margin); }
+#anchor-layer .anchor-note[data-kind="link"] { border-left-color: var(--anchor-accent-link); font-style: italic; }
 #anchor-layer .anchor-note:hover { box-shadow: 0 3px 14px rgba(20,30,30,.16); }
