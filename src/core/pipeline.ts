@@ -8,6 +8,7 @@ import { resolveTarget, buildHmp } from '../evidence/target';
 import { buildMarkGraph } from '../evidence/mark-graph';
 import { findSpatialRecall, type RecallCandDiag } from '../evidence/recall';
 import { findThematicRecall } from '../evidence/thematic';
+import { vectorStore } from '../local/vector';
 import { projectInferenceView } from '../evidence/inference-view';
 import type { Mark, Session } from '../capture/session';
 import { mark } from './metrics';
@@ -274,7 +275,7 @@ function mirrorView(view: InferenceView, reason: string, discId: string): void {
   devEmit('inferview', () => ({
     discId, trigger: reason,
     narrative: view.narrative, marked: view.marked, question: view.question ?? null,
-    referent_lines: view.referent_lines ?? null, recall_n: view.recall?.length ?? 0, thematic_n: view.thematic?.length ?? 0,
+    referent_lines: view.referent_lines ?? null, recall_n: view.recall?.length ?? 0, thematic_n: view.thematic?.length ?? 0, vector_available: vectorStore.available,
     page_annot_n: view.page_annotations?.length ?? 0,
     anchor_refs: view.anchor_refs, has_crop: !!view.crop, page_ctx_len: view.page_context?.length ?? 0,
   }));

@@ -11,6 +11,7 @@ import type { ReflowBlock } from '../surface/reflow';
 import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
 import { DB_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
+import { vectorStore } from './vector';
 
 const DB_NAME = 'inkloop';
 const STORE = 'docs';
@@ -214,6 +215,10 @@ function entriesByDoc<T extends { seq: number }>(storeName: string, documentId: 
 /** 追加一条 mark 条目（含 tombstone）。store 填 entry_id/seq/created_at。 */
 export function appendMarkEntry(m: Omit<PersistedMark, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
   const rec: PersistedMark = { ...m, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
+  // C6：标注落账本同时排入向量库 seam（今 no-op）——真向量库接上时历史数据已在库，免冷启动 backfill。
+  if (!rec.is_tombstone && rec.marked_text) {
+    void vectorStore.upsert({ id: rec.entry_id, bookId: rec.document_id, pageIndex: rec.page_index, text: rec.marked_text, anchorRefs: rec.hmp?.target_object_refs });
+  }
   return appendEntry(MARKS, rec);
 }
 
