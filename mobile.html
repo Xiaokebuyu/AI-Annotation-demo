@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>InkLoop · 移动版布局原型</title>
+<style>
+  :root{
+    --page:#ffffff;         /* 纸面：纯白满幅 */
+    --ink:#111111;          /* 墨 / 图标：近黑 */
+    --mut:#8a8a8a;          /* 次要 */
+    --hair:#e6e6e6;         /* 发丝分隔 */
+    --grid:#efefef;         /* 极淡点阵（书写参考） */
+    --sel:#111111;          /* 选中反色块 */
+    --sans:-apple-system,"PingFang SC","Noto Sans SC","Helvetica Neue",sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,"Roboto Mono",monospace;
+    --serif:"Noto Serif SC","Songti SC","Source Han Serif SC",Georgia,serif;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;margin:0;}
+  body{font:14px/1.5 var(--sans);color:var(--ink);background:var(--page);overflow:hidden;}
+
+  #m-app{height:100%;display:flex;}
+
+  /* ── 左缘竖条工具栏 ── */
+  #m-rail{
+    flex:0 0 auto;width:48px;display:flex;flex-direction:column;align-items:center;
+    padding:6px 0;border-right:1px solid var(--hair);background:var(--page);
+    transition:transform .12s ease;z-index:5;
+  }
+  .rl-btn{width:38px;height:38px;display:grid;place-items:center;border:none;background:transparent;color:var(--ink);border-radius:10px;cursor:pointer;margin:2px 0;}
+  .rl-btn:active{background:#f1f1f1;}
+  .rl-btn.on{background:var(--sel);color:#fff;}
+  .rl-btn svg{width:21px;height:21px;}
+  .rl-btn.dim{color:var(--mut);}
+  .rl-sep{width:22px;height:1px;background:var(--hair);margin:6px 0;}
+  .rl-spacer{flex:1;}
+
+  /* 收起态：栏滑出，左缘留一个细把手 */
+  body.rail-off #m-rail{transform:translateX(-48px);}
+  #m-tab{
+    position:fixed;left:6px;top:8px;width:30px;height:30px;display:none;place-items:center;
+    border:1px solid var(--hair);border-radius:9px;background:var(--page);color:var(--ink);cursor:pointer;z-index:6;
+  }
+  body.rail-off #m-tab{display:grid;}
+  #m-tab svg{width:18px;height:18px;}
+
+  /* ── 满幅可写页面 ── */
+  #m-canvas{flex:1;min-height:0;position:relative;overflow:hidden;}
+  #m-page{
+    position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--page);
+    background-image:radial-gradient(var(--grid) 1.1px, transparent 1.1px);
+    background-size:22px 22px;background-position:10px 12px;
+  }
+  /* 底部居中、极轻的页码（空白页隐去；PDF 才显） */
+  #m-pageind{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);font:11px var(--mono);color:var(--mut);opacity:.0;}
+
+  /* AI 旁注：页边的等宽声音（无竖线、贴行下方）—— 示意位 */
+  .m-whisper{position:absolute;font:12px/1.6 var(--mono);color:#555;width:min(72%,240px);}
+</style>
+</head>
+<body>
+<div id="m-app">
+
+  <nav id="m-rail">
+    <button class="rl-btn dim" id="rl-menu" aria-label="菜单 / 模式 / 笔记本">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <div class="rl-sep"></div>
+
+    <button class="rl-btn on" data-tool aria-label="钢笔">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg>
+    </button>
+    <button class="rl-btn" data-tool aria-label="高亮">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l-1 4h8M8.5 14.5l7-7 3 3-7 7h-3v-3z"/><path d="M3 21h18" opacity=".4"/></svg>
+    </button>
+    <button class="rl-btn" data-tool aria-label="橡皮">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16l8.5-8.5a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8L12 18H8l-2-2z"/><path d="M5 21h14" opacity=".4"/></svg>
+    </button>
+    <button class="rl-btn" data-tool aria-label="手型 / 拖动">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-1.5a4 4 0 0 1-3-1.4L5 16.5a1.5 1.5 0 0 1 2.3-2L8 15.3"/></svg>
+    </button>
+
+    <div class="rl-sep"></div>
+    <button class="rl-btn dim" aria-label="撤销">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 6L3 10l4 4"/><path d="M3 10h11a6 6 0 1 1 0 12h-4"/></svg>
+    </button>
+
+    <div class="rl-spacer"></div>
+
+    <button class="rl-btn dim" aria-label="AI 洞察">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>
+    </button>
+    <button class="rl-btn dim" id="rl-collapse" aria-label="收起工具栏">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+  </nav>
+
+  <div id="m-tab" aria-label="展开工具栏">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+  </div>
+
+  <main id="m-canvas">
+    <div id="m-page"></div>
+    <div id="m-pageind">1 / 1</div>
+  </main>
+
+</div>
+
+<script>
+  document.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-tool]').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+  }));
+  document.getElementById('rl-collapse').addEventListener('click', () => document.body.classList.add('rail-off'));
+  document.getElementById('m-tab').addEventListener('click', () => document.body.classList.remove('rail-off'));
+</script>
+</body>
+</html>

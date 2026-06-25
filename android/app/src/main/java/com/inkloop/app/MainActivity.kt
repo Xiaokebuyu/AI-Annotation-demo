@@ -4,9 +4,12 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.Gravity
+import android.view.View
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -50,6 +53,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 设备形态=竖向电纸屏(IT8951 面板 3:4)。不改 activity 朝向(本板显示固定横向，
+        // requestedOrientation=PORTRAIT 会卡死 activity)，而是把 WebView 本体做成 3:4 竖框：
+        //  · 前端按窄屏(≤640) 走手机版竖屏布局；
+        //  · PixelCopy 抓这块竖框 → EinkBridge TRANSVERSE → 满幅填到电纸屏(同 3:4，无黑边)。
+        // 沉浸式全屏隐藏系统栏，给电纸屏满幅，也为后续 launcher/kiosk 形态铺路。
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            )
+
         val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         WebView.setWebContentsDebuggingEnabled(debuggable)
 
@@ -58,18 +75,23 @@ class MainActivity : ComponentActivity() {
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
 
-        webView = WebView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-        setContentView(webView)
+        // 3:4 竖框，按物理屏高算宽(电纸屏 1404:1872)，居中放在深色底上(HDMI/内屏剩余区留黑边)。
+        val screenH = resources.displayMetrics.heightPixels
+        val portraitW = screenH * 3 / 4
+        webView = WebView(this)
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.parseColor("#11110f")) }
+        root.addView(webView, FrameLayout.LayoutParams(portraitW, screenH).apply { gravity = Gravity.CENTER })
+        setContentView(root)
         configureWebView(assetLoader)
 
         // 端侧印刷区域 OCR 桥：注册 window.InkLoopOcr（ocrRegion=ML Kit text+PP-OCR 兜底）。
         // 注册后前端 ondevice.available()=true → ocrRegion 走端侧；recognizeInk 端侧返回 unavailable → 前端自动降级云端。
         // 要纯套壳（全部走云）只需注释下一行。
         com.example.hmpocrpoc.OcrBridge.attach(webView, this)
+
+        // 电纸屏推帧桥：注册 window.InkLoopEink。前端内容变化发 pageReady → PixelCopy 抓帧 → 灰度 →
+        // abstract socket 交 eink-helper(root) 推 IT8951 电纸屏。无 helper/无电纸屏时静默失败、不影响 HDMI 显示。
+        com.example.hmpocrpoc.EinkBridge.attach(webView, this)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {

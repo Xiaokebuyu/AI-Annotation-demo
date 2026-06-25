@@ -27,7 +27,7 @@ import { initInsightPanel } from './surface/insight-panel';
 import { initToolbar } from './surface/toolbar';
 import { initDevOverlay } from './dev/dev-overlay';
 import { initNavShell } from './dev/console';
-import { initEinkMirror } from './surface/eink';
+import { initEinkMirror, signalInkArea } from './surface/eink';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -225,6 +225,7 @@ async function commitSession(bookId: string, reason: 'idle' | 'handwriting', tri
 }
 
 initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
+  signalInkArea(bboxOf(stroke.points)); // 电纸屏：该笔局部 A2 快刷（先于事件判定即刷；web/dev 无桥 no-op）
   if (!sessionTrace) sessionTrace = shortId('trc'); // 一段区域的笔共享 trace（recordEvent 要打点/计延迟，原版页专属）
   const evt = recordEvent(stroke, sessionTrace, pointerType, penUpAt);
   if (!evt) return;
