@@ -26,22 +26,34 @@ function cfg() {
   };
 }
 
+/**
+ * 模型家族路由表（D2）：前缀 → {渠道(=provider), 渠道 URL, thinking 配置}。route()/thinkingFor() 收口于此，不再各处 if。
+ * 2026-06-22 网关探针实测：Claude(adaptive)/Kimi(enabled+budget) 经网关回思考块；Gemini 经 DMX 不回传（不请求·白吃 token）。
+ * minTokens 给思考留头寸（保持原 claude 1280 等效上限）。
+ */
+const DMX_URL = 'https://www.dmxapi.cn/v1/messages';
+const MODEL_ROUTES: ReadonlyArray<{ prefix: string; channel: string; channel_url: string; thinking: any; minTokens: number }> = [
+  { prefix: 'kimi',   channel: 'kimi', channel_url: 'https://api.moonshot.cn/anthropic/v1/messages', thinking: { type: 'enabled', budget_tokens: 1024 }, minTokens: 1280 },
+  { prefix: 'claude', channel: 'DMX',  channel_url: DMX_URL, thinking: { type: 'adaptive', display: 'summarized' }, minTokens: 1280 },
+];
+const DEFAULT_ROUTE = { channel: 'DMX', channel_url: DMX_URL, thinking: null, minTokens: 0 }; // gemini / 其它：不请求思考
+
+function routeFor(model: string) {
+  return MODEL_ROUTES.find((r) => model.startsWith(r.prefix)) ?? DEFAULT_ROUTE;
+}
 function route(model: string): { channel: string; channel_url: string } {
-  if (model.startsWith('kimi')) {
-    return { channel: 'kimi', channel_url: 'https://api.moonshot.cn/anthropic/v1/messages' };
-  }
-  return { channel: 'DMX', channel_url: 'https://www.dmxapi.cn/v1/messages' };
+  const r = routeFor(model);
+  return { channel: r.channel, channel_url: r.channel_url };
+}
+function thinkingFor(model: string): { thinking: any; minTokens: number } | null {
+  const r = routeFor(model);
+  return r.thinking ? { thinking: r.thinking, minTokens: r.minTokens } : null;
 }
 
-/**
- * 思考配置按模型家族派生（与 route() 同按前缀，构成"家族→{渠道, thinking}"单一真源）。
- * 2026-06-22 网关探针实测：Claude（adaptive/enabled 都回）与 Kimi（enabled+budget→thinking_delta）经网关回思考块；
- * Gemini 经 DMX 不回传思考摘要（请求也无益、白吃 token）。minTokens 给思考留头寸（保持原 claude 的 1280 等效上限）。
- */
-function thinkingFor(model: string): { thinking: any; minTokens: number } | null {
-  if (model.startsWith('claude')) return { thinking: { type: 'adaptive', display: 'summarized' }, minTokens: 1280 };
-  if (model.startsWith('kimi')) return { thinking: { type: 'enabled', budget_tokens: 1024 }, minTokens: 1280 };
-  return null; // gemini / 其它：网关不回传思考，不请求
+// D2 调用可观测：每次网关调用记 requestId/model/provider/latency/ok（服务端日志；远程代理同样可采）。
+let aiCallSeq = 0;
+function logAiCall(meta: { requestId: string; model: string; provider: string; ms: number; ok: boolean; status: number }): void {
+  console.log(`[ai] ${JSON.stringify(meta)}`);
 }
 
 /** 低层网关调用：传完整 messages（可带 tools），返回完整响应 data。 */
@@ -54,12 +66,15 @@ async function callGateway(opts: { system: string; messages: any[]; maxTokens: n
   const max_tokens = model.startsWith('gemini') ? Math.max(opts.maxTokens, 2048) : opts.maxTokens;
   const body: any = { model, max_tokens, system: opts.system, messages: opts.messages, channel, channel_url };
   if (opts.tools) body.tools = opts.tools;
+  const requestId = `ai_${Date.now().toString(36)}_${++aiCallSeq}`;
+  const t0 = Date.now();
   const resp = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
     body: JSON.stringify(body),
   });
   const data: any = await resp.json().catch(() => ({}));
+  logAiCall({ requestId, model, provider: channel, ms: Date.now() - t0, ok: resp.ok, status: resp.status });
   if (!resp.ok) throw new Error(data?.error?.message || `网关返回 ${resp.status}`);
   return data;
 }

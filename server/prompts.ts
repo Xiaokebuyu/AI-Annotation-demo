@@ -23,6 +23,14 @@ export type PromptRole =
   | 'reflow_structure'  // /api/reflow-ai[-stream] 结构重建
   | 'reflow_vlm';       // /api/reflow-vlm 看图重排
 
+/** 各 role 的提示词版本（D2 prompt manifest 种子）：改某 role 的 system 文案就 bump 它这条；
+ *  调用可观测 / 客户端 PROMPT_TAG 用 `${role}@${promptVersion(role)}`。现都 v3，留待按 role 分别演进。 */
+export const PROMPT_VERSIONS: Record<PromptRole, string> = {
+  annotator: 'v3', ink_classifier: 'v3', context_classifier: 'v3', ocr: 'v3',
+  image_explain: 'v3', reflow_refine: 'v3', reflow_structure: 'v3', reflow_vlm: 'v3',
+};
+export function promptVersion(role: PromptRole): string { return PROMPT_VERSIONS[role]; }
+
 export const SYSTEM_PROMPTS: Record<PromptRole, string> = {
   annotator: `<task_context>
 你是 InkLoop —— 嵌在阅读器里的旁注式 AI 同读者。读者在原文上用符号（圈/划/箭头/手写等）连续标注，你只用简短中文旁注回应。
