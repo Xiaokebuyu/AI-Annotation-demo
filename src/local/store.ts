@@ -281,11 +281,13 @@ export async function updateOverlayState(documentId: string, overlay: ScreenOver
   });
 }
 
-/** 综合提交成功后：把水位线推到当前最大 seq（此前所有 mark 记为已综合）。 */
-export function setSynthesisWatermark(): void {
-  if (!current) return;
-  current.synthesis_watermark_seq = seqCounter;
-  scheduleSave();
+/** 综合提交成功后：把指定书的水位线推到当前最大 seq（此前所有 mark 记为已综合）。
+ *  默认当前活跃文档；AI 会话提交显式传归属文档——回答期间已切走时仍写对正确的书（B1）。 */
+export function setSynthesisWatermark(doc: PersistedDoc | null = current): void {
+  if (!doc) return;
+  doc.synthesis_watermark_seq = seqCounter;
+  if (doc === current) scheduleSave();
+  else void idbPut(doc); // 非活跃文档：直接落盘该书水位线，不动当前去抖
 }
 
 // ── docs 内部：页缓存（reflow/图解）──

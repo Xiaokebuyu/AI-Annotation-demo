@@ -219,9 +219,16 @@ async function commitSession(bookId: string, reason: 'idle' | 'handwriting', tri
   const sig = session.marks.map((m) => m.id).join(',') + ':' + reason + ':' + (triggerMark?.id ?? '');
   if (lastSig.get('sess_' + bookId) === sig) return;
   lastSig.set('sess_' + bookId, sig);
-  const discId = 'disc_' + (triggerMark?.id ?? session.marks[session.marks.length - 1].id);
-  const committed = await commitSessionDiscussion(session, reason, triggerMark, discId);
-  if (committed) { clearSession(bookId); lastSig.delete('sess_' + bookId); }
+  const committedIds = session.marks.map((m) => m.id); // 本批要综合的笔（综合期间新写的不在内、不被连带清掉）
+  const discId = 'disc_' + (triggerMark?.id ?? committedIds[committedIds.length - 1]);
+  const outcome = await commitSessionDiscussion(session, reason, triggerMark, discId);
+  if (outcome === 'committed') {
+    for (const id of committedIds) removeMark(bookId, id); // 只摘走已综合这批；综合期间新写的笔留作下一段（B1）
+    lastSig.delete('sess_' + bookId);
+  } else if (outcome === 'failed') {
+    lastSig.delete('sess_' + bookId); // AI 失败：marks 保留（没摘），清 sig 让下次 idle 能就同一批重试（B2）
+  }
+  // folded：marks 保留 + sig 保留（不重复触发；新笔改变 sig 时再连带综合）
 }
 
 initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {

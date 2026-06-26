@@ -15,8 +15,10 @@ export async function chatTurn(
   userContent: string,
   opts: { role: string; model: string; maxTokens?: number; onDelta?: (full: string) => void; onThinking?: (full: string) => void; signal?: AbortSignal; images?: Array<{ data: string }> },
 ): Promise<ChatTurnResult> {
-  appendMsg(bookId, { role: 'user', content: userContent }); // 历史只存文字：图不进 buffer（避免每轮重发/滚雪球）
-  const messages: Array<{ role: string; content: unknown }> = bookMessages(bookId).map((m) => ({ role: m.role, content: m.content as unknown }));
+  // 历史只存文字（图不进 buffer，避免每轮重发/滚雪球）。本轮新 user 先不入 buffer：成功后再连同 assistant
+  // 一起提交，失败抛出则 buffer 不动、不留没有回复的孤儿 user 消息（B2 事务式）。
+  const history = bookMessages(bookId).map((m) => ({ role: m.role, content: m.content as unknown }));
+  const messages: Array<{ role: string; content: unknown }> = [...history, { role: 'user', content: userContent }];
   // 仅本轮：若带图（被判需图片识别的内容），把最后一条 user 消息换成 [图块…, 文字]
   if (opts.images?.length) {
     const blocks = opts.images.map((im) => {
@@ -37,6 +39,7 @@ export async function chatTurn(
     { signal: opts.signal },
   );
   text = text.trim(); thinking = thinking.trim();
+  appendMsg(bookId, { role: 'user', content: userContent }); // 成功才提交本轮（user + assistant 一起入 buffer）
   appendMsg(bookId, { role: 'assistant', content: text });
   return { text, thinking };
 }

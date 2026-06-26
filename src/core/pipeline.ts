@@ -15,7 +15,7 @@ import { projectInferenceView } from '../evidence/inference-view';
 import type { Mark, Session } from '../capture/session';
 import { mark } from './metrics';
 import { trace } from './trace';
-import { bus, settings, state, type Stroke } from '../app/state';
+import { bus, settings, state, getActiveContext, type Stroke } from '../app/state';
 import { grabLayers, grabRegion } from '../evidence/ocr';
 import { ondeviceRecognizeInk, ondeviceOcrRegion } from '../evidence/ondevice';
 import { classifyIntentLocal, classifyIntentExplained } from '../evidence/intent-rules';
@@ -430,11 +430,18 @@ async function slidingContext(maxChars = 3000): Promise<string> {
   return [prevTail, cur, nextHead].filter(Boolean).join('\n');
 }
 
+export type CommitOutcome = 'committed' | 'folded' | 'failed';
 export async function commitSessionDiscussion(
   session: Session, reason: 'idle' | 'handwriting', triggerMark: Mark | undefined, discId: string,
-): Promise<boolean> {
-  const marks = session.marks;
-  if (!marks.length) return false;
+): Promise<CommitOutcome> {
+  // B1 守卫：回答/旁注/水位线都只写「发起本次综合的归属实例」，回答期间切走也不灌进切换后的文档。
+  const ownerCtx = getActiveContext();
+  const ownerDoc = ownerCtx.storeDoc;
+  const ownerPageIndex = state.pageIndex;
+  const aiGen = ++ownerCtx.aiGeneration;
+  const alive = () => ownerCtx.aiGeneration === aiGen && getActiveContext() === ownerCtx; // 仍在归属实例、未被新一轮抢占
+  const marks = session.marks.slice(); // 快照：综合期间新写的笔不混入本批（也不被本批连带清掉）
+  if (!marks.length) return 'folded';
   const graph = buildMarkGraph(marks, marks.map((m) => m.hmp));
   bus.emit('graph:built', graph); // dev：关联框可视（按非时间边连通分量框住成组标注）
   const anchorMark = (reason === 'handwriting' && triggerMark) ? triggerMark : marks[marks.length - 1];
@@ -540,7 +547,7 @@ export async function commitSessionDiscussion(
         state: 'folded', result_type: 'inspiration', object_refs: view.anchor_refs,
       };
       await appendAiTurnEntry({
-        document_id: bookId, page_id: foldPageId, page_index: state.pageIndex,
+        document_id: bookId, page_id: foldPageId, page_index: ownerPageIndex,
         overlay_id: discId, overlay: foldOverlay, overlay_state: 'folded', user_edited_text: null,
         ai_reply: '',
         anchor: { surface_id: view.page_id, mark_ids: marks.map((m) => m.id), object_refs: view.anchor_refs },
@@ -552,7 +559,7 @@ export async function commitSessionDiscussion(
         diag: { classify: classifyDiag, sent_image: false },
       });
       bus.emit('aiturn:appended', bookId); // 会话页开着 → 刷新即见这条折叠轮
-      return false;
+      return 'folded';
     }
   }
   openBook(bookId);
@@ -570,7 +577,7 @@ export async function commitSessionDiscussion(
       role: 'annotator', model: settings.inferModel,
       maxTokens: reason === 'idle' ? 600 : 400,
       images: view.crop ? [{ data: view.crop.data }] : [], // 被判需图片识别的内容：把合成图/笔迹图送进主推理
-      onDelta: (t) => bus.emit('anchor:place', { id: discId, pageId, anchorRefs, bbox: view.anchor_bbox, text: t, kind: 'note' }),
+      onDelta: (t) => { if (alive()) bus.emit('anchor:place', { id: discId, pageId, anchorRefs, bbox: view.anchor_bbox, text: t, kind: 'note' }); }, // 切走后不再往当前 surface 喷流式锚（B1）
     });
     modelMs = Math.round(performance.now() - tModel0); // 主模型流式往返耗时（取代 上下文监控 的 ms）
     thinking = tk; // 思考过程不进 buffer，只随账本存、供调试页展示
@@ -585,8 +592,17 @@ export async function commitSessionDiscussion(
     (result as unknown as { _debug?: unknown })._debug = { mode: 'chat-session', trigger: reason, narrative: view.narrative, marked: view.marked, buffer_turns: bookMessages(bookId).length, referent_lines: view.referent_lines, recall: view.recall, thematic_n: view.thematic?.length ?? 0 };
     trace('InferenceResult(session)', result as unknown as Record<string, unknown>);
   } catch (err) {
-    bus.emit('anchor:clear', discId);
-    result = errorResult(anchorMark.event, err);
+    if (alive()) bus.emit('anchor:clear', discId);
+    // B2：AI 失败不当成功——不入账本、不推水位线、保留 pending marks（下次 idle 可重试），只在归属实例显示一条瞬时错误旁注。
+    const errOverlay = buildOverlay(errorResult(anchorMark.event, err), anchorMark.event);
+    errOverlay.overlay_id = discId;
+    errOverlay.geometry = { anchor_bbox: view.anchor_bbox };
+    errOverlay.object_refs = view.anchor_refs;
+    const prevErr = ownerCtx.overlays.find((o) => o.overlay_id === discId);
+    if (prevErr) ownerCtx.overlays = ownerCtx.overlays.filter((o) => o !== prevErr);
+    ownerCtx.overlays.push(errOverlay);
+    if (alive()) { if (prevErr) bus.emit('overlay:remove', discId); bus.emit('overlay:add', errOverlay); }
+    return 'failed';
   }
 
   pushInspect({
@@ -598,15 +614,15 @@ export async function commitSessionDiscussion(
     resultType: result.result_type, content: result.content, confidence: result.confidence, recalled: [], model: result.model_name,
   });
 
-  // upsert overlay by discId
-  const prev = state.overlays.find((o) => o.overlay_id === discId);
-  if (prev) { state.overlays = state.overlays.filter((o) => o !== prev); bus.emit('overlay:remove', discId); }
+  // upsert overlay by discId（写归属实例 ownerCtx；切走则只入实例、不发 UI 事件，切回时由账本恢复重建——B1）
+  const prev = ownerCtx.overlays.find((o) => o.overlay_id === discId);
+  if (prev) { ownerCtx.overlays = ownerCtx.overlays.filter((o) => o !== prev); if (alive()) bus.emit('overlay:remove', discId); }
   const overlay = buildOverlay(result, anchorMark.event);
   overlay.overlay_id = discId;
   overlay.geometry = { anchor_bbox: view.anchor_bbox };
   overlay.object_refs = view.anchor_refs; // 跨视图锚
-  state.overlays.push(overlay);
-  bus.emit('overlay:add', overlay);
+  ownerCtx.overlays.push(overlay);
+  if (alive()) bus.emit('overlay:add', overlay);
 
   // 处理流水线（DEV）：把这一轮经手的每个组件「收到什么 → 产出什么」按执行顺序串起来，供会话页逐步复盘。
   let pipeline: PipelineStage[] | undefined;
@@ -708,7 +724,7 @@ export async function commitSessionDiscussion(
 
   // 落账本：ai_turn 进书日志（显示快照 + 锚点 + view 快照[crop 剥] + provenance）；并推综合水位线
   await appendAiTurnEntry({
-    document_id: bookId, page_id: pageId, page_index: state.pageIndex,
+    document_id: bookId, page_id: pageId, page_index: ownerPageIndex,
     overlay_id: discId, overlay, overlay_state: 'shown', user_edited_text: null,
     ai_reply: result.content,
     anchor: { surface_id: view.page_id, mark_ids: marks.map((m) => m.id), object_refs: view.anchor_refs },
@@ -720,7 +736,7 @@ export async function commitSessionDiscussion(
     diag: { classify: classifyDiag, sent_image: !!view.crop },
     pipeline,
   });
-  setSynthesisWatermark(); // 此前所有 mark 记为已综合；之后的新 mark = pending
+  setSynthesisWatermark(ownerDoc); // 推归属书的综合水位线（回答期间已切走也写对书）；此前 mark 记为已综合
   bus.emit('aiturn:appended', bookId); // 账本已落 → 通知会话页刷新（overlay:add 早于本 await，单靠它读账本会漏最新一轮）
-  return true;
+  return 'committed';
 }

@@ -4,7 +4,7 @@ import type { TextItem } from 'pdfjs-dist/types/src/display/api';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { NormBBox, OcrTextBlock } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
-import { sha256Hex } from '../core/ids';
+import { sha256Hex, pageIdFor } from '../core/ids';
 import { setPageSize, GUTTER_W } from '../core/transform';
 import { blankSurfaceIndex } from '../core/surface-index';
 import { trace } from '../core/trace';
@@ -25,6 +25,14 @@ const publicAssetUrl = (path: string): string =>
 // pdf（当前 PDFDocumentProxy）已迁入 SurfaceContext（方案 B Stage 1）：读写走 getActiveContext().pdf，
 // 切回主阅读/已开会议资料免重新 fetch/decode。renderTask 是单 DOM 渲染锁，留模块级（单激活不双渲）。
 let renderTask: { cancel(): void; promise: Promise<void> } | null = null;
+
+/** 取消当前未完成的 PDF 渲染任务（切白板/切实例/载入新文档前调，防旧页像素继续写共享 pageCv 污染下一画面）。 */
+export function cancelActiveRender(): void {
+  if (renderTask) {
+    try { renderTask.cancel(); } catch { /* noop */ }
+    renderTask = null;
+  }
+}
 
 let pageCv: HTMLCanvasElement;
 let inkCv: HTMLCanvasElement;
@@ -99,32 +107,42 @@ async function extractImageRegions(page: PDFPageProxy, vp: PageViewport): Promis
  * 注意 getDocument({data}) 可能 detach buf，故 Blob 拷贝在调用前由 loadFile 先建好。
  */
 async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob | null, docId?: string): Promise<void> {
-  // 载入归属的实例（会议资料=meetingCtx、主阅读=readerCtx）。下方所有 doc 字段都写 capturedCtx 而非
-  // state proxy / getActiveContext()——否则载入期间退会议/切实例，迟到的 await 会把本文档灌进切换后的实例（P0-5）。
+  // 载入归属的实例（会议资料=meetingCtx、主阅读=readerCtx）：所有 doc 字段写 capturedCtx 而非 state proxy /
+  // 重读 getActiveContext()——否则载入期间切实例会把本文档灌进切换后的实例（P0-5）。
   const sctx = getActiveContext();
-  sctx.fileHash = await sha256Hex(buf);
-  sctx.documentId = docId ?? ('doc_' + sctx.fileHash.slice(0, 12)); // 默认 hash 派生；docId 显式覆盖（会议资料按稳定 id 归档，转换非确定性也不漂）
+  const loadGen = ++sctx.loadGeneration; // 本实例最新一次载入；被同实例新载入抢占（连开两份资料）则旧的不再写字段（B4 latest-wins）
+  const fresh = () => sctx.loadGeneration === loadGen; // 先把异步结果算到局部、校验仍是最新再写字段，避免旧载入覆盖新载入
+  cancelActiveRender(); // 切文档先取消在途渲染，防旧页像素继续写 pageCv（B3）
+
+  const fileHash = await sha256Hex(buf);
+  if (!fresh()) return; // openDoc 之前的早退都安全：模块 current 尚未被本次触碰
+  sctx.fileHash = fileHash;
+  sctx.documentId = docId ?? ('doc_' + fileHash.slice(0, 12)); // 默认 hash 派生；docId 显式覆盖（会议资料按稳定 id 归档）
   sctx.fileName = filename;
   sctx.surfaceType = 'article';
-  // cMapUrl/standardFontDataUrl：救老中文 PDF —— 非嵌入 CID 字体 + 预定义 CJK CMap（如 GBK-EUC-H）
-  // 需要 CMap 表才能把字符码映射成字形，否则中文画布渲染与 getTextContent 都出空白/乱码。
-  // 资产在 public/（cp 自 pdfjs-dist），dev 与 build 均自动服务于根路径。
+  // cMapUrl/standardFontDataUrl：救老中文 PDF（非嵌入 CID 字体 + 预定义 CJK CMap），否则中文渲染/取文出空白。资产在 public/。
   const pdf = await pdfjsLib.getDocument({
     data: buf,
     cMapUrl: publicAssetUrl('cmaps/'),
     cMapPacked: true,
     standardFontDataUrl: publicAssetUrl('standard_fonts/'),
   }).promise;
+  if (!fresh()) { try { void pdf.destroy(); } catch { /* noop */ } return; } // 被抢占：销毁这份没人要的 PDF，免泄漏
   sctx.pdf = pdf; // 迁入归属实例（切回免重新 fetch/decode）
   sctx.pageCount = pdf.numPages;
   sctx.strokesByPage.clear();
-  // 文档级元信息：Info 字典(Title/Author/Producer/CreationDate…) + 大纲目录。真书常有，喂重排/AI 排版。
-  try { const m = await pdf.getMetadata(); sctx.docMeta = (m && m.info) ? m.info as Record<string, unknown> : null; } catch { sctx.docMeta = null; }
-  try { sctx.outline = await pdf.getOutline(); } catch { sctx.outline = null; }
+  // 文档级元信息：Info 字典 + 大纲目录（真书常有，喂重排/AI 排版）。
+  const docMeta = await pdf.getMetadata().then((m) => (m && m.info ? (m.info as Record<string, unknown>) : null)).catch(() => null);
+  const outline = await pdf.getOutline().catch(() => null);
+  if (!fresh()) return;
+  sctx.docMeta = docMeta;
+  sctx.outline = outline;
   // 载入本地已存的语义蒸馏（重排/记忆/图解缓存）；没有则新建。重开同一文档即恢复。
   await openDoc({ document_id: sctx.documentId, file_hash: sctx.fileHash, filename, page_count: sctx.pageCount });
-  sctx.storeDoc = activeDoc(); // 把载入的文档挂到归属实例，供切回时 store.current 重指向（P0-4）
-  sctx.pageIndex = Math.min(Math.max(lastReadPage(), 0), Math.max(0, sctx.pageCount - 1)); // 重开跳回阅读位置
+  if (fresh()) {
+    sctx.storeDoc = activeDoc(); // 把载入的文档挂到归属实例，供切回时 store.current 重指向（P0-4）
+    sctx.pageIndex = Math.min(Math.max(lastReadPage(), 0), Math.max(0, sctx.pageCount - 1)); // 重开跳回阅读位置
+  }
   if (persist) await storePdfBlob(sctx.documentId, persist); // 导入：PDF 字节落库（重开免重导）
   trace('PDFDocument', {
     document_id: sctx.documentId,
@@ -136,9 +154,9 @@ async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob |
     local_original_path: '(browser memory ref)',
     version: SCHEMA_VERSION,
   });
-  // openDoc 已把模块 current 设成本文档；若载入期间切走，重指向回真正活跃实例的 doc，维持「current=活跃实例文档」不变式（P0-4）。
+  // openDoc 改了模块 current；总是重指向回真正活跃实例的 doc，维持「current=活跃实例文档」不变式（P0-4）。
   setActiveDoc(getActiveContext().storeDoc);
-  if (getActiveContext() !== sctx) return; // 切走了：本文档已正确落在 sctx，不对当前活跃实例触发它的重绘/恢复（P0-5）
+  if (!fresh() || getActiveContext() !== sctx) return; // 被抢占 或 已切走：不对当前活跃实例触发本文档的重绘/恢复（P0-5/B4）
   bus.emit('document:loaded');
   await renderPage();
   // 后台预处理（默认关，dev 面板开关）：预排版 + 内容解读，不阻塞首屏
@@ -188,6 +206,7 @@ export async function openPdfFromUrl(documentId: string, filename: string, pdfUr
  * 组件」（底座层，阅读+每会议各持独立实例）记为后面做，别在阅读上板前动引擎结构。
  */
 export function renderBlankSurface(documentId: string, title = '空白页'): void {
+  cancelActiveRender(); // 先取消在途 PDF 渲染：否则旧页像素会继续写进下面要画白纸的同一 pageCv（B3）
   getActiveContext().pdf = null; // 脱离上一份 PDF（防 zoom/翻页误渲旧页）
   getActiveContext().storeDoc = null; setActiveDoc(null); // 白板无持久化文档：store.current 置空，页缓存/阅读位置写操作变 no-op（P0-4）
   state.fileHash = documentId;
@@ -218,7 +237,7 @@ export function renderBlankSurface(documentId: string, title = '空白页'): voi
   ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1; // 极淡稿纸线（纯装饰，不进 SurfaceIndex）
   for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
 
-  const pageId = `${documentId}_0`;
+  const pageId = pageIdFor(documentId, 0); // 全 id 哈希，与 PDF 页一致、免会议白板 id 碰撞（B5）
   state.pageId = pageId;
   state.pageRecord = { page_id: pageId, document_id: documentId, page_index: 0, width: W, height: H, unit: 'pt', rotation: 0, render_dpi: 96, version: SCHEMA_VERSION };
   state.overlays = [];
@@ -343,19 +362,20 @@ export async function renderPage(): Promise<void> {
   stage.style.setProperty('--page-w', vp.width + 'px');
 
   // 同一 canvas 不允许并发 render（快速连点缩放/翻页）：先取消未完成任务
-  if (renderTask) { try { renderTask.cancel(); } catch { /* noop */ } }
+  cancelActiveRender();
   const ctx = pageCv.getContext('2d')!;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   // intent:'print' 走 setTimeout 而非 requestAnimationFrame —— 页面处于后台
   // （沙箱预览/设备 WebView 退后台）时 rAF 被冻结会导致渲染 promise 永不结算
-  renderTask = page.render({ canvasContext: ctx, viewport: vp, intent: 'print' });
+  const task = page.render({ canvasContext: ctx, viewport: vp, intent: 'print' });
+  renderTask = task;
   try {
-    await renderTask.promise;
+    await task.promise;
   } catch (e) {
     if ((e as { name?: string })?.name === 'RenderingCancelledException') return; // 被更新的渲染取代
     throw e;
   } finally {
-    renderTask = null;
+    if (renderTask === task) renderTask = null; // 仅当仍是自己时才清，避免取消后已被后继任务覆盖的 handle 被误清成 null
   }
   if (!alive()) return; // 画布渲染期间切走/被抢占：不再写 state（防把本页数据写进切换后的实例）
 
@@ -369,7 +389,7 @@ export async function renderPage(): Promise<void> {
   if (!alive()) return;
   state.imageRegions = imageRegions;
 
-  state.pageId = `pg_${state.documentId.slice(4, 12)}_${state.pageIndex}`;
+  state.pageId = pageIdFor(state.documentId, state.pageIndex); // 全 id 哈希，免会议资料截断碰撞（B5）
   state.pageRecord = {
     page_id: state.pageId,
     document_id: state.documentId,

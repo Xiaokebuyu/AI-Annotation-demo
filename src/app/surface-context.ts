@@ -29,10 +29,12 @@ export class SurfaceContext {
    *  setActiveContext 切换时据此把 store.current 重指向本实例的文档——根除跨文档串写（P0-4）。白板=null。 */
   storeDoc: PersistedDoc | null = null;
 
-  /** 异步任务代号（P0-5 竞态守卫）：renderPage / 账本恢复进入时各 ++ 并 capture，await 后若代号已变
-   *  或激活实例已换，则丢弃迟到结果不提交，避免 A 的渲染/恢复写进切换后的 B。 */
+  /** 异步任务代号（P0-5 竞态守卫）：renderPage / 账本恢复 / 文档载入 / AI 会话提交进入时各 ++ 并 capture，
+   *  await 后若代号已变或激活实例已换，则丢弃迟到结果不提交，避免 A 的渲染/恢复/回答写进切换后的 B。 */
   renderGeneration = 0;
   restoreGeneration = 0;
+  loadGeneration = 0; // 同实例连开两份文档：仅最新一次载入可写 pdf/字段（latest-wins）
+  aiGeneration = 0;   // AI 会话提交：回答/旁注/水位线只写发起时的归属实例
 
   // ── 以下 17 个字段从 app/state.ts 的全局 state 字面量搬出（初值与原默认一致）──
   fileName = '';
