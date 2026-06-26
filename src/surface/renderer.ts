@@ -309,9 +309,14 @@ function pageMetrics(): { fit: number; gutter: number } {
 }
 
 export async function renderPage(): Promise<void> {
-  const pdf = getActiveContext().pdf;
+  const sctx = getActiveContext();
+  const pdf = sctx.pdf;
   if (!pdf || !state.documentId) return;
+  const gen = ++sctx.renderGeneration; // 本次渲染代号（P0-5 竞态守卫）
+  // await 后校验：未被同实例的新渲染抢占、且仍是激活实例——否则丢弃迟到结果不写 state
+  const alive = () => sctx.renderGeneration === gen && getActiveContext() === sctx;
   const page = await pdf.getPage(state.pageIndex + 1);
+  if (!alive()) return;
   const dpr = window.devicePixelRatio || 1;
   const vp1 = page.getViewport({ scale: 1 });
   // 预算里扣掉右侧留白，保证「页面 + 留白」不溢出阅读区（窄屏=铺满、无 gutter）
@@ -346,12 +351,17 @@ export async function renderPage(): Promise<void> {
   } finally {
     renderTask = null;
   }
+  if (!alive()) return; // 画布渲染期间切走/被抢占：不再写 state（防把本页数据写进切换后的实例）
 
   // text layer：数字版 PDF 的真实文本 + 精确位置（归一化，zoom/rotation 无关）
-  state.textBlocks = await extractTextBlocks(page, vp);
+  const textBlocks = await extractTextBlocks(page, vp);
+  if (!alive()) return;
+  state.textBlocks = textBlocks;
 
   // 原页图像区域（重排时保留，不丢图）
-  state.imageRegions = await extractImageRegions(page, vp);
+  const imageRegions = await extractImageRegions(page, vp);
+  if (!alive()) return;
+  state.imageRegions = imageRegions;
 
   state.pageId = `pg_${state.documentId.slice(4, 12)}_${state.pageIndex}`;
   state.pageRecord = {

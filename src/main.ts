@@ -395,7 +395,7 @@ bus.on('document:loaded', () => { void restoreFromLedger(); });
 bus.on('context:switched', (ctx) => {
   const c = ctx as SurfaceContext;
   if (c.pdf && c.surfaceType === 'article') {
-    void renderPage().then(() => restoreFromLedger());
+    void renderPage().then(() => { if (getActiveContext() === c) void restoreFromLedger(); }); // 渲染期间又切走则不再恢复（P0-5）
   } else if (!c.documentId) {
     document.body.classList.remove('doc-loaded');
     $('empty-state').style.display = '';

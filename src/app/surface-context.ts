@@ -29,6 +29,11 @@ export class SurfaceContext {
    *  setActiveContext 切换时据此把 store.current 重指向本实例的文档——根除跨文档串写（P0-4）。白板=null。 */
   storeDoc: PersistedDoc | null = null;
 
+  /** 异步任务代号（P0-5 竞态守卫）：renderPage / 账本恢复进入时各 ++ 并 capture，await 后若代号已变
+   *  或激活实例已换，则丢弃迟到结果不提交，避免 A 的渲染/恢复写进切换后的 B。 */
+  renderGeneration = 0;
+  restoreGeneration = 0;
+
   // ── 以下 17 个字段从 app/state.ts 的全局 state 字面量搬出（初值与原默认一致）──
   fileName = '';
   fileHash: string | null = null;
