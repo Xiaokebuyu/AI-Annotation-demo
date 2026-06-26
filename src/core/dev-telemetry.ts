@@ -22,7 +22,9 @@ export type DevEventKind =
   | 'recall'     // 空间召回：逐候选 euclid/dy/dx/sameRow/verdict + 目标锚点笔 + 阈值
   | 'inferview'  // 蒸馏载荷：喂模型前的 narrative/marked/question/锚点/滑窗长度
   | 'classify'   // 上下文分类器：respond/fold 判定 + 理由
+  | 'intent_ab'  // 端侧 intent A/B 影子：云端 respond/fold vs 端侧规则 IntentClassifier 预测 + 一致否
   | 'inference'  // 主模型一轮：真实 system/task、focus、回复、计时、当前设置快照
+  | 'pageocr'    // 图片版/扫描页 OCR 文本层：phase(layer位置层/flat纯文本/none)、blocks/chars、source、延迟、样本文字
   | 'relviz';    // 关系图可视化（dev 叠层）调试
 
 const DEV = (import.meta as { env?: { DEV?: boolean } }).env?.DEV === true;

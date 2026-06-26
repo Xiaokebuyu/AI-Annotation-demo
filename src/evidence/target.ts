@@ -8,6 +8,7 @@
  *
  * 命中逻辑复用 focus.ts 的射线法（pointInPolygon），不重造已验证的"圈住了什么"。
  */
+import { makeSurfaceIndex } from '../core/surface-index';
 import type {
   AnnotationEvent, HMP, HmpMode, HmpObjectHint, MarkShape, NormBBox,
   OcrTextBlock, SurfaceIndex, SurfaceObject, SurfaceObjectType,
@@ -77,7 +78,7 @@ export function wrapSurfaceIndex(
     objects.push({ id: `img_${pageIndex}_${i}`, type: 'image', bbox, role: 'embedded_image', source: 'structure' });
   });
 
-  return { surface_id: pageId, surface_type: 'article', page_index: pageIndex, objects };
+  return makeSurfaceIndex(pageId, 'article', objects, pageIndex);
 }
 
 /**

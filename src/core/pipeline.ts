@@ -1,63 +1,45 @@
-import type { AnnotationEvent, EventType, HMP, InferenceResult, InferenceView, MarkFeatureType, MarkShape, NormBBox, PipelineStage, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
-import { RESULT_TO_OVERLAY, SCHEMA_VERSION } from './contracts';
+import type { AnnotationEvent, HMP, InferenceResult, InferenceView, NormBBox, PipelineStage, ScreenOverlay, SurfaceIndex, SurfaceObject } from './contracts';
+import { SCHEMA_VERSION } from './contracts';
 import { DEVICE_ID, SESSION_ID, shortId } from './ids';
 import { appendAiTurnEntry, getReflow, setSynthesisWatermark, getBookAiTurns } from '../local/store';
 import { devEmit } from './dev-telemetry';
-import { bboxOf, classify, markShapeOf, type StrokeFeature } from '../capture/classify';
+import { bboxOf, classify, type StrokeFeature } from '../capture/classify';
 import { resolveTarget, buildHmp } from '../evidence/target';
 import { buildMarkGraph } from '../evidence/mark-graph';
 import { findSpatialRecall, type RecallCandDiag } from '../evidence/recall';
 import { findThematicRecall } from '../evidence/thematic';
+import { vectorStore } from '../local/vector';
+import { makeThumbnail as thumb } from '../platform/web/thumbnail';
+import { markTraceLabel, errorResult, buildOverlay, markActionOf, resolveMarkedText, intentToRespond, renderUserTurn } from '../domain/pipeline-pure';
 import { projectInferenceView } from '../evidence/inference-view';
 import type { Mark, Session } from '../capture/session';
 import { mark } from './metrics';
 import { trace } from './trace';
-import { bus, settings, state, type Stroke } from '../app/state';
+import { bus, settings, state, getActiveContext, type Stroke } from '../app/state';
 import { grabLayers, grabRegion } from '../evidence/ocr';
+import { ondeviceRecognizeInk, ondeviceOcrRegion } from '../evidence/ondevice';
+import { classifyIntentLocal, classifyIntentExplained } from '../evidence/intent-rules';
 import { pageText, blocksToText, linesInBand, pointInPolygon } from '../evidence/focus';
 import { extractPageBlocks } from '../surface/renderer';
 import { pushInspect } from './inspect';
 import { chatTurn } from '../chat/stream-client';
 import { openBook, bookMessages } from '../chat/buffer';
-import { classifyContext } from '../chat/classify-client';
-import { postJson } from './api';
+import { classifyContext, LOCAL_RULES } from '../chat/classify-client';
+import { getPageOcrText } from '../evidence/page-ocr';
+import { postJson, postBeacon } from './api';
+import { promptVersion } from './prompt-versions';
 
 /** 伴读 persona 已搬到服务端 server/prompts.ts（按 role 索引、与模型解耦）；/api/chat 收 role='annotator'。
- *  下面这个标签随账本存 system_prompt_hash，标识本轮提示词版本（与 server PROMPT_VERSION 对齐，改 system 文案时同步）。 */
-const PROMPT_TAG = 'annotator@v3';
+ *  下面这个标签随账本存 system_prompt_hash，标识本轮提示词版本。版本号取自前后端单源 prompt-versions，
+ *  bump 服务端某 role 版本即自动同步、不再手工对齐漂移（R8）。 */
+const PROMPT_TAG = `annotator@${promptVersion('annotator')}`;
 
 /* ── 处理流水线（调试）：逐组件「收到什么 → 产出什么」，含缩略图，串成一轮链路 ─────────
  * 仅 DEV 落库（gate 同 mirror*）；图压成 ~220px 缩略图控 IndexedDB 体积。供 AI 会话调试页复盘。 */
 const DEV = !!(import.meta as { env?: { DEV?: boolean } }).env?.DEV;
 
-/** 缩略图：把 dataURL 压到长边 ≤max → JPEG（控存储体积）。失败/无图返回空串。 */
-function thumb(dataUrl: string | undefined | null, max = 220): Promise<string> {
-  if (!dataUrl) return Promise.resolve('');
-  return new Promise((resolve) => {
-    try {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const scale = Math.min(1, max / Math.max(img.width, img.height));
-          const w = Math.max(1, Math.round(img.width * scale)), h = Math.max(1, Math.round(img.height * scale));
-          const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-          cv.getContext('2d')!.drawImage(img, 0, 0, w, h);
-          resolve(cv.toDataURL('image/jpeg', 0.6));
-        } catch { resolve(''); }
-      };
-      img.onerror = () => resolve('');
-      img.src = dataUrl;
-    } catch { resolve(''); }
-  });
-}
+// thumb() 已抽到 platform/web/thumbnail.ts（F2：core 不再直接碰 Image/canvas）。
 
-/** 一笔在流水线里的短标签（手写「…」/ 画「…」/ 标记「…」），逐 mark 阶段挂它。 */
-function markTraceLabel(feature: MarkFeatureType, markedText: string): string {
-  const t = (markedText || '').replace(/\s+/g, ' ').slice(0, 16);
-  if (feature === 'handwriting') return `手写「${t || '…'}」`;
-  if (feature === 'drawing') return `画${t ? `「${t}」` : '（无字）'}`;
-  return `标记「${t || '—'}」`;
-}
 
 
 /** 单笔封装为契约 shape。会话内多笔共享一个 trace_id（决策：停笔会话）。 */
@@ -91,47 +73,6 @@ export function recordEvent(stroke: Stroke, traceId: string, pointerType: string
   return evt;
 }
 
-function unionBBox(events: AnnotationEvent[]): NormBBox {
-  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
-  for (const e of events) {
-    const [x, y, w, h] = e.geometry.bbox;
-    x0 = Math.min(x0, x); y0 = Math.min(y0, y);
-    x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + h);
-  }
-  return [x0, y0, x1 - x0, y1 - y0];
-}
-
-
-function errorResult(evt: AnnotationEvent, err: unknown): InferenceResult {
-  return {
-    result_id: shortId('res'),
-    trace_id: evt.trace_id,
-    request_id: 'n/a',
-    result_type: 'error',
-    content: '此刻没能想清楚，稍后再为你低语。',
-    source_refs: [{ page_id: evt.page_id, bbox: evt.geometry.bbox, ocr_block_ids: [], event_id: evt.event_id }],
-    confidence: 0,
-    created_at: new Date().toISOString(),
-    model_name: 'n/a',
-    model_version: SCHEMA_VERSION,
-  };
-}
-
-function buildOverlay(result: InferenceResult, evt: AnnotationEvent): ScreenOverlay {
-  return {
-    overlay_id: shortId('ovl'),
-    trace_id: evt.trace_id,
-    page_id: evt.page_id,
-    result_id: result.result_id,
-    overlay_type: RESULT_TO_OVERLAY[result.result_type],
-    geometry: { anchor_bbox: result.source_refs[0]?.bbox || evt.geometry.bbox },
-    display_text: result.content,
-    dismissible: true,
-    created_at: new Date().toISOString(),
-    state: 'shown',
-    result_type: result.result_type,
-  };
-}
 
 /**
  * HMP 异步增益（徐智强 step⑤/⑥）：几何 HMP 产出后，按需补取证线索，回来 mutate 同一条 HMP 并 re-emit。
@@ -151,8 +92,13 @@ async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[
   try {
     let readOut = '';
     try {
-      const j = await postJson<{ text?: string }>('/api/ocr-vlm', { image: crop, model: settings.inferModel });
-      readOut = String(j?.text || '').trim();
+      // 端侧优先：原生桥可用 → 本地区域 OCR；不可用/失败 → 云端 /api/ocr-vlm（Kimi 视觉）。
+      const local = await ondeviceOcrRegion(crop);
+      if (local) readOut = String(local.text || '').trim();
+      else {
+        const j = await postJson<{ text?: string }>('/api/ocr-vlm', { image: crop, model: settings.inferModel });
+        readOut = String(j?.text || '').trim();
+      }
     } catch { /* http/网络错 → readOut 留空，下方仍记 DEV 阶段 */ }
     if (readOut) {
       hmp.text_hint = readOut; // 识别只补内容，不改 mode/类型
@@ -212,7 +158,7 @@ function mirrorRecognize(o: {
   feature_in: string; feature_out: string; ocrWorthy: boolean; hasInk: boolean;
   interpretCalled: boolean; gate: string;
   feat?: StrokeFeature;
-  kind?: string; reading?: string; description?: string;
+  kind?: string; reading?: string; description?: string; source?: string;
 }): void {
   devEmit('recognize', () => {
     // 几何判别 raw（"先量再改"：定 markup/underline 闸阈值用）——markup 把英文长横判 underline 吃掉的根因，
@@ -231,7 +177,7 @@ function mirrorRecognize(o: {
         stroke_count: r.strokeCount, complexity: +r.complexity.toFixed(2),
       } } : {}),
       // VLM 判定值字段名用 interp_kind，**不要叫 kind**——会和 envelope 的事件 kind 撞名。
-      ...(o.interpretCalled ? { interp_kind: o.kind ?? '', reading: o.reading ?? '', description: o.description ?? '' } : {}),
+      ...(o.interpretCalled ? { interp_kind: o.kind ?? '', reading: o.reading ?? '', description: o.description ?? '', source: o.source ?? '' } : {}),
     };
   });
 }
@@ -266,36 +212,67 @@ function mirrorView(view: InferenceView, reason: string, discId: string): void {
   devEmit('inferview', () => ({
     discId, trigger: reason,
     narrative: view.narrative, marked: view.marked, question: view.question ?? null,
-    referent_lines: view.referent_lines ?? null, recall_n: view.recall?.length ?? 0, thematic_n: view.thematic?.length ?? 0,
+    referent_lines: view.referent_lines ?? null, recall_n: view.recall?.length ?? 0, thematic_n: view.thematic?.length ?? 0, vector_available: vectorStore.available,
     page_annot_n: view.page_annotations?.length ?? 0,
     anchor_refs: view.anchor_refs, has_crop: !!view.crop, page_ctx_len: view.page_context?.length ?? 0,
   }));
 }
 
 /** 形状/特征 → MarkShape：手写/画由特征定，其余按几何 EventType。 */
-function markActionOf(feature: MarkFeatureType, eventType: EventType, score: number): MarkShape {
-  if (feature === 'handwriting') return 'handwriting';
-  if (feature === 'drawing') return 'sketch';
-  return markShapeOf(eventType, score);
-}
 
-/** 从 HMP + 当前页 index 解析"所标内容"（结构原文 + 转写）的原始文字。 */
-function resolveMarkedText(hmp: HMP, index: SurfaceIndex): string {
-  const refs = new Set(hmp.target_object_refs);
-  const objs = index.objects.filter((o) => refs.has(o.id));
-  const targetText = objs.map((o) => o.text).filter(Boolean).join('').trim();
-  const hint = (hmp.text_hint || '').trim();
-  if (hmp.mode === 'self_content') return hint;
-  if (targetText && hint && hint !== targetText) return `${targetText}（读出「${hint}」）`;
-  return targetText || hint;
-}
+/** 识别分类器选「端侧手写模型」的哨兵值（dev）：手写转写走本地 OpenVINO 英文手写端点 /api/interpret-hwr，不调云。 */
+export const LOCAL_HWR = '__local_hwr__';
 
-/** 云端识别当类型分类器（context-free）：读这团墨是不是文字 → kind + 转写 + 画的粗描述。失败默认 none。 */
-async function recognizeInk(inkData: string): Promise<{ kind: string; reading: string; description: string }> {
+/**
+ * 识别当类型分类器（context-free）：读这团墨是不是文字 → kind + 转写 + 画的粗描述。
+ * 端侧优先：原生桥可用且板上有可用手写引擎 → 本地识别，source=local_board。
+ * 次选：识别分类器选「端侧手写模型」(LOCAL_HWR) → 走本地 OpenVINO 英文手写端点 /api/interpret-hwr
+ *       （dev=mac OpenVINO 跑徐方案模型；图像式行识别，只出 reading、kind 当 handwriting）。
+ * 否则降级云端 /api/interpret（source=cloud）；判 kind / 画描述本就留云 VLM。两路均失败默认 none。
+ */
+async function recognizeInk(
+  inkData: string, strokes?: unknown,
+): Promise<{ kind: string; reading: string; description: string; source: 'local_board' | 'cloud' }> {
+  const local = await ondeviceRecognizeInk(inkData, strokes);
+  if (local) return {
+    kind: String(local.kind || 'none'), reading: String(local.reading || '').trim(),
+    description: String(local.description || '').trim(), source: 'local_board',
+  };
+  // dev：选了「端侧手写模型」→ 本地英文手写端点。统一契约：端点**自己**判"是否可信手写"，可信才回 reading、否则回空。
+  //   "怎么判"与具体模型强耦合（OpenVINO 英文 GNHK 的置信度+长度双门），封装在 server/hwr-dev.mjs 适配层，**不漏进这里**。
+  //   故此处与对待任何端侧识别一致：有 reading 就用、空就往下落云 /api/interpret（VLM 判 kind+转写+画描述）。换引擎时只改适配层。
+  if (settings.interpretModel === LOCAL_HWR) {
+    try {
+      const j = await postJson<{ reading?: string }>('/api/interpret-hwr', { image: inkData });
+      const reading = String(j?.reading || '').trim();
+      if (reading) return { kind: 'handwriting', reading, description: '', source: 'local_board' };
+    } catch { /* 端点不在/失败 → 落云端 */ }
+  }
   try {
-    const j = await postJson<{ kind?: string; reading?: string; description?: string }>('/api/interpret', { image: inkData, model: settings.inferModel });
-    return { kind: String(j.kind || 'none'), reading: String(j.reading || '').trim(), description: String(j.description || '').trim() };
-  } catch { return { kind: 'none', reading: '', description: '' }; }
+    const model = (settings.interpretModel && settings.interpretModel !== LOCAL_HWR) ? settings.interpretModel : settings.inferModel;
+    const j = await postJson<{ kind?: string; reading?: string; description?: string }>('/api/interpret', { image: inkData, model });
+    return { kind: String(j.kind || 'none'), reading: String(j.reading || '').trim(), description: String(j.description || '').trim(), source: 'cloud' };
+  } catch { return { kind: 'none', reading: '', description: '', source: 'cloud' }; }
+}
+
+/**
+ * intent A/B 影子对照（Seam C，**不替换**上下文分类器）。
+ * 用 IntentClassifier 的 TS 移植（intent-rules.ts）算 6 标签 → respond/fold 预测，与云端决定一起落账算一致率。
+ * 规则纯本地、web/dev/套壳都跑（不依赖原生桥/AAR/板子）；云端仍权威驱动行为，端侧仅影子。
+ * 收集：postBeacon → 代理 /api/ab/intent（.ab-intent.jsonl，板上生产也发）；并 devEmit 供 dev 面板可视。
+ */
+function emitIntentAb(text: string, cloud: { respond: boolean; reason: string }, discId: string): void {
+  const intent = classifyIntentLocal('handwriting', text);
+  const respondPred = intentToRespond(intent);
+  const rec = {
+    disc_id: discId,
+    text: text.slice(0, 120),
+    cloud: { respond: cloud.respond, reason: cloud.reason },
+    local: { intent, respond_pred: respondPred },
+    agree: respondPred === cloud.respond,
+  };
+  postBeacon('/api/ab/intent', rec); // 生产持久化收集（板上也发）
+  devEmit('intent_ab', () => rec);    // dev 面板可视
 }
 
 /**
@@ -330,7 +307,7 @@ function markupLooksLikeDrawing(feature: StrokeFeature, event: AnnotationEvent, 
  */
 export async function captureMark(
   event: AnnotationEvent, feature: StrokeFeature, score: number,
-): Promise<{ hmp: HMP | null; markedText: string; feature: StrokeFeature; trace?: PipelineStage[] }> {
+): Promise<{ hmp: HMP | null; markedText: string; feature: StrokeFeature; kind?: string; kindSource?: string; trace?: PipelineStage[] }> {
   const index = state.surfaceIndex;
   if (!index || event.page_id !== index.surface_id) return { hmp: null, markedText: '', feature };
   const targets = resolveTarget([event], event.geometry.bbox, index);
@@ -342,12 +319,12 @@ export async function captureMark(
   const freeformOverride = feature.type === 'markup' && markupLooksLikeDrawing(feature, event, index);
   let resolved = feature;
   let textHint: string | undefined;
-  let recog: { kind: string; reading: string; description: string } | null = null; // interpret 结果（仅调用时）
+  let recog: { kind: string; reading: string; description: string; source: 'local_board' | 'cloud' } | null = null; // 识别结果（仅调用时）
   let recogGate: string; // 为何送/跳过识别（dev 遥测核对哭脸式漏判）
   if (feature.type === 'markup' && !freeformOverride) {
     recogGate = 'markup（几何已定型）·不送识别';
   } else if (layers.ink && (feature.raw.ocrWorthy || freeformOverride)) {
-    recog = await recognizeInk(layers.ink);
+    recog = await recognizeInk(layers.ink, event.stroke_points);
     const isText = recog.kind === 'handwriting' || recog.kind === 'mixed';
     const hasDrawing = recog.kind === 'sketch' || recog.kind === 'mixed'; // 含可视化的画（mixed=图+字，仍含画）
     resolved = { ...feature, type: isText ? 'handwriting' : 'drawing', confidence: recog.kind === 'none' ? 0.3 : 0.85, hasDrawing };
@@ -357,9 +334,9 @@ export async function captureMark(
       : (isText ? recog.reading : recog.description) || undefined;
     recogGate = freeformOverride ? 'circle 未圈住内容+含多笔(疑涂鸦/表情)·推翻 markup 送识别' : 'freeform 过几何门(ocrWorthy)·送识别';
     if (DEV) pl.push({
-      stage: 'recognize', label: '识别分类器 · /api/interpret', status: 'ran',
+      stage: 'recognize', label: '识别分类器 · ' + (recog.source === 'local_board' ? '端侧 OCR (local_board)' : '/api/interpret'), status: 'ran',
       note: (freeformOverride ? '⤷ markup 圈复判：没圈住内容+含多笔→疑涂鸦/表情，推翻几何 markup。' : '自由笔且过几何门(ocrWorthy)。') + '判「手写 vs 画」、转写文字、给画一句粗描述（context-free，不揣测意图）',
-      input: [{ k: '模型', v: settings.inferModel }, { k: '输入', v: '白底笔迹图 ink' }],
+      input: [{ k: '识别源', v: recog.source }, { k: '模型', v: recog.source === 'cloud' ? (settings.interpretModel || settings.inferModel) : '端侧模型' }, { k: '输入', v: '白底笔迹图 ink' + (recog.source === 'local_board' ? ' + 笔迹点序' : '') }],
       output: [
         { k: '判定 kind', v: recog.kind },
         { k: '转写 reading', v: recog.reading || '（无）' },
@@ -380,7 +357,7 @@ export async function captureMark(
   mirrorRecognize({
     event_id: event.event_id, page_id: event.page_id, region: event.geometry.bbox,
     feature_in: feature.type, feature_out: resolved.type, ocrWorthy: !!feature.raw.ocrWorthy, hasInk: !!layers.ink,
-    interpretCalled: !!recog, gate: recogGate, feat: feature, kind: recog?.kind, reading: recog?.reading, description: recog?.description,
+    interpretCalled: !!recog, gate: recogGate, feat: feature, kind: recog?.kind, reading: recog?.reading, description: recog?.description, source: recog?.source,
   });
   const action = markActionOf(resolved.type, event.event_type, score);
   // markup 锚它所标的内容；freeform（手写/画）属 self_content——它本身就是内容，不锚到 bbox 碰巧蹭到的正文
@@ -412,32 +389,10 @@ export async function captureMark(
     ],
     images: [{ role: 'composite（笔迹叠原文）', thumb: await thumb(layers.composite) }].filter((x) => x.thumb),
   });
-  return { hmp, markedText, feature: resolved, trace: DEV ? pl : undefined };
+  return { hmp, markedText, feature: resolved, kind: recog?.kind, kindSource: recog?.source, trace: DEV ? pl : undefined };
 }
 
 /** 「本页已有批注」动态背景段：本页其他批注+你的旧回应，帮模型理解整页脉络（背景、非焦点）；空则空串。 */
-function renderPageBackground(items?: Array<{ marked: string; reply: string }>): string {
-  if (!items?.length) return '';
-  const lines = items.map((it) => `· 读者标注「${it.marked || '（无字）'}」→ 你曾回应「${it.reply || '（无）'}」`).join('\n');
-  return `【本页已有批注】（背景，帮你理解整页脉络；别逐条复述，回应只针对下面"当前聚焦"处）：\n${lines}\n\n`;
-}
-
-/**
- * 把 inference-view 渲染成喂模型的 user turn：idle=整段综合 / handwriting=定向答问。
- * v2 去重：只带本轮动态数据 + 一句标明类别；"怎么回应"的规则单点存 server/prompts.ts 的 annotator system。
- * v3：前置「本页已有批注」动态背景段（system 的 <background> 是静态语境，这里是本页动态背景），用「当前聚焦」与之区隔。
- */
-function renderUserTurn(view: ReturnType<typeof projectInferenceView>): string {
-  const bg = renderPageBackground(view.page_annotations); // 动态背景段，前置、与焦点区隔
-  const ctx = view.page_context ? `\n\n（本页上下文，仅供消歧）：${view.page_context}` : '';
-  // 全书主题联想（向量召回）——单独贴标签、与"你正指的这行"严格区隔，防语义关联反过来制造主题漂移。现 no-op 恒空。
-  const themes = view.thematic?.length ? `\n\n【全书别处你也提过】：${view.thematic.map((t) => `「${t.text}」`).join('、')}` : '';
-  if (view.trigger === 'handwriting') {
-    const ref = view.referent_lines ? `读者在这句旁边写道：「${view.referent_lines}」。` : ''; // ②指代：问的就是这行
-    return `${bg}【当前聚焦】读者刚在本页这一处写下问题——手写问：「${view.question || view.marked}」。${ref}相关标注脉络：${view.narrative}。${themes}${ctx}`;
-  }
-  return `${bg}【当前聚焦】读者刚在本页这一处连续标注——脉络：${view.narrative}。所标内容：「${view.marked || '（未提取到文字）'}」。${themes}${ctx}`;
-}
 
 /**
  * 会话提交：建标注图 → 蒸馏 inference-view → 主模型流式回应 → 落 anchor + overlay。
@@ -458,7 +413,7 @@ async function pageTextAt(i: number): Promise<string> {
 function pageTextFromReflow(maxChars: number): string {
   const ekey = settings.reflowProvider === 'ai' ? `ai@${settings.reflowModel}` : settings.reflowProvider;
   const blocks = getReflow(state.pageIndex, ekey);
-  if (!blocks?.length) return pageText(maxChars);
+  if (!blocks?.length) return pageText(maxChars) || getPageOcrText(state.pageId).slice(0, maxChars); // 扫描页退整页 OCR 文本
   return blocks.map((b) => (b.type === 'list' ? (b.items ?? []).join('\n') : b.text)).join('\n').slice(0, maxChars);
 }
 
@@ -475,11 +430,18 @@ async function slidingContext(maxChars = 3000): Promise<string> {
   return [prevTail, cur, nextHead].filter(Boolean).join('\n');
 }
 
+export type CommitOutcome = 'committed' | 'folded' | 'failed';
 export async function commitSessionDiscussion(
   session: Session, reason: 'idle' | 'handwriting', triggerMark: Mark | undefined, discId: string,
-): Promise<boolean> {
-  const marks = session.marks;
-  if (!marks.length) return false;
+): Promise<CommitOutcome> {
+  // B1 守卫：回答/旁注/水位线都只写「发起本次综合的归属实例」，回答期间切走也不灌进切换后的文档。
+  const ownerCtx = getActiveContext();
+  const ownerDoc = ownerCtx.storeDoc;
+  const ownerPageIndex = state.pageIndex;
+  const aiGen = ++ownerCtx.aiGeneration;
+  const alive = () => ownerCtx.aiGeneration === aiGen && getActiveContext() === ownerCtx; // 仍在归属实例、未被新一轮抢占
+  const marks = session.marks.slice(); // 快照：综合期间新写的笔不混入本批（也不被本批连带清掉）
+  if (!marks.length) return 'folded';
   const graph = buildMarkGraph(marks, marks.map((m) => m.hmp));
   bus.emit('graph:built', graph); // dev：关联框可视（按非时间边连通分量框住成组标注）
   const anchorMark = (reason === 'handwriting' && triggerMark) ? triggerMark : marks[marks.length - 1];
@@ -495,8 +457,14 @@ export async function commitSessionDiscussion(
   // 让"画不是最后一笔"（如画完又写了句问题）时，画的原图仍到模型手里，由模型在上下文里解读其含义。
   if (!crop) {
     // 含画的笔（drawing 纯画，或 mixed=图+字虽定型 handwriting 仍含画）→ 把它的白底原图送进推理，让模型直接看那张画。
-    const draw = [...marks].reverse().find((m) => (m.feature.type === 'drawing' || m.feature.hasDrawing) && m.hmp?.mode === 'self_content' && !!m.hmp?.vector_ref);
-    if (draw?.hmp?.vector_ref) crop = { role: 'ink', data: draw.hmp.vector_ref };
+    const draw = [...marks].reverse().find((m) => (m.feature.type === 'drawing' || m.feature.hasDrawing) && m.hmp?.mode === 'self_content');
+    if (draw?.hmp?.vector_ref) crop = { role: 'ink', data: draw.hmp.vector_ref };             // 本 session 刚画的，图还在内存
+    else if (draw && draw.event.page_id === state.pageId) {
+      // 召回/重载的画：vector_ref 落库时被剥（"存料不存图"），但笔迹点序无损存着、redrawInk 已把它画回当前墨水层 →
+      // 从墨水层按 bbox 重抓一张白底栅格喂模型，补"日后会话拿不到那张画"的缺口（仅当画仍在当前页）。
+      const ink = grabLayers(draw.event.geometry.bbox).ink;
+      if (ink) crop = { role: 'ink', data: ink };
+    }
   }
 
   // 空间召回（治本·根因 A）+ 滑窗上下文 + 全书主题召回（向量·现 no-op）+ 账本（回查旧回复）并发取，省串行延迟
@@ -552,11 +520,20 @@ export async function commitSessionDiscussion(
   if (reason === 'handwriting') {
     classifyConvoLen = bookMessages(bookId).length;
     const tCls0 = performance.now();
-    const decision = await classifyContext(view, bookMessages(bookId));
+    // dev：上下文分类器选「端侧规则」时，respond/fold 直接由徐 IntentClassifier 的 TS 移植驱动（不调云）。
+    const useLocalRules = settings.classifyModel === LOCAL_RULES;
+    let decision: { respond: boolean; reason: string };
+    if (useLocalRules) {
+      const { intent, hit } = classifyIntentExplained('handwriting', view.question || view.marked || '');
+      decision = { respond: intentToRespond(intent), reason: `端侧规则 · ${intent}（${hit}）` };
+    } else {
+      decision = await classifyContext(view, bookMessages(bookId));
+    }
     classifyMs = Math.round(performance.now() - tCls0);
     classifyDiag = { respond: decision.respond, reason: decision.reason };
     trace('ClassifyContext', { respond: decision.respond, reason: decision.reason, question: view.question ?? '' });
     mirrorClassify({ respond: decision.respond, reason: decision.reason, question: view.question ?? '', discId });
+    if (!useLocalRules) void emitIntentAb(view.question || view.marked || '', decision, discId); // 云端驱动时才做影子对照
     if (!decision.respond) {
       // fold = 写给自己的笔记 → 静默、不落 reader overlay、marks 留 session（计入下次综合）。
       // 仍把这一轮作为「折叠」条目落账本——否则 AI 会话 dev 页（只读 ai_turns）完全看不到判否的流程。
@@ -570,7 +547,7 @@ export async function commitSessionDiscussion(
         state: 'folded', result_type: 'inspiration', object_refs: view.anchor_refs,
       };
       await appendAiTurnEntry({
-        document_id: bookId, page_id: foldPageId, page_index: state.pageIndex,
+        document_id: bookId, page_id: foldPageId, page_index: ownerPageIndex,
         overlay_id: discId, overlay: foldOverlay, overlay_state: 'folded', user_edited_text: null,
         ai_reply: '',
         anchor: { surface_id: view.page_id, mark_ids: marks.map((m) => m.id), object_refs: view.anchor_refs },
@@ -582,7 +559,7 @@ export async function commitSessionDiscussion(
         diag: { classify: classifyDiag, sent_image: false },
       });
       bus.emit('aiturn:appended', bookId); // 会话页开着 → 刷新即见这条折叠轮
-      return false;
+      return 'folded';
     }
   }
   openBook(bookId);
@@ -600,7 +577,7 @@ export async function commitSessionDiscussion(
       role: 'annotator', model: settings.inferModel,
       maxTokens: reason === 'idle' ? 600 : 400,
       images: view.crop ? [{ data: view.crop.data }] : [], // 被判需图片识别的内容：把合成图/笔迹图送进主推理
-      onDelta: (t) => bus.emit('anchor:place', { id: discId, pageId, anchorRefs, bbox: view.anchor_bbox, text: t, kind: 'note' }),
+      onDelta: (t) => { if (alive()) bus.emit('anchor:place', { id: discId, pageId, anchorRefs, bbox: view.anchor_bbox, text: t, kind: 'note' }); }, // 切走后不再往当前 surface 喷流式锚（B1）
     });
     modelMs = Math.round(performance.now() - tModel0); // 主模型流式往返耗时（取代 上下文监控 的 ms）
     thinking = tk; // 思考过程不进 buffer，只随账本存、供调试页展示
@@ -615,8 +592,17 @@ export async function commitSessionDiscussion(
     (result as unknown as { _debug?: unknown })._debug = { mode: 'chat-session', trigger: reason, narrative: view.narrative, marked: view.marked, buffer_turns: bookMessages(bookId).length, referent_lines: view.referent_lines, recall: view.recall, thematic_n: view.thematic?.length ?? 0 };
     trace('InferenceResult(session)', result as unknown as Record<string, unknown>);
   } catch (err) {
-    bus.emit('anchor:clear', discId);
-    result = errorResult(anchorMark.event, err);
+    if (alive()) bus.emit('anchor:clear', discId);
+    // B2：AI 失败不当成功——不入账本、不推水位线、保留 pending marks（下次 idle 可重试），只在归属实例显示一条瞬时错误旁注。
+    const errOverlay = buildOverlay(errorResult(anchorMark.event, err), anchorMark.event);
+    errOverlay.overlay_id = discId;
+    errOverlay.geometry = { anchor_bbox: view.anchor_bbox };
+    errOverlay.object_refs = view.anchor_refs;
+    const prevErr = ownerCtx.overlays.find((o) => o.overlay_id === discId);
+    if (prevErr) ownerCtx.overlays = ownerCtx.overlays.filter((o) => o !== prevErr);
+    ownerCtx.overlays.push(errOverlay);
+    if (alive()) { if (prevErr) bus.emit('overlay:remove', discId); bus.emit('overlay:add', errOverlay); }
+    return 'failed';
   }
 
   pushInspect({
@@ -628,15 +614,15 @@ export async function commitSessionDiscussion(
     resultType: result.result_type, content: result.content, confidence: result.confidence, recalled: [], model: result.model_name,
   });
 
-  // upsert overlay by discId
-  const prev = state.overlays.find((o) => o.overlay_id === discId);
-  if (prev) { state.overlays = state.overlays.filter((o) => o !== prev); bus.emit('overlay:remove', discId); }
+  // upsert overlay by discId（写归属实例 ownerCtx；切走则只入实例、不发 UI 事件，切回时由账本恢复重建——B1）
+  const prev = ownerCtx.overlays.find((o) => o.overlay_id === discId);
+  if (prev) { ownerCtx.overlays = ownerCtx.overlays.filter((o) => o !== prev); if (alive()) bus.emit('overlay:remove', discId); }
   const overlay = buildOverlay(result, anchorMark.event);
   overlay.overlay_id = discId;
   overlay.geometry = { anchor_bbox: view.anchor_bbox };
   overlay.object_refs = view.anchor_refs; // 跨视图锚
-  state.overlays.push(overlay);
-  bus.emit('overlay:add', overlay);
+  ownerCtx.overlays.push(overlay);
+  if (alive()) bus.emit('overlay:add', overlay);
 
   // 处理流水线（DEV）：把这一轮经手的每个组件「收到什么 → 产出什么」按执行顺序串起来，供会话页逐步复盘。
   let pipeline: PipelineStage[] | undefined;
@@ -708,7 +694,7 @@ export async function commitSessionDiscussion(
         { k: 'view_narrative', v: view.narrative || '—' },
         { k: 'marked', v: view.marked || '—' },
         { k: '对话历史', v: `${classifyConvoLen} 条` },
-        { k: '模型', v: settings.inferModel },
+        { k: '判定来源', v: settings.classifyModel === LOCAL_RULES ? '端侧规则 intent-rules（纯规则·无模型）' : `云端 ${settings.classifyModel || settings.inferModel}` },
       ],
       output: [
         { k: '判定', v: classifyDiag.respond ? '回应 respond ✓' : '折叠 fold ✗' },
@@ -738,7 +724,7 @@ export async function commitSessionDiscussion(
 
   // 落账本：ai_turn 进书日志（显示快照 + 锚点 + view 快照[crop 剥] + provenance）；并推综合水位线
   await appendAiTurnEntry({
-    document_id: bookId, page_id: pageId, page_index: state.pageIndex,
+    document_id: bookId, page_id: pageId, page_index: ownerPageIndex,
     overlay_id: discId, overlay, overlay_state: 'shown', user_edited_text: null,
     ai_reply: result.content,
     anchor: { surface_id: view.page_id, mark_ids: marks.map((m) => m.id), object_refs: view.anchor_refs },
@@ -750,7 +736,7 @@ export async function commitSessionDiscussion(
     diag: { classify: classifyDiag, sent_image: !!view.crop },
     pipeline,
   });
-  setSynthesisWatermark(); // 此前所有 mark 记为已综合；之后的新 mark = pending
+  setSynthesisWatermark(ownerDoc); // 推归属书的综合水位线（回答期间已切走也写对书）；此前 mark 记为已综合
   bus.emit('aiturn:appended', bookId); // 账本已落 → 通知会话页刷新（overlay:add 早于本 await，单靠它读账本会漏最新一轮）
-  return true;
+  return 'committed';
 }

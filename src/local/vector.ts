@@ -15,12 +15,15 @@ export interface VectorRecord {
 export interface VectorHit extends VectorRecord { score: number; }
 
 export interface VectorStore {
+  /** 真实现=true；占位 stub=false。上游据此区分「功能未实现」与「确实无相关内容」，不静默吞（C6）。 */
+  readonly available: boolean;
   upsert(rec: VectorRecord): Promise<void>;
   search(query: string, opts?: { bookId?: string; k?: number }): Promise<VectorHit[]>;
 }
 
-/** 占位实现：不落库、检索恒空。替换为真实本地向量库时只动这一处（接口对上游不变）。 */
+/** 占位实现：available=false、不落库、检索恒空。替换为真实本地向量库时只动这一处（接口对上游不变）。 */
 export const vectorStore: VectorStore = {
+  available: false,
   async upsert() { /* TODO（向量阶段）：本地 embedding + 落库 */ },
   async search() { return []; },
 };

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "organizeImports": { "enabled": false },
+  "formatter": { "enabled": false },
+  "json": { "parser": { "allowComments": true } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "correctness": {
+        "noUnusedVariables": "warn",
+        "noUnusedImports": "warn"
+      },
+      "suspicious": {
+        "noDoubleEquals": "warn",
+        "noDebugger": "error"
+      }
+    }
+  },
+  "files": {
+    "ignore": ["dist", "node_modules", "android", "legacy", "public", "**/*.mjs", "mobile.html"]
+  }
+}

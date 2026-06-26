@@ -29,10 +29,18 @@ function add(o: ScreenOverlay): void {
   const item = document.createElement('article');
   item.className = 'hist' + (o.result_type === 'error' ? ' error' : '');
   item.dataset.state = o.state;
-  item.innerHTML =
-    `<span class="hist-tag">${TYPE_LABEL[o.overlay_type] ?? '思'}</span>` +
-    `<div class="hist-body">${o.display_text}</div>` +
-    `<div class="hist-page">第 ${state.pageIndex + 1} 页 · ${o.result_id}</div>`;
+  // 用 createElement + textContent 拼：display_text 是 AI 返回内容，绝不可拼进 innerHTML（XSS）。
+  // WebView 同源下 XSS 能碰 IndexedDB 账本 / localStorage / 原生 bridge，威胁远高于普通 Web，故此处零容忍。
+  const tag = document.createElement('span');
+  tag.className = 'hist-tag';
+  tag.textContent = TYPE_LABEL[o.overlay_type] ?? '思';
+  const body = document.createElement('div');
+  body.className = 'hist-body';
+  body.textContent = o.display_text;
+  const page = document.createElement('div');
+  page.className = 'hist-page';
+  page.textContent = `第 ${state.pageIndex + 1} 页 · ${o.result_id}`;
+  item.append(tag, body, page);
   item.addEventListener('mouseenter', () => bus.emit('whisper:reveal', o.overlay_id));
   cardEls.set(o.overlay_id, item);
 

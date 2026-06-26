@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { SYSTEM_PROMPTS, type PromptRole } from './prompts';
 
 /**
@@ -25,22 +26,34 @@ function cfg() {
   };
 }
 
+/**
+ * 模型家族路由表（D2）：前缀 → {渠道(=provider), 渠道 URL, thinking 配置}。route()/thinkingFor() 收口于此，不再各处 if。
+ * 2026-06-22 网关探针实测：Claude(adaptive)/Kimi(enabled+budget) 经网关回思考块；Gemini 经 DMX 不回传（不请求·白吃 token）。
+ * minTokens 给思考留头寸（保持原 claude 1280 等效上限）。
+ */
+const DMX_URL = 'https://www.dmxapi.cn/v1/messages';
+const MODEL_ROUTES: ReadonlyArray<{ prefix: string; channel: string; channel_url: string; thinking: any; minTokens: number }> = [
+  { prefix: 'kimi',   channel: 'kimi', channel_url: 'https://api.moonshot.cn/anthropic/v1/messages', thinking: { type: 'enabled', budget_tokens: 1024 }, minTokens: 1280 },
+  { prefix: 'claude', channel: 'DMX',  channel_url: DMX_URL, thinking: { type: 'adaptive', display: 'summarized' }, minTokens: 1280 },
+];
+const DEFAULT_ROUTE = { channel: 'DMX', channel_url: DMX_URL, thinking: null, minTokens: 0 }; // gemini / 其它：不请求思考
+
+function routeFor(model: string) {
+  return MODEL_ROUTES.find((r) => model.startsWith(r.prefix)) ?? DEFAULT_ROUTE;
+}
 function route(model: string): { channel: string; channel_url: string } {
-  if (model.startsWith('kimi')) {
-    return { channel: 'kimi', channel_url: 'https://api.moonshot.cn/anthropic/v1/messages' };
-  }
-  return { channel: 'DMX', channel_url: 'https://www.dmxapi.cn/v1/messages' };
+  const r = routeFor(model);
+  return { channel: r.channel, channel_url: r.channel_url };
+}
+function thinkingFor(model: string): { thinking: any; minTokens: number } | null {
+  const r = routeFor(model);
+  return r.thinking ? { thinking: r.thinking, minTokens: r.minTokens } : null;
 }
 
-/**
- * 思考配置按模型家族派生（与 route() 同按前缀，构成"家族→{渠道, thinking}"单一真源）。
- * 2026-06-22 网关探针实测：Claude（adaptive/enabled 都回）与 Kimi（enabled+budget→thinking_delta）经网关回思考块；
- * Gemini 经 DMX 不回传思考摘要（请求也无益、白吃 token）。minTokens 给思考留头寸（保持原 claude 的 1280 等效上限）。
- */
-function thinkingFor(model: string): { thinking: any; minTokens: number } | null {
-  if (model.startsWith('claude')) return { thinking: { type: 'adaptive', display: 'summarized' }, minTokens: 1280 };
-  if (model.startsWith('kimi')) return { thinking: { type: 'enabled', budget_tokens: 1024 }, minTokens: 1280 };
-  return null; // gemini / 其它：网关不回传思考，不请求
+// D2 调用可观测：每次网关调用记 requestId/model/provider/latency/ok（服务端日志；远程代理同样可采）。
+let aiCallSeq = 0;
+function logAiCall(meta: { requestId: string; model: string; provider: string; ms: number; ok: boolean; status: number }): void {
+  console.log(`[ai] ${JSON.stringify(meta)}`);
 }
 
 /** 低层网关调用：传完整 messages（可带 tools），返回完整响应 data。 */
@@ -53,12 +66,15 @@ async function callGateway(opts: { system: string; messages: any[]; maxTokens: n
   const max_tokens = model.startsWith('gemini') ? Math.max(opts.maxTokens, 2048) : opts.maxTokens;
   const body: any = { model, max_tokens, system: opts.system, messages: opts.messages, channel, channel_url };
   if (opts.tools) body.tools = opts.tools;
+  const requestId = `ai_${Date.now().toString(36)}_${++aiCallSeq}`;
+  const t0 = Date.now();
   const resp = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
     body: JSON.stringify(body),
   });
   const data: any = await resp.json().catch(() => ({}));
+  logAiCall({ requestId, model, provider: channel, ms: Date.now() - t0, ok: resp.ok, status: resp.status });
   if (!resp.ok) throw new Error(data?.error?.message || `网关返回 ${resp.status}`);
   return data;
 }
@@ -185,6 +201,18 @@ function extractJson(text: string): any {
   return { result_type: rt ? rt[1] : undefined, content: cm ? cm[1] : text, confidence: cf ? Number(cf[1]) : undefined };
 }
 
+// C5：AI 返回的声明式 schema（替代手写 String()/默认兜底，行为等价）。每字段 .catch 默认 = 缺/坏字段回退，
+// 故 .parse 对 extractJson 的任意对象都不抛；跨字段逻辑（kind 依赖 reading 等）仍留在各函数内。
+const interpretRawSchema = z.object({
+  reading: z.string().catch(''),
+  kind: z.string().catch(''),
+  description: z.string().catch(''),
+});
+const classifyRawSchema = z.object({
+  respond: z.boolean().catch(true), // 缺/非布尔 → true（等价旧 respond !== false）
+  reason: z.string().catch(''),
+});
+
 
 
 
@@ -200,11 +228,11 @@ export async function runInterpret(payload: any): Promise<{ reading: string; kin
   // 画（sketch/mixed）另给一句"大概像什么"的粗描述（笑脸/箭头/方框…）——只描述长相，不揣测意图（意图交推理模型）。
   const system = SYSTEM_PROMPTS.ink_classifier;
   const raw = await gateway(system, 'Classify, transcribe and describe this ink:', 300, image, payload?.model);
-  const j = extractJson(raw);
-  const reading = String(j.reading || '').trim();
+  const j = interpretRawSchema.parse(extractJson(raw)); // 全 string，缺/坏字段 → ''
+  const reading = j.reading.trim();
   const KINDS = ['handwriting', 'sketch', 'mixed', 'none'];
   const kind = KINDS.includes(j.kind) ? j.kind : (reading ? 'handwriting' : 'none'); // 缺 kind 时按有无文字兜底
-  const description = (kind === 'sketch' || kind === 'mixed') ? String(j.description || '').trim() : '';
+  const description = (kind === 'sketch' || kind === 'mixed') ? j.description.trim() : '';
   return { reading, kind, description };
 }
 
@@ -229,8 +257,8 @@ export async function runClassifyContext(payload: any): Promise<{ respond: boole
     (history ? `\n最近对话：\n${history}\n` : '') +
     '\n该不该现在回应？';
   const raw = await gateway(system, user, 200, undefined, payload?.model);
-  const j = extractJson(raw);
-  return { respond: j?.respond !== false, reason: String(j?.reason || '').slice(0, 120) };
+  const j = classifyRawSchema.parse(extractJson(raw));
+  return { respond: j.respond, reason: j.reason.slice(0, 120) };
 }
 
 

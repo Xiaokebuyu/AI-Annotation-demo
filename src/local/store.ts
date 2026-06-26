@@ -8,31 +8,59 @@
  */
 import type { NormBBox, OverlayState, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { PersistedAiTurn, PersistedDoc, PersistedMark, PersistedPage, PersistedPdfBlob } from '../core/store-format';
+import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
 import { DB_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
+import { vectorStore } from './vector';
 
 const DB_NAME = 'inkloop';
 const STORE = 'docs';
 const PDF_STORE = 'pdf_blobs';   // PDF 原始字节（重开免重导）
 const MARKS = 'marks';           // 页账本条目
 const TURNS = 'ai_turns';        // 书日志条目
+const WORKSPACES = 'workspaces'; // 会议工作区（≈群聊）
+const MEETINGS = 'meetings';     // 会议（属某 workspace）
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+
+/** 幂等建 store（连同建表时的初始 index）。已存在则跳过——自愈"版本到位却缺表"。 */
+function ensureStore(db: IDBDatabase, name: string, keyPath: string, index?: [string, string]): void {
+  if (db.objectStoreNames.contains(name)) return;
+  const store = db.createObjectStore(name, { keyPath });
+  if (index) store.createIndex(index[0], index[1], { unique: false });
+}
+
+/** 幂等给已存在 store 加 index（onupgradeneeded 内、versionchange 事务）。 */
+function ensureIndex(tx: IDBTransaction, storeName: string, indexName: string, keyPath: string): void {
+  const store = tx.objectStore(storeName);
+  if (!store.indexNames.contains(indexName)) store.createIndex(indexName, keyPath, { unique: false });
+}
 
 function openDB(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve) => {
     try {
-      const req = indexedDB.open(DB_NAME, DB_VERSION); // v3：docs + pdf_blobs + marks + ai_turns
-      req.onupgradeneeded = () => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (event) => {
         const db = req.result;
-        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'document_id' });
-        if (!db.objectStoreNames.contains(PDF_STORE)) db.createObjectStore(PDF_STORE, { keyPath: 'document_id' });
-        if (!db.objectStoreNames.contains(MARKS)) db.createObjectStore(MARKS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
-        if (!db.objectStoreNames.contains(TURNS)) db.createObjectStore(TURNS, { keyPath: 'entry_id' }).createIndex('by_doc', 'document_id', { unique: false });
+        const tx = req.transaction!;   // versionchange 事务：给已存在 store 加 index 用
+        const oldV = event.oldVersion; // 0 = 全新库
+
+        // ① 幂等结构基线：确保六个核心 store 存在（连建表时的初始 index）。不依赖 oldVersion，
+        //    自愈历史 HMR 坏库（"版本到位却缺表"）。
+        ensureStore(db, STORE, 'document_id');
+        ensureStore(db, PDF_STORE, 'document_id');
+        ensureStore(db, MARKS, 'entry_id', ['by_doc', 'document_id']);
+        ensureStore(db, TURNS, 'entry_id', ['by_doc', 'document_id']);
+        ensureStore(db, WORKSPACES, 'workspace_id');
+        ensureStore(db, MEETINGS, 'meeting_id', ['by_ws', 'workspace_id']);
+
+        // ② 阶梯迁移：每次 DB_VERSION 升级追加一块 if (oldV < N) {...}——给已存在 store 加 index /
+        //    字段级 backfill（须恰好跑一次的数据迁移放这）。
+        if (oldV < 6) ensureIndex(tx, MARKS, 'by_context', 'context_id'); // v6 时间脊（C2）
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
+      req.onblocked = () => console.warn('[store] IndexedDB 升级被阻塞——请关掉其它 InkLoop 标签页后重载');
     } catch {
       resolve(null);
     }
@@ -74,6 +102,7 @@ function nextSeq(): number { seqCounter = Math.max(seqCounter + 1, Date.now()); 
 
 /** 打开文档：从 IndexedDB 载入已存的语义蒸馏（没有则新建）。返回 true=命中缓存。 */
 export async function openDoc(meta: { document_id: string; file_hash: string; filename: string; page_count: number }): Promise<boolean> {
+  flushSave(); // 切档前先落盘上一份在途改动（防去抖丢写）
   const saved = await idbGet(meta.document_id);
   const hit = !!(saved && saved.version === STORE_VERSION);
   if (hit) {
@@ -87,6 +116,19 @@ export async function openDoc(meta: { document_id: string; file_hash: string; fi
   scheduleSave(); // 即便不标注也落库（导入后直接刷新也能在书架列出）
   return hit;
 }
+
+/**
+ * 把"当前文档"重指向给定 doc——切 SurfaceContext 时调，使 store.current 始终 = 活跃实例的文档。
+ * 根除"模块级 current 与 SurfaceContext.documentId 双真相"导致的跨文档串写（P0-4）：
+ * 退会议切回阅读 A 时，current 跟着回到 A，翻页/水位线/页缓存不再误写进会议材料 B。
+ */
+export function setActiveDoc(doc: PersistedDoc | null): void {
+  if (doc === current) return;
+  flushSave();    // 落盘上一份在途改动，再切
+  current = doc;
+}
+/** 当前活跃文档引用（renderer 载入文档后挂到 SurfaceContext.storeDoc，供切回时重指向）。 */
+export function activeDoc(): PersistedDoc | null { return current; }
 
 // ── 书籍持久化：PDF 原始字节 + 书目列表 + 阅读位置 ──
 
@@ -187,6 +229,10 @@ function entriesByDoc<T extends { seq: number }>(storeName: string, documentId: 
 /** 追加一条 mark 条目（含 tombstone）。store 填 entry_id/seq/created_at。 */
 export function appendMarkEntry(m: Omit<PersistedMark, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
   const rec: PersistedMark = { ...m, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
+  // C6：标注落账本同时排入向量库 seam（今 no-op）——真向量库接上时历史数据已在库，免冷启动 backfill。
+  if (!rec.is_tombstone && rec.marked_text) {
+    void vectorStore.upsert({ id: rec.entry_id, bookId: rec.document_id, pageIndex: rec.page_index, text: rec.marked_text, anchorRefs: rec.hmp?.target_object_refs });
+  }
   return appendEntry(MARKS, rec);
 }
 
@@ -235,11 +281,13 @@ export async function updateOverlayState(documentId: string, overlay: ScreenOver
   });
 }
 
-/** 综合提交成功后：把水位线推到当前最大 seq（此前所有 mark 记为已综合）。 */
-export function setSynthesisWatermark(): void {
-  if (!current) return;
-  current.synthesis_watermark_seq = seqCounter;
-  scheduleSave();
+/** 综合提交成功后：把指定书的水位线推到当前最大 seq（此前所有 mark 记为已综合）。
+ *  默认当前活跃文档；AI 会话提交显式传归属文档——回答期间已切走时仍写对正确的书（B1）。 */
+export function setSynthesisWatermark(doc: PersistedDoc | null = current): void {
+  if (!doc) return;
+  doc.synthesis_watermark_seq = seqCounter;
+  if (doc === current) scheduleSave();
+  else void idbPut(doc); // 非活跃文档：直接落盘该书水位线，不动当前去抖
 }
 
 // ── docs 内部：页缓存（reflow/图解）──
@@ -255,11 +303,18 @@ function page(i: number): PersistedPage | null {
 }
 
 function scheduleSave(): void {
-  if (!current) return;
+  const doc = current; // 绑定到这个 doc：current 之后被重指向/切档，定时器仍落到正确的书，不串档
+  if (!doc) return;
   window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => {
-    if (current) { current.saved_at = new Date().toISOString(); void idbPut(current); }
-  }, 600);
+  saveTimer = window.setTimeout(() => { doc.saved_at = new Date().toISOString(); void idbPut(doc); }, 600);
+}
+
+/** 立即落盘当前 doc 的在途改动并清掉去抖定时器（切档前调，防丢写）。 */
+function flushSave(): void {
+  if (saveTimer === undefined) return;
+  window.clearTimeout(saveTimer);
+  saveTimer = undefined;
+  if (current) { current.saved_at = new Date().toISOString(); void idbPut(current); }
 }
 
 function overlap(a: NormBBox, b: NormBBox): number {
@@ -293,4 +348,133 @@ export function putImageExplain(i: number, bbox: NormBBox, explanation: string):
   const ex = p.images.find((im) => overlap(im.bbox, bbox) > 0.8);
   if (ex) ex.explanation = explanation; else p.images.push({ bbox, explanation });
   scheduleSave();
+}
+
+// ── 会议工作区（v4）：workspaces + meetings（CRUD，非 append-only，就地 put）──────
+
+function putInto(storeName: string, rec: object): Promise<void> {
+  return openDB().then((db) => {
+    if (!db) return;
+    return new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).put(rec);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch { resolve(); }
+    });
+  });
+}
+function getAllFrom<T>(storeName: string): Promise<T[]> {
+  return openDB().then((db) => {
+    if (!db) return [] as T[];
+    return new Promise<T[]>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+        r.onsuccess = () => resolve((r.result as T[]) ?? []);
+        r.onerror = () => resolve([] as T[]);
+      } catch { resolve([] as T[]); }
+    });
+  });
+}
+function getOneFrom<T>(storeName: string, key: string): Promise<T | null> {
+  return openDB().then((db) => {
+    if (!db) return null;
+    return new Promise<T | null>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).get(key);
+        r.onsuccess = () => resolve((r.result as T) ?? null);
+        r.onerror = () => resolve(null);
+      } catch { resolve(null); }
+    });
+  });
+}
+function byIndexFrom<T>(storeName: string, index: string, key: string): Promise<T[]> {
+  return openDB().then((db) => {
+    if (!db) return [] as T[];
+    return new Promise<T[]>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).index(index).getAll(IDBKeyRange.only(key));
+        r.onsuccess = () => resolve((r.result as T[]) ?? []);
+        r.onerror = () => resolve([] as T[]);
+      } catch { resolve([] as T[]); }
+    });
+  });
+}
+
+/** 新建工作区（群聊）。 */
+export async function createWorkspace(name: string): Promise<PersistedWorkspace> {
+  const now = new Date().toISOString();
+  const ws: PersistedWorkspace = { workspace_id: shortId('ws'), name: name.trim() || '未命名群聊', source: 'manual', created_at: now, updated_at: now };
+  await putInto(WORKSPACES, ws);
+  return ws;
+}
+/** 列出工作区（最近更新在前）。 */
+export function listWorkspaces(): Promise<PersistedWorkspace[]> {
+  return getAllFrom<PersistedWorkspace>(WORKSPACES).then((a) => a.sort((x, y) => (y.updated_at || '').localeCompare(x.updated_at || '')));
+}
+export function getWorkspace(id: string): Promise<PersistedWorkspace | null> {
+  return getOneFrom<PersistedWorkspace>(WORKSPACES, id);
+}
+/** 幂等 upsert 一个飞书来源工作区（id 由 chat_id 派生·稳定）。名字没变就不动 updated_at，避免列表抖动。 */
+export async function upsertFeishuWorkspace(chatId: string, name: string): Promise<PersistedWorkspace> {
+  const id = `ws_fs_${chatId}`;
+  const cur = await getOneFrom<PersistedWorkspace>(WORKSPACES, id);
+  if (cur && cur.name === name && cur.source === 'feishu') return cur;
+  const now = new Date().toISOString();
+  const ws: PersistedWorkspace = { workspace_id: id, name: name.trim() || '未命名群聊', source: 'feishu', feishu_chat_id: chatId, created_at: cur?.created_at ?? now, updated_at: now };
+  await putInto(WORKSPACES, ws);
+  return ws;
+}
+
+/** 新建会议（属某工作区）。status 据计划时间派生：过去=已结束，否则=待开始。 */
+export async function createMeeting(workspaceId: string, input: { title: string; scheduled_at: string }): Promise<PersistedMeeting> {
+  const now = new Date().toISOString();
+  const t = new Date(input.scheduled_at).getTime();
+  const status: MeetingStatus = Number.isFinite(t) && t < Date.now() ? 'ended' : 'upcoming';
+  const mtg: PersistedMeeting = {
+    meeting_id: shortId('mtg'), workspace_id: workspaceId, title: input.title.trim() || '未命名会议',
+    scheduled_at: input.scheduled_at, status, material_doc_ids: [], created_at: now, updated_at: now,
+  };
+  await putInto(MEETINGS, mtg);
+  return mtg;
+}
+/** 某工作区的会议（计划时间倒序）。 */
+export function listMeetings(workspaceId: string): Promise<PersistedMeeting[]> {
+  return byIndexFrom<PersistedMeeting>(MEETINGS, 'by_ws', workspaceId).then((a) => a.sort((x, y) => (y.scheduled_at || '').localeCompare(x.scheduled_at || '')));
+}
+/** 所有会议（日程聚合用）。 */
+export function listAllMeetings(): Promise<PersistedMeeting[]> {
+  return getAllFrom<PersistedMeeting>(MEETINGS);
+}
+export function getMeeting(id: string): Promise<PersistedMeeting | null> {
+  return getOneFrom<PersistedMeeting>(MEETINGS, id);
+}
+/** 局部更新一场会议（合并 patch + 刷新 updated_at）。 */
+export async function updateMeeting(id: string, patch: Partial<PersistedMeeting>): Promise<PersistedMeeting | null> {
+  const cur = await getOneFrom<PersistedMeeting>(MEETINGS, id);
+  if (!cur) return null;
+  const next: PersistedMeeting = { ...cur, ...patch, updated_at: new Date().toISOString() };
+  await putInto(MEETINGS, next);
+  return next;
+}
+
+/**
+ * 模拟会议（开发/演示用，非真实飞书 live 会议）：在一个**飞书来源**工作区下开一场 status=live 的会议，
+ * 好让会中工作台能从那个真实群里拉资料、把"除真正加入会议外的所有流程"都走真的。
+ * 已存在就复用（确保 live + 有 started_at）；没有飞书工作区返回 null。
+ */
+export async function startSimMeeting(): Promise<PersistedMeeting | null> {
+  const wss = await listWorkspaces();
+  const ws = wss.find((w) => w.source === 'feishu' && w.feishu_chat_id);
+  if (!ws) return null;
+  const existing = (await listMeetings(ws.workspace_id)).find((m) => m.title.startsWith('模拟会议'));
+  const now = new Date().toISOString();
+  if (existing) {
+    return existing.status === 'live' && existing.started_at
+      ? existing
+      : ((await updateMeeting(existing.meeting_id, { status: 'live', started_at: existing.started_at ?? now })) ?? existing);
+  }
+  const m = await createMeeting(ws.workspace_id, { title: `模拟会议 · ${ws.name}`, scheduled_at: now });
+  return (await updateMeeting(m.meeting_id, { status: 'live', started_at: now })) ?? m;
 }

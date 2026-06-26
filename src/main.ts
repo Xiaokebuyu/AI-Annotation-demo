@@ -1,6 +1,6 @@
 import './styles.css';
 import { recordEvent, captureMark, commitSessionDiscussion } from './core/pipeline';
-import { classifyScored, classifyStrokeFeature, bboxOf, type ScoredGesture, type StrokeFeature } from './capture/classify';
+import { classifyScored, classifyStrokeFeature, bboxOf } from './capture/classify';
 import {
   addMark, peekSession, clearSession, makeMark, removeMark,
   IDLE_COMMIT_MS, type Mark,
@@ -9,23 +9,24 @@ import { localCharHeight } from './evidence/target';
 import { trace } from './core/trace';
 import { devEmit } from './core/dev-telemetry';
 import { shortId, DEVICE_ID } from './core/ids';
-import { bus, state, settings, strokeMarkIds, type Stroke, type Tool } from './app/state';
-import { appendMarkEntry, getBookAiTurns, getFoldedMarks, getPendingMarks, listBooks, setLastReadPage, updateOverlayState } from './local/store';
-import type { PersistedMark } from './core/store-format';
+import { bus, state, settings, strokeMarkIds, getActiveContext, type Stroke } from './app/state';
+import type { SurfaceContext } from './app/surface-context';
+import { appendMarkEntry, listBooks, setLastReadPage, updateOverlayState } from './local/store';
 import type { ScreenOverlay } from './core/contracts';
-import type { AnnotationEvent, EventType, NormBBox } from './core/contracts';
-import { SCHEMA_VERSION } from './core/contracts';
-import { initRenderer, loadFile, reopenBook, gotoPage, setZoom, hasDocument } from './surface/renderer';
+import type { AnnotationEvent, NormBBox } from './core/contracts';
+import { initRenderer, loadFile, reopenBook, renderPage, gotoPage, setZoom, hasDocument } from './surface/renderer';
 import { renderChatSurface } from './surface/chat-surface';
 import { initInk, redrawInk } from './capture/ink';
 import { initWhisper } from './surface/whisper';
 import { initReader } from './surface/reader';
 import { initAnchorLayer } from './surface/anchor-layer';
-import { openBook, appendMsg } from './chat/buffer';
 import { initInsightPanel } from './surface/insight-panel';
 import { initToolbar } from './surface/toolbar';
 import { initDevOverlay } from './dev/dev-overlay';
 import { initNavShell } from './dev/console';
+import { initEinkMirror, signalInkArea } from './surface/eink';
+import { features } from './config/features';
+import { restoreLedgerState } from './controllers/ledger-restore';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -189,7 +190,9 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
     strokes: realStrokes.map((s) => ({ tool: s.tool, points: s.points })),
     bbox, tool, color: tool === 'highlighter' ? 'rgba(212,207,202,0.85)' : '#1A1A1A',
     pointer_type: repr.pointer_type, device_id: repr.device_id, abs_timestamp: Date.now(),
+    context_id: getActiveContext().id,
     feature_type: feature.type, feature_confidence: feature.confidence,
+    kind: cap.kind, kind_source: cap.kindSource,
     scored_type: markScored.type, scored_score: markScored.score,
     hmp: cap.hmp ? { ...cap.hmp, crop_ref: undefined, vector_ref: undefined } : null,
     marked_text: cap.markedText, is_tombstone: false,
@@ -216,12 +219,20 @@ async function commitSession(bookId: string, reason: 'idle' | 'handwriting', tri
   const sig = session.marks.map((m) => m.id).join(',') + ':' + reason + ':' + (triggerMark?.id ?? '');
   if (lastSig.get('sess_' + bookId) === sig) return;
   lastSig.set('sess_' + bookId, sig);
-  const discId = 'disc_' + (triggerMark?.id ?? session.marks[session.marks.length - 1].id);
-  const committed = await commitSessionDiscussion(session, reason, triggerMark, discId);
-  if (committed) { clearSession(bookId); lastSig.delete('sess_' + bookId); }
+  const committedIds = session.marks.map((m) => m.id); // 本批要综合的笔（综合期间新写的不在内、不被连带清掉）
+  const discId = 'disc_' + (triggerMark?.id ?? committedIds[committedIds.length - 1]);
+  const outcome = await commitSessionDiscussion(session, reason, triggerMark, discId);
+  if (outcome === 'committed') {
+    for (const id of committedIds) removeMark(bookId, id); // 只摘走已综合这批；综合期间新写的笔留作下一段（B1）
+    lastSig.delete('sess_' + bookId);
+  } else if (outcome === 'failed') {
+    lastSig.delete('sess_' + bookId); // AI 失败：marks 保留（没摘），清 sig 让下次 idle 能就同一批重试（B2）
+  }
+  // folded：marks 保留 + sig 保留（不重复触发；新笔改变 sig 时再连带综合）
 }
 
 initInk($<HTMLCanvasElement>('ink-layer'), (stroke, pointerType, penUpAt) => {
+  signalInkArea(bboxOf(stroke.points)); // 电纸屏：该笔局部 A2 快刷（先于事件判定即刷；web/dev 无桥 no-op）
   if (!sessionTrace) sessionTrace = shortId('trc'); // 一段区域的笔共享 trace（recordEvent 要打点/计延迟，原版页专属）
   const evt = recordEvent(stroke, sessionTrace, pointerType, penUpAt);
   if (!evt) return;
@@ -268,6 +279,7 @@ bus.on('mark:erase', (mid) => {
     document_id: bookId, page_id: state.pageId ?? '', page_index: state.pageIndex, mark_id: markId,
     strokes: [], bbox: [0, 0, 0, 0], tool: 'pen', color: '',
     pointer_type: 'unknown', device_id: DEVICE_ID, abs_timestamp: Date.now(),
+    context_id: getActiveContext().id,
     feature_type: 'drawing', feature_confidence: 0, scored_type: 'stroke', scored_score: 0,
     hmp: null, marked_text: '', is_tombstone: true,
   });
@@ -284,6 +296,9 @@ initInsightPanel({
 });
 initDevOverlay(); // 画布叠层（独立于旧 dev 抽屉，由设置页 devOverlay/showRegion/showRelations 控）
 initNavShell();   // 全局导航壳：阅读 / AI 会话 / 采集取证 / 设置（旧 #dev 抽屉已退役）
+// 窄屏(电纸屏竖向 / 手机)：导航栏默认收起为抽屉，避免在 ~405px 宽挤占正文（点 ☰ 以浮层拉出）
+if (window.matchMedia('(max-width: 640px)').matches) document.body.classList.add('rail-collapsed');
+if (features.einkBridge) initEinkMirror(); // 电纸屏镜像：套壳内容变化 → 推 IT8951（web/dev 无桥则 no-op；D1 flag 可关）
 
 const fileIn = $<HTMLInputElement>('file-in');
 fileIn.addEventListener('change', () => {
@@ -381,6 +396,19 @@ reading.addEventListener('drop', (e) => {
 
 bus.on('document:loaded', () => { void restoreFromLedger(); });
 
+// 方案 B Stage 1：切换激活实例（进/退会议）后的重绘。
+// 切回已加载的 PDF 实例（如退会议回主阅读）→ 重渲当前页 + 复原 chrome/墨迹/旁注，全程不重新 fetch/decode。
+// 白板/聊天 surface 由调用方（enterMeeting）显式 renderBlankSurface 处理；空实例（无书）→ 回空屏。
+bus.on('context:switched', (ctx) => {
+  const c = ctx as SurfaceContext;
+  if (c.pdf && c.surfaceType === 'article') {
+    void renderPage().then(() => { if (getActiveContext() === c) void restoreFromLedger(); }); // 渲染期间又切走则不再恢复（P0-5）
+  } else if (!c.documentId) {
+    document.body.classList.remove('doc-loaded');
+    $('empty-state').style.display = '';
+  }
+});
+
 /** reload/重开后从账本重建：笔迹(folded marks) + AI 旁注/对话 buffer(book log) + pending session(水位线后)。 */
 async function restoreFromLedger(): Promise<void> {
   document.body.classList.add('doc-loaded');
@@ -389,61 +417,7 @@ async function restoreFromLedger(): Promise<void> {
   void renderRecent(recentBooks, { withCap: true }); // 刷新书架（新导入的书下次回到空屏即可见）
   const docId = state.documentId;
   if (!docId) return;
-  openBook(docId); // 非阻塞预热每本书对话 buffer
-
-  // 1) 笔迹：折叠后的 mark → strokesByPage（按 page_id）+ 回填 strokeMarkIds（擦/撤仍能定位整 mark）
-  const marks = await getFoldedMarks(docId);
-  state.strokesByPage.clear();
-  for (const m of marks) {
-    const arr = state.strokesByPage.get(m.page_id) ?? [];
-    for (const ps of m.strokes) {
-      const st: Stroke = { tool: ps.tool as Tool, points: ps.points };
-      strokeMarkIds.set(st, m.mark_id);
-      arr.push(st);
-    }
-    state.strokesByPage.set(m.page_id, arr);
-  }
-
-  // 2) AI 旁注 + 对话 buffer：书日志折叠（每 overlay_id 取最新；dismissed/folded 不显示）
-  //    overlay 恢复 = 非 dismissed 且非 folded（folded=自我笔记，静默：无 reader 旁注、不进 buffer）；
-  //    buffer 只回放最近 3 轮（延续性主要靠空间召回，不靠长 transcript）。
-  const turns = await getBookAiTurns(docId);
-  state.overlays = [];
-  const shown = turns.filter((t) => t.overlay_state !== 'dismissed' && t.overlay_state !== 'folded');
-  for (const t of shown) {
-    t.overlay.object_refs = t.anchor.object_refs; // 跨视图锚（兼容早于 object_refs 的旧快照）
-    state.overlays.push(t.overlay);
-  }
-  for (const t of shown.slice(-3)) { // 仅最近 3 轮进 buffer（与 buffer.ts MAX_TURNS=6 一致）
-    appendMsg(docId, { role: 'user', content: t.prompt_snapshot });
-    appendMsg(docId, { role: 'assistant', content: t.ai_reply });
-  }
-
-  // 3) pending session：水位线之后未综合的 mark 重建进内存 session（下次 idle 仍能综合）
-  const pending = await getPendingMarks(docId);
-  if (pending.length) {
-    const baseT = performance.now(), wall = Date.now();
-    for (const pm of pending) addMark(docId, persistedToMark(pm, baseT, wall));
-  }
-
-  bus.emit('page:rendered'); // 补一次重绘：renderPage 早于本异步恢复完成，此处让 redrawInk/whisper 拿到恢复后的数据
-}
-
-/** 持久 mark → 内存 Mark（仅 pending session 重建用）。t 由 abs_timestamp 折回 performance.now 时间线（保关系 gap）。 */
-function persistedToMark(pm: PersistedMark, baseT: number, wall: number): Mark {
-  const points = pm.strokes.flatMap((s) => s.points);
-  const event: AnnotationEvent = {
-    event_id: pm.mark_id, trace_id: '', document_id: pm.document_id, page_id: pm.page_id,
-    event_type: pm.scored_type as EventType, geometry: { bbox: pm.bbox }, stroke_points: points,
-    text_note: null, created_at: pm.created_at, device_id: pm.device_id, session_id: '',
-    pointer_type: pm.pointer_type, version: SCHEMA_VERSION,
-  };
-  const feature: StrokeFeature = {
-    type: pm.feature_type, confidence: pm.feature_confidence, scaleRatio: NaN,
-    raw: { strokeCount: pm.strokes.length, templateScore: 0, templateType: pm.scored_type as EventType, scaleRatio: NaN, complexity: 0, ocrWorthy: false, tplSpan: 0 },
-  };
-  const scored: ScoredGesture = { type: pm.scored_type as EventType, score: pm.scored_score };
-  return { id: pm.mark_id, event, feature, scored, t: baseT - (wall - pm.abs_timestamp), hmp: pm.hmp, markedText: pm.marked_text };
+  await restoreLedgerState(docId); // 账本→state 重建（笔迹/旁注/buffer/pending），见 controllers/ledger-restore
 }
 
 let lastPageId: string | null = null;
@@ -517,6 +491,6 @@ window.addEventListener('resize', () => {
 });
 
 declare global {
-  interface Window { __inkloop?: { state: typeof state; settings: typeof settings; bus: typeof bus } }
+  interface Window { __inkloop?: { state: typeof state; settings: typeof settings; bus: typeof bus; features: typeof features } }
 }
-window.__inkloop = { state, settings, bus };
+window.__inkloop = { state, settings, bus, features };

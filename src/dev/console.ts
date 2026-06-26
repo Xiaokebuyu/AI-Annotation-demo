@@ -18,24 +18,33 @@
  *
  * 非「阅读」的页面渲染进 #app-pages（覆盖正文区、不挡侧栏）。侧栏可折叠（键 m / 折叠钮），折叠时正文占满。
  */
-import { bus, state, settings, saveSettings, type Placement } from '../app/state';
+import { bus, state, settings, saveSettings, resetSettings, type Placement } from '../app/state';
 import { resetBook } from '../chat/buffer';
 import { listBooks, getBookAiTurns, getFoldedMarks } from '../local/store';
+import { icon } from '../surface/icons';
+import { renderMeeting, rerenderMeeting, syncMtgChrome, initMeeting } from '../features/meeting/meeting';
+import { esc } from '../core/escape';
+import './console.css'; // 导航壳 + dev 页样式（会议样式已随 features/meeting/meeting.css 迁出）
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
 import type { HMP, PipelineStage, PipelineStageIO, SurfaceObject } from '../core/contracts';
 import { downloadTrace, traceCount } from '../core/trace';
 import { snapshot } from '../core/metrics';
 import { selfTest } from '../core/transform';
 
-const esc = (s: string): string => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] ?? c));
-
-type PageId = 'reader' | 'chat' | 'hmp' | 'settings';
+type PageId = 'reader' | 'meeting' | 'chat' | 'hmp' | 'settings';
 const PAGES: Array<{ id: PageId; icon: string; label: string; ready: boolean }> = [
   { id: 'reader', icon: '📖', label: '阅读', ready: true },
+  { id: 'meeting', icon: '🗓', label: '会议', ready: true }, // 群聊工作区 → 会议日程 + 资料书架（阶段一脚手架）
   { id: 'chat', icon: '💬', label: 'AI 会话', ready: true }, // 含逐组件处理流水线，已取代旧「上下文监控」
   { id: 'hmp', icon: '🔬', label: '采集取证', ready: true }, // 合并 HMP 取证 + SurfaceIndex 对象，深度联动
   { id: 'settings', icon: '⚙', label: '设置', ready: true }, // 全部设置 + 逐项可用性标注
 ];
+// 导航布局：顶层目的地（阅读 / 会议）+ 折叠的 dev 抽屉（AI会话 / 采集取证 / 设置 收进去）
+const TOP_NAV: PageId[] = ['reader', 'meeting'];
+const DEV_NAV: PageId[] = ['chat', 'hmp', 'settings'];
+const pageDef = (id: PageId): { id: PageId; icon: string; label: string; ready: boolean } => PAGES.find((p) => p.id === id)!;
+
+const NAV_ICON: Record<PageId, string> = { reader: 'book', meeting: 'calendar', chat: 'message', hmp: 'scan', settings: 'settings' };
 
 let activePage: PageId = 'reader';
 let selectedBook: string | null = null;
@@ -49,226 +58,19 @@ const TRIGGER_CN: Record<string, { t: string; c: string }> = {
   discussion: { t: '段落讨论', c: '#8a877f' },
 };
 
-function injectStyle(): void {
-  if (document.getElementById('shell-style')) return;
-  const s = document.createElement('style');
-  s.id = 'shell-style';
-  s.textContent = `
-  body { --rail-w: 220px; padding-left: var(--rail-w); transition: padding-left .16s ease; }
-  body.rail-collapsed { --rail-w: 0px; }
-  #app-rail { position: fixed; left: 0; top: 0; bottom: 0; width: 220px; z-index: 46; display: flex; flex-direction: column;
-    padding: 12px 10px; gap: 3px; background: var(--page); border-right: 1px solid var(--line); transition: transform .16s ease; }
-  body.rail-collapsed #app-rail { transform: translateX(-220px); }
-  .rail-head { display: flex; align-items: center; gap: 8px; padding: 4px 6px 10px; }
-  .rail-brand { font: 600 14.5px var(--sans); flex: 1; }
-  .rail-iconbtn { border: 0; background: transparent; color: var(--mut); font-size: 15px; cursor: pointer; padding: 4px 6px; border-radius: 7px; }
-  .rail-iconbtn:hover { background: var(--hl); color: var(--ink); }
-  .rail-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 9px 10px; border: 0; border-radius: 9px;
-    background: transparent; color: var(--ink); font-size: 13.5px; cursor: pointer; font-family: var(--sans); }
-  .rail-item:hover { background: var(--hl); }
-  .rail-item.active { background: var(--ink); color: var(--page); }
-  .rail-item .rail-ico { width: 18px; text-align: center; }
-  .rail-item .rail-soon { margin-left: auto; font-size: 10px; color: var(--hint); }
-  .rail-item.active .rail-soon { color: var(--hl); }
-  .rail-spacer { flex: 1; }
-  .rail-foot { border-top: 1px solid var(--line); padding-top: 8px; }
-  #rail-reopen { position: fixed; left: 10px; top: 9px; z-index: 47; display: none; width: 32px; height: 32px; border: 1px solid var(--line);
-    border-radius: 8px; background: var(--page); color: var(--ink); cursor: pointer; font-size: 15px; }
-  body.rail-collapsed #rail-reopen { display: block; }
-
-  #app-pages { position: fixed; left: var(--rail-w); top: 0; right: 0; bottom: 0; z-index: 38; background: var(--paper); color: var(--ink);
-    font-family: var(--sans); transition: left .16s ease; display: none; }
-  #app-pages.show { display: flex; flex-direction: column; }
-  #app-page-content { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
-
-  .cns-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
-  .cns-head h2 { margin: 0; font-size: 16px; font-weight: 600; white-space: nowrap; }
-  .cns-head-ctl { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .cns-head-ctl select, .cns-btn { font-family: var(--sans); font-size: 12.5px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
-    background: var(--page); color: var(--ink); cursor: pointer; max-width: 240px; white-space: nowrap; flex-shrink: 0; }
-  .cns-btn:hover { background: var(--hl); }
-  .cns-empty { color: var(--hint); font-size: 13px; text-align: center; padding: 48px 16px; }
-  .cns-placeholder { margin: auto; text-align: center; color: var(--hint); }
-  .cns-placeholder .cns-btn { margin-top: 14px; }
-
-  /* ChatGPT 式对话流 */
-  .cns-thread { flex: 1; overflow-y: auto; padding: 22px 0; min-height: 0; }
-  .cns-thread-inner { max-width: 820px; margin: 0 auto; padding: 0 24px; }
-  .cns-turn { margin-bottom: 24px; }
-  .cns-label { font-size: 11px; color: var(--hint); margin: 0 2px 4px; }
-  .cns-row { display: flex; }
-  .cns-row.user { justify-content: flex-end; }
-  .cns-row.user .cns-label { text-align: right; }
-  .cns-col { max-width: 88%; display: flex; flex-direction: column; }
-  .cns-bub { border-radius: 14px; padding: 11px 14px; font-size: 13.5px; line-height: 1.62; white-space: pre-wrap; word-break: break-word; }
-  .cns-bub.user { background: var(--ink); color: var(--page); border-bottom-right-radius: 4px; }
-  .cns-bub.ai { background: var(--page); color: var(--ink); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
-  .cns-meta { font-size: 11px; color: var(--hint); margin: 4px 2px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .cns-row.user .cns-meta { justify-content: flex-end; }
-  .cns-trig { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 20px; color: #fff; }
-  .cns-think { margin-top: 8px; border: 1px dashed var(--ai-line); border-radius: 10px; background: var(--ai-bg); }
-  .cns-think summary { cursor: pointer; padding: 7px 12px; font-size: 12px; color: var(--mut); list-style: none; }
-  .cns-think summary::-webkit-details-marker { display: none; }
-  .cns-think summary::before { content: '▸ '; }
-  .cns-think[open] summary::before { content: '▾ '; }
-  .cns-think-body { padding: 4px 12px 11px; font-size: 12.5px; line-height: 1.62; color: var(--mut); white-space: pre-wrap; word-break: break-word; border-top: 1px dashed var(--ai-line); }
-  .cns-nothink { font-size: 11px; color: var(--hint); margin-top: 6px; font-style: italic; }
-
-  /* 用户内容块：全流程上下文分类展示（结构化卡片） */
-  .cns-userwrap { width: 100%; }
-  .cns-usercard { width: 100%; background: var(--hl); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
-  .cns-sec { font-size: 11px; font-weight: 600; color: var(--mut); margin: 12px 0 5px; letter-spacing: .03em; }
-  .cns-sec:first-child { margin-top: 0; }
-  .cns-kv { font-size: 12.5px; line-height: 1.62; margin: 3px 0; word-break: break-word; }
-  .cns-kv .k { color: var(--hint); }
-  .cns-chip { display: inline-block; font-size: 11.5px; background: var(--page); border: 1px solid var(--line); border-radius: 7px; padding: 2px 8px; margin: 2px 5px 2px 0; }
-  .cns-yes { color: var(--ok); font-weight: 600; }
-  .cns-no { color: var(--bad); font-weight: 600; }
-  .cns-ctx { margin-top: 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--page); }
-  .cns-ctx summary { cursor: pointer; padding: 7px 11px; font-size: 12px; color: var(--mut); list-style: none; display: flex; gap: 9px; align-items: baseline; }
-  .cns-ctx summary::-webkit-details-marker { display: none; }
-  .cns-ctx summary::before { content: '▸'; color: var(--hint); flex-shrink: 0; }
-  .cns-ctx[open] summary::before { content: '▾'; }
-  .cns-ctx-h { font-weight: 600; white-space: nowrap; flex-shrink: 0; }
-  .cns-ctx-prev { color: var(--hint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .cns-ctx[open] .cns-ctx-prev { display: none; }
-  .cns-ctx-body { padding: 4px 12px 11px; font-size: 12px; line-height: 1.62; color: var(--ink); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto; border-top: 1px dashed var(--line); }
-
-  /* 处理流水线：逐组件「收到什么 → 产出什么」时间线 */
-  .cns-pl { margin-top: 4px; position: relative; padding-left: 14px; }
-  .cns-pl::before { content: ''; position: absolute; left: 4px; top: 6px; bottom: 6px; width: 2px; background: var(--line); border-radius: 2px; }
-  .cns-pl-stage { position: relative; border: 1px solid var(--line); border-radius: 10px; margin: 8px 0; background: var(--page); }
-  .cns-pl-stage::before { content: ''; position: absolute; left: -12px; top: 13px; width: 8px; height: 8px; border-radius: 50%; background: var(--ink); border: 2px solid var(--page); }
-  .cns-pl-stage.skipped { opacity: .72; border-style: dashed; }
-  .cns-pl-stage.skipped::before { background: var(--hint); }
-  .cns-pl-stage.error { border-color: var(--bad); }
-  .cns-pl-stage.error::before { background: var(--bad); }
-  .cns-pl-sum { cursor: pointer; padding: 8px 11px; font-size: 12.5px; display: flex; gap: 7px; align-items: baseline; list-style: none; flex-wrap: wrap; }
-  .cns-pl-sum::-webkit-details-marker { display: none; }
-  .cns-pl-sum::before { content: '▸'; color: var(--hint); flex-shrink: 0; }
-  .cns-pl-stage[open] .cns-pl-sum::before { content: '▾'; }
-  .cns-pl-name { font-weight: 600; flex-shrink: 0; }
-  .cns-pl-tag { font-size: 10px; padding: 1px 6px; border-radius: 10px; flex-shrink: 0; }
-  .cns-pl-tag.skipped { background: var(--hl); color: var(--mut); }
-  .cns-pl-tag.error { background: var(--bad); color: #fff; }
-  .cns-pl-note { color: var(--hint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-  .cns-pl-mark { font-size: 10px; background: var(--hl); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; color: var(--mut); flex-shrink: 0; }
-  .cns-pl-body { padding: 3px 12px 11px; border-top: 1px dashed var(--line); }
-  .cns-pl-io { margin: 9px 0 0; }
-  .cns-pl-io-h { font-size: 10.5px; font-weight: 600; letter-spacing: .04em; color: var(--mut); margin-bottom: 3px; }
-  .cns-pl-io-h.out { color: var(--ok); }
-  .cns-pl-kv { font-size: 12px; line-height: 1.6; margin: 2px 0; word-break: break-word; }
-  .cns-pl-kv .k { color: var(--hint); }
-  .cns-pl-kv .v { white-space: pre-wrap; }
-  .cns-pl-kv .v.long { display: block; margin-top: 2px; max-height: 200px; overflow-y: auto; background: var(--hl); border-radius: 6px; padding: 6px 8px; }
-  .cns-pl-imgs { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 9px; }
-  .cns-pl-img { display: flex; flex-direction: column; gap: 3px; align-items: center; }
-  .cns-pl-img img { max-height: 100px; max-width: 150px; border: 1px solid var(--line); border-radius: 6px; cursor: zoom-in; background: #fff; }
-  .cns-pl-img span { font-size: 10px; color: var(--hint); max-width: 150px; text-align: center; }
-
-  /* 图片放大 lightbox */
-  .cns-lb { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.8); display: none; align-items: center; justify-content: center; padding: 28px; cursor: zoom-out; }
-  .cns-lb.show { display: flex; }
-  .cns-lb img { max-width: 95%; max-height: 95%; border-radius: 6px; background: #fff; box-shadow: 0 10px 50px rgba(0,0,0,.55); }
-
-  /* 标注取证 HMP 页：逐 mark 取证卡 */
-  .hmp-inner { max-width: 880px; margin: 0 auto; padding: 0 24px; }
-  .hmp-note { font-size: 11.5px; color: var(--hint); margin: 0 2px 16px; line-height: 1.65; }
-  .hmp-card { border: 1px solid var(--line); border-radius: 12px; background: var(--page); padding: 12px 14px; margin-bottom: 14px; }
-  .hmp-chead { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
-  .hmp-mode { font-size: 11px; font-weight: 600; padding: 1px 9px; border-radius: 20px; color: #fff; flex-shrink: 0; }
-  .hmp-act { font-weight: 600; font-size: 13.5px; }
-  .hmp-feat { font-size: 10.5px; color: var(--mut); background: var(--hl); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
-  .hmp-live { font-size: 10px; color: var(--ok); border: 1px solid var(--ok); border-radius: 6px; padding: 1px 6px; }
-  .hmp-cmeta { margin-left: auto; font-size: 11px; color: var(--hint); white-space: nowrap; }
-  .hmp-body { display: flex; gap: 14px; margin-top: 11px; align-items: flex-start; }
-  .hmp-shots { display: flex; gap: 8px; flex-shrink: 0; }
-  .hmp-shot { display: flex; flex-direction: column; gap: 3px; align-items: center; }
-  .hmp-shot img { max-height: 104px; max-width: 150px; border: 1px solid var(--line); border-radius: 6px; cursor: zoom-in; background: #fff; }
-  .hmp-shot span { font-size: 10px; color: var(--hint); }
-  .hmp-noshot { flex-shrink: 0; width: 132px; min-height: 70px; border: 1px dashed var(--line); border-radius: 8px; color: var(--hint); font-size: 11px; line-height: 1.5; display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px; }
-  .hmp-fields { flex: 1; min-width: 0; }
-  .hmp-fields .cns-kv { margin: 3px 0; }
-  .hmp-miss { color: var(--bad); font-weight: 600; }
-  .hmp-xpage { color: var(--hint); }
-
-  /* 采集取证页：分段切换 + 对象表 + ref↔对象 互跳 */
-  #cap-seg { display: flex; gap: 4px; margin-left: 14px; background: var(--hl); border-radius: 9px; padding: 3px; }
-  .cap-segbtn { border: 0; background: transparent; color: var(--mut); font: 600 12.5px var(--sans); padding: 5px 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
-  .cap-segbtn.active { background: var(--page); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
-  .cap-pane { display: none; }
-  #cap-wrap[data-seg="hmp"] .cap-hmp { display: block; }
-  #cap-wrap[data-seg="objects"] .cap-obj { display: block; }
-  .obj-inner { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
-  .cap-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
-  .cap-tbl th, .cap-tbl td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  .cap-tbl th { color: var(--mut); font-weight: 600; position: sticky; top: 0; background: var(--paper); z-index: 1; }
-  .cap-tbl tr[data-objid]:hover { background: var(--hl); }
-  .cap-mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--mut); word-break: break-all; }
-  .cap-dim { color: var(--hint); }
-  .cap-link { color: #3b6fb3; text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
-  .cap-link:hover { color: #2a5894; background: var(--hl); border-radius: 4px; }
-  .cap-markchip { display: inline-block; font-size: 11px; background: var(--hl); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; margin: 1px 4px 1px 0; cursor: pointer; color: var(--mut); }
-  .cap-markchip:hover { background: var(--page); color: var(--ink); }
-  .cap-tbl tr.cap-flash { animation: capflashbg 1.4s ease; }
-  .hmp-card.cap-flash { animation: capflashcard 1.4s ease; }
-  @keyframes capflashbg { 0%, 28% { background: #fde68a; } 100% { background: transparent; } }
-  @keyframes capflashcard { 0%, 28% { background: #fde68a; } 100% { background: var(--page); } }
-
-  /* 按页分组折叠：最新页默认展开、旧页收起成一行摘要（body 懒渲染，DOM 变轻） */
-  .grp { border: 1px solid var(--line); border-radius: 12px; margin: 0 0 12px; background: var(--page); overflow: hidden; }
-  .grp > summary.grp-sum { cursor: pointer; padding: 11px 14px; list-style: none; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-  .grp > summary.grp-sum::-webkit-details-marker { display: none; }
-  .grp > summary.grp-sum::before { content: '▸'; color: var(--hint); flex-shrink: 0; }
-  .grp[open] > summary.grp-sum::before { content: '▾'; }
-  .grp[open] > summary.grp-sum { border-bottom: 1px solid var(--line); background: var(--hl); }
-  .grp-pg { font-weight: 700; font-size: 13.5px; flex-shrink: 0; }
-  .grp-count { font-size: 11px; color: var(--mut); background: var(--hl); border-radius: 20px; padding: 1px 8px; flex-shrink: 0; }
-  .grp[open] .grp-count { background: var(--page); }
-  .grp-time { font-size: 11px; color: var(--hint); flex-shrink: 0; }
-  .grp-prev { font-size: 12px; color: var(--hint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-  .grp[open] .grp-prev { display: none; }
-  .grp-body { padding: 13px 14px 2px; }
-
-  /* 设置页：分组 + 逐项可用性徽标 */
-  .cset-wrap { max-width: 740px; margin: 0 auto; padding: 6px 24px 48px; }
-  .cset-sec { margin-top: 24px; }
-  .cset-sec-h { font-size: 12px; font-weight: 700; color: var(--mut); letter-spacing: .04em; margin: 0 0 5px; }
-  .cset-sec-note { font-size: 11.5px; color: var(--hint); margin: 0 0 8px; line-height: 1.5; }
-  .cset-row { display: flex; align-items: flex-start; gap: 14px; padding: 11px 2px; border-bottom: 1px solid var(--line); }
-  .cset-text { flex: 1; min-width: 0; }
-  .cset-l { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .cset-label { font-size: 13px; color: var(--ink); }
-  .cset-hint { font-size: 11px; color: var(--hint); margin-top: 3px; line-height: 1.5; }
-  .cset-control { flex-shrink: 0; display: flex; align-items: center; gap: 5px; padding-top: 1px; }
-  .cset-control select, .cset-control input[type="number"] { font: 12.5px var(--sans); padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--page); color: var(--ink); }
-  .cset-control input[type="number"] { width: 62px; text-align: right; }
-  .cset-control input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
-  .cset-unit { font-size: 11px; color: var(--hint); }
-  .set-badge { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 20px; white-space: nowrap; }
-  .set-badge.live { background: #dcf2e6; color: #1f6b46; }
-  .set-badge.dev { background: #e4ecf7; color: #355a86; }
-  .set-badge.weak { background: #f8eecf; color: #836315; }
-  .set-badge.dead { background: var(--hl); color: var(--hint); }
-  details.cset-fold > summary { cursor: pointer; font-size: 12px; font-weight: 700; color: var(--mut); letter-spacing: .04em; padding: 4px 2px; list-style: none; }
-  details.cset-fold > summary::-webkit-details-marker { display: none; }
-  details.cset-fold > summary::before { content: '▸ '; color: var(--hint); }
-  details.cset-fold[open] > summary::before { content: '▾ '; }
-  .cset-actions { margin-top: 24px; }
-  .cset-danger { color: var(--bad); border-color: var(--bad); }
-  `;
-  document.head.appendChild(s);
-}
 
 function buildShell(): void {
   if (document.getElementById('app-rail')) return;
-  injectStyle();
 
+  const railItem = (id: PageId, sub = false): string =>
+    `<button class="rail-item${sub ? ' rail-sub-item' : ''}" data-page="${id}"><span class="rail-ico">${icon(NAV_ICON[id])}</span><span>${esc(pageDef(id).label)}</span></button>`;
   const rail = document.createElement('nav');
   rail.id = 'app-rail';
   rail.innerHTML =
     `<div class="rail-head"><span class="rail-brand">◐ InkLoop</span><button class="rail-iconbtn" id="rail-collapse" title="收起侧栏（m）">«</button></div>`
-    + PAGES.map((p) => `<button class="rail-item" data-page="${p.id}"><span class="rail-ico">${p.icon}</span><span>${esc(p.label)}</span>${p.ready ? '' : '<span class="rail-soon">迁移中</span>'}</button>`).join('')
+    + TOP_NAV.map((id) => railItem(id)).join('')
+    + `<button class="rail-item rail-group" id="rail-dev-toggle" title="开发 / 调试页"><span class="rail-ico">${icon('sliders')}</span><span>dev</span><span class="rail-caret">${icon('chevron')}</span></button>`
+    + `<div class="rail-sub" id="rail-dev-sub">` + DEV_NAV.map((id) => railItem(id, true)).join('') + `</div>`
     + `<div class="rail-spacer"></div>`;
   document.body.appendChild(rail);
 
@@ -294,6 +96,7 @@ function buildShell(): void {
   rail.querySelectorAll<HTMLButtonElement>('.rail-item[data-page]').forEach((btn) => {
     btn.addEventListener('click', () => go(btn.dataset.page as PageId));
   });
+  rail.querySelector('#rail-dev-toggle')!.addEventListener('click', () => setDevExpanded(!railDevOpen()));
   rail.querySelector('#rail-collapse')!.addEventListener('click', () => setCollapsed(true));
   reopen.addEventListener('click', () => setCollapsed(false));
 }
@@ -301,6 +104,14 @@ function buildShell(): void {
 function setCollapsed(c: boolean): void {
   document.body.classList.toggle('rail-collapsed', c);
   try { localStorage.setItem('inkloop.rail.collapsed', c ? '1' : '0'); } catch { /* ignore */ }
+}
+
+const railDevOpen = (): boolean => !!document.getElementById('rail-dev-sub')?.classList.contains('open');
+/** 展开/收起 dev 抽屉（AI会话 / 采集取证 / 设置）。 */
+function setDevExpanded(open: boolean): void {
+  document.getElementById('rail-dev-sub')?.classList.toggle('open', open);
+  document.getElementById('rail-dev-toggle')?.classList.toggle('open', open);
+  try { localStorage.setItem('inkloop.rail.dev', open ? '1' : '0'); } catch { /* ignore */ }
 }
 
 function highlight(): void {
@@ -321,6 +132,8 @@ function go(id: PageId): void {
 function showPage(id: PageId): void {
   activePage = id;
   highlight();
+  syncMtgChrome(); // 会中浮层（资料栏/退出钮）只在阅读页+会中模式显示
+  if (DEV_NAV.includes(id)) setDevExpanded(true); // 进 dev 子页时保持抽屉展开，露出高亮项
   const pages = document.getElementById('app-pages');
   if (!pages) return;
   if (id === 'reader') { pages.classList.remove('show'); return; }
@@ -330,6 +143,7 @@ function showPage(id: PageId): void {
 }
 
 function renderPage(id: PageId, content: HTMLDivElement): void {
+  if (id === 'meeting') { renderMeeting(content); return; }
   if (id === 'chat') { renderChat(content); return; }
   if (id === 'hmp') { renderCapture(content); return; }
   if (id === 'settings') { renderSettings(content); return; }
@@ -340,7 +154,7 @@ function renderPage(id: PageId, content: HTMLDivElement): void {
 function renderChat(c: HTMLDivElement): void {
   if (!selectedBook) selectedBook = state.documentId ?? null;
   c.innerHTML =
-    `<div class="cns-head"><h2>💬 AI 会话</h2><div class="cns-head-ctl">`
+    `<div class="cns-head"><h2>${icon('message')} AI 会话</h2><div class="cns-head-ctl">`
     + `<select id="cns-book-sel"></select>`
     + `<button class="cns-btn" id="cns-refresh">⟳ 刷新</button>`
     + `<button class="cns-btn" id="cns-clear" title="清空这本书模型当下记得的对话上下文（≤3 轮滑动窗），不影响账本">🗑 清空上下文</button>`
@@ -446,7 +260,10 @@ function ioRows(rows?: PipelineStageIO[]): string {
 function imgRow(imgs?: Array<{ role: string; thumb: string }>): string {
   if (!imgs?.length) return '';
   return `<div class="cns-pl-imgs">`
-    + imgs.map((im) => `<div class="cns-pl-img"><img class="cns-zoom" src="${im.thumb}" alt=""><span>${esc(im.role)}</span></div>`).join('')
+    + imgs.map((im) => {
+      const safeThumb = /^data:image\//.test(im.thumb) ? esc(im.thumb) : ''; // 只放行本地截图 data:image/ URL + esc，杜绝 src 属性逃逸
+      return `<div class="cns-pl-img"><img class="cns-zoom" src="${safeThumb}" alt=""><span>${esc(im.role)}</span></div>`;
+    }).join('')
     + `</div>`;
 }
 /** 一个组件阶段卡：summary（mark 标 + 名 + 状态 + note）+ body（收到 → 图 → 产出）。 */
@@ -715,7 +532,7 @@ function flashTarget(sel: string): void {
 function renderCapture(c: HTMLDivElement): void {
   if (!selectedBook) selectedBook = state.documentId ?? null;
   c.innerHTML =
-    `<div class="cns-head"><h2>🔬 采集取证</h2>`
+    `<div class="cns-head"><h2>${icon('scan')} 采集取证</h2>`
     + `<div id="cap-seg"><button class="cap-segbtn" data-seg="hmp">HMP 取证</button><button class="cap-segbtn" data-seg="objects">SurfaceIndex 对象</button></div>`
     + `<div class="cns-head-ctl"><select id="cap-book-sel"></select><button class="cns-btn" id="cap-refresh">⟳ 刷新</button></div></div>`
     + `<div class="cns-thread"><div id="cap-wrap" data-seg="${captureSeg}">`
@@ -731,7 +548,7 @@ function renderCapture(c: HTMLDivElement): void {
 }
 
 /* ── 设置页（迁出旧 #dev 抽屉；按代码审计诚实标注每项是否真生效）─────────────────────
- * settings 落 localStorage('inkloop.settings.v1')；多数项改完 effect='changed'（emit settings:changed
+ * settings 落 localStorage（inkloop.prefs.v1 产品键 / inkloop.devflags.v1 dev 键）；多数项改完 effect='changed'（emit settings:changed
  * → main 取消在途计时 + 清当前 session），少数仅 saveSettings()。可用性徽标来自本会话审计：
  * 生效=v3 主路真读；调试叠层=只影响可视化；弱效=仅下次导入文档时生效（预排版预热）。 */
 
@@ -750,7 +567,9 @@ function setSections(): SetSection[] {
   const g = settings.gesture, p = settings.preprocess;
   return [
     { title: '核心 · 影响真实行为', rows: [
-      { kind: 'select', label: '推理模型（每次标注答问/识别用）', badge: B_LIVE, opts: [['kimi-k2.6', 'kimi-k2.6（中文笔迹稳）'], ['claude-opus-4-8', 'claude-opus-4-8（最新·慢）'], ['claude-opus-4-7', 'claude-opus-4-7（质量·慢）'], ['claude-sonnet-4-6', 'claude-sonnet-4-6（快·能回思考）'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite（快）']], get: () => settings.inferModel, set: (v) => { settings.inferModel = v; }, effect: 'changed' },
+      { kind: 'select', label: '推理模型（答问 · 分类器默认）', badge: B_LIVE, opts: [['kimi-k2.6', 'kimi-k2.6（中文笔迹稳）'], ['claude-opus-4-8', 'claude-opus-4-8（最新·慢）'], ['claude-opus-4-7', 'claude-opus-4-7（质量·慢）'], ['claude-sonnet-4-6', 'claude-sonnet-4-6（快·能回思考）'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite（快）']], get: () => settings.inferModel, set: (v) => { settings.inferModel = v; }, effect: 'changed' },
+      { kind: 'select', label: '识别分类器模型 · /api/interpret（空=继承推理模型）', badge: B_LIVE, opts: [['', '继承推理模型'], ['__local_hwr__', '端侧手写·OpenVINO 英文(徐方案·走本地端点)'], ['kimi-k2.6', 'kimi-k2.6'], ['claude-opus-4-8', 'claude-opus-4-8'], ['claude-sonnet-4-6', 'claude-sonnet-4-6'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite']], get: () => settings.interpretModel, set: (v) => { settings.interpretModel = v; }, effect: 'changed' },
+      { kind: 'select', label: '上下文分类器模型 · /api/classify-context（空=继承推理模型）', badge: B_LIVE, opts: [['', '继承推理模型'], ['__local_rules__', '端侧规则·徐 IntentClassifier（驱动 respond/fold·不调云）'], ['kimi-k2.6', 'kimi-k2.6'], ['claude-opus-4-8', 'claude-opus-4-8'], ['claude-sonnet-4-6', 'claude-sonnet-4-6'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite']], get: () => settings.classifyModel, set: (v) => { settings.classifyModel = v; }, effect: 'changed' },
       { kind: 'check', label: '送合成图给模型', hint: '强制把合成图/笔迹图也送进主模型；默认关＝纯文字取证路线（徐方案）', badge: B_LIVE, get: () => settings.sendMarkImage, set: (v) => { settings.sendMarkImage = v; }, effect: 'changed' },
       { kind: 'select', label: '输出落点', badge: B_LIVE, opts: [['margin', '右侧留白'], ['inline', '贴正文浮动']], get: () => settings.placement, set: (v) => { settings.placement = v as Placement; }, effect: 'changed' },
       { kind: 'check', label: '手势响应（总开关）', hint: '关掉后停笔不再生成 HMP+旁注、不触发综合', badge: B_LIVE, get: () => g.enabled, set: (v) => { g.enabled = v; }, effect: 'changed' },
@@ -817,11 +636,11 @@ function renderSettings(c: HTMLDivElement): void {
       : `<div class="cset-sec"><div class="cset-sec-h">${esc(s.title)}</div>${note}${rowsHtml}</div>`;
   }).join('');
   c.innerHTML =
-    `<div class="cns-head"><h2>⚙ 设置</h2><div class="cns-head-ctl">`
+    `<div class="cns-head"><h2>${icon('settings')} 设置</h2><div class="cns-head-ctl">`
     + `<button class="cns-btn" id="cset-reset" title="清掉 localStorage 里存的设置、重载回代码默认">恢复默认设置</button>`
     + `</div></div>`
     + `<div class="cns-thread"><div class="cset-wrap">${secHtml}${diagHtml()}`
-    + `<div class="cset-actions"><span class="cset-hint">设置存于浏览器 localStorage（inkloop.settings.v1），即时生效；个别项需翻页/重导/清上下文才显现，已在各项标注。徽标含义：生效=v3 主路真读 · 调试叠层=只影响可视化 · 弱效=读它的路径当前主路不走或仅导入时生效 · 失效=当前无人按它分流。</span></div>`
+    + `<div class="cset-actions"><span class="cset-hint">设置存于浏览器 localStorage（inkloop.prefs.v1 / inkloop.devflags.v1），即时生效；个别项需翻页/重导/清上下文才显现，已在各项标注。徽标含义：生效=v3 主路真读 · 调试叠层=只影响可视化 · 弱效=读它的路径当前主路不走或仅导入时生效 · 失效=当前无人按它分流。</span></div>`
     + `</div></div>`;
   document.getElementById('cset-dl-trace')?.addEventListener('click', () => downloadTrace());
   fillDiag();
@@ -839,7 +658,7 @@ function renderSettings(c: HTMLDivElement): void {
   const resetBtn = c.querySelector<HTMLButtonElement>('#cset-reset');
   resetBtn?.addEventListener('click', () => {
     if (!resetArmed) { resetArmed = true; resetBtn.textContent = '再点一次确认（清存档·重载）'; resetBtn.classList.add('cset-danger'); return; }
-    try { localStorage.removeItem('inkloop.settings.v1'); } catch { /* ignore */ }
+    resetSettings(); // 删产品键 + dev 键 + 旧扁平键（state 层收口，不再硬编码单键）
     location.reload();
   });
 }
@@ -854,9 +673,12 @@ function syncFromHash(): void {
 }
 
 export function initNavShell(): void {
+  // 注入会议 ↔ 导航壳桥：go=切页、activePage=读当前页；initMeeting 内部捕获 boot 主阅读实例。
+  initMeeting({ go, activePage: () => activePage });
   buildShell();
 
   try { if (localStorage.getItem('inkloop.rail.collapsed') === '1') document.body.classList.add('rail-collapsed'); } catch { /* ignore */ }
+  try { if (localStorage.getItem('inkloop.rail.dev') === '1') setDevExpanded(true); } catch { /* ignore */ }
 
   // 流水线/取证缩略图 → 点开放大（事件委托，重渲后仍生效）
   document.addEventListener('click', (e) => {
@@ -908,6 +730,7 @@ export function initNavShell(): void {
     selectedBook = state.documentId ?? selectedBook;
     if (activePage === 'chat') { void fillBookSelect(); void renderConversation(); }
     if (activePage === 'hmp') { void fillBookSelect('cap-book-sel').then(() => renderCaptureContent()); }
+    if (activePage === 'meeting') rerenderMeeting();
   });
 
   window.addEventListener('hashchange', syncFromHash);

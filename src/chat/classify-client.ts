@@ -8,6 +8,9 @@ import type { ChatMsg } from './buffer';
 import { settings } from '../app/state';
 import { postJson } from '../core/api';
 
+/** 上下文分类器选「端侧规则」的哨兵值（dev）：respond/fold 由 intent-rules.ts 驱动、不调云。 */
+export const LOCAL_RULES = '__local_rules__';
+
 export async function classifyContext(
   view: InferenceView,
   conversation: ChatMsg[],
@@ -18,7 +21,7 @@ export async function classifyContext(
       view_narrative: view.narrative,
       marked: view.marked,
       conversation: conversation.map((m) => ({ role: m.role, content: m.content })),
-      model: settings.inferModel,
+      model: (settings.classifyModel && settings.classifyModel !== LOCAL_RULES) ? settings.classifyModel : settings.inferModel,
     });
     return { respond: j?.respond !== false, reason: String(j?.reason || '') };
   } catch {

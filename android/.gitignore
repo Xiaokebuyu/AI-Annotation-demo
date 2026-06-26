@@ -1,0 +1,13 @@
+# Android 构建产物 / 本地配置
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+
+# 由 scripts/sync-android-assets.mjs 生成（dist + 端侧模型），不入库
+app/src/main/assets/
+
+# 第三方 AAR（如将来需要；ppocr-sdk 现为源码模块、不走 AAR）
+app/libs/

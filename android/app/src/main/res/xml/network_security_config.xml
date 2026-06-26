@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- release/默认：全程禁明文，只走 https 托管代理。
+     内网明文豁免(10.4.36.30)只在 debug 构建(src/debug/res/xml/network_security_config.xml)，不进 release。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

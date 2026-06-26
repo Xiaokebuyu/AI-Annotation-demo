@@ -1,0 +1,20 @@
+{
+  // Node 侧（server/ 代理 + vite.config + 构建脚本）的类型检查。
+  // app tsconfig.json 只 include src，server/vite/scripts 此前完全漏检（见审计 §6.1）。
+  // .mjs 用 allowJs 让 ts 文件能解析 import，但 checkJs:false 不深查 JS 内部，避免噪音。
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": ["server", "scripts", "vite.config.ts"]
+}

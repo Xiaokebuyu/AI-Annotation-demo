@@ -878,8 +878,55 @@ details.gloss dd b{color:var(--sienna-90);font-weight:500}
 
   <div class="col-w">
     <h3>10.2 提示词归拢服务端（server/prompts.ts）</h3>
-    <p>这是这轮最大的结构变化。Anthropic console 的 9 段结构被拆成两半：<em class="k">静态半边</em>（<code>task_context / tone / rules / examples / output_format</code>）作为 system 存在 <code>server/prompts.ts</code>、按 <code>PromptRole</code> 索引；<em class="k">动态半边</em>（<code>background / history / request</code>）在客户端发来的 messages 里；<code>think</code> 段交模型原生（chat 端点已开 thinking）。版本 <code>PROMPT_VERSION='v3'</code>——v2→v3 给 annotator 增加静态 <code>&lt;background&gt;</code>，说明本页已有批注/旧回应只是背景，模型只回应当前聚焦；<code>renderUserTurn</code> 也同步前置“本页已有批注”动态背景。三个角色（annotator / ink_classifier / context_classifier）的 <code>&lt;examples&gt;</code> 段<b>刻意留空待填</b>，之后增量补 few-shot。下面是旁注主角色 annotator 的 system 原文：</p>
+    <p>这是这轮最大的结构变化。Anthropic console 的 9 段结构被拆成两半：<em class="k">静态半边</em>（<code>task_context / tone / rules / examples / output_format</code>）作为 system 存在 <code>server/prompts.ts</code>、按 <code>PromptRole</code> 索引；<em class="k">动态半边</em>（<code>background / history / request</code>）在客户端发来的 messages 里；<code>think</code> 段交模型原生（chat 端点已开 thinking）。版本 <code>PROMPT_VERSION='v3'</code>——v2→v3 给 annotator 增加静态 <code>&lt;background&gt;</code>，说明本页已有批注/旧回应只是背景，模型只回应当前聚焦；<code>renderUserTurn</code> 也同步前置“本页已有批注”动态背景。三个角色（annotator / ink_classifier / context_classifier）的 <code>&lt;examples&gt;</code> 段<b>刻意留空待填</b>，之后增量补 few-shot。先用一张图看这一轮喂给模型的<b>整体上下文结构</b>（<code>system</code> 静态 ＋ <code>messages</code> 动态），再看旁注主角色 annotator 的 system 原文：</p>
   </div>
+  <figure class="card-fig wide">
+    <svg class="dgm" viewBox="0 0 1000 470" role="img" aria-label="一次主推理调用的上下文结构：system 静态按 role 取 + messages 动态（滑窗 buffer + 本轮 renderUserTurn 的背景/聚焦/可选图）一起发给模型">
+      <defs><marker id="arctx" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+      <text class="tb" x="374" y="32" text-anchor="middle" fill="var(--ink)">一次主推理调用的上下文 ＝ system（静态）＋ messages（动态）</text>
+
+      <!-- ① system 静态 -->
+      <rect x="24" y="52" width="700" height="84" rx="10" fill="var(--sheet)" stroke="var(--line-2)"/>
+      <text class="tb" x="44" y="84" fill="var(--sage-90)">① system</text>
+      <text class="ts" x="44" y="104" fill="var(--ink-faint)">静态 · 按 role 取</text>
+      <text class="ts" x="44" y="120" fill="var(--ink-faint)">server/prompts.ts</text>
+      <g font-family="var(--mono)">
+        <rect x="200" y="68" width="101" height="52" rx="6" fill="var(--sage-50)" stroke="var(--sage)"/><text class="tm" x="250" y="90" text-anchor="middle" fill="var(--sage-90)">task_context</text><text x="250" y="108" text-anchor="middle" font-size="9" fill="var(--ink-faint)">你是谁</text>
+        <rect x="305" y="68" width="101" height="52" rx="6" fill="var(--sage-50)" stroke="var(--sage)"/><text class="tm" x="355" y="90" text-anchor="middle" fill="var(--sage-90)">background</text><text x="355" y="108" text-anchor="middle" font-size="9" fill="var(--ink-faint)">伴读语境〔v3〕</text>
+        <rect x="410" y="68" width="101" height="52" rx="6" fill="var(--sage-50)" stroke="var(--sage)"/><text class="tm" x="460" y="90" text-anchor="middle" fill="var(--sage-90)">rules</text><text x="460" y="108" text-anchor="middle" font-size="9" fill="var(--ink-faint)">行为规则</text>
+        <rect x="515" y="68" width="101" height="52" rx="6" fill="var(--sage-50)" stroke="var(--sage)"/><text class="tm" x="565" y="90" text-anchor="middle" fill="var(--sage-90)">examples</text><text x="565" y="108" text-anchor="middle" font-size="9" fill="var(--ink-faint)">〔留空待填〕</text>
+        <rect x="620" y="68" width="101" height="52" rx="6" fill="var(--sage-50)" stroke="var(--sage)"/><text class="tm" x="670" y="90" text-anchor="middle" fill="var(--sage-90)">output_format</text><text x="670" y="108" text-anchor="middle" font-size="9" fill="var(--ink-faint)">≤2–3 句</text>
+      </g>
+
+      <!-- ② messages 动态 -->
+      <rect x="24" y="152" width="700" height="296" rx="10" fill="var(--paper-2)" stroke="var(--line-2)"/>
+      <text class="tb" x="44" y="178" fill="var(--gold-90)">② messages（动态 · 客户端每轮组 · renderUserTurn）</text>
+      <rect x="42" y="192" width="664" height="46" rx="8" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tb" x="58" y="214" fill="var(--slate-90)">对话滑窗 buffer · ≤6（最近 3 轮 user+assistant）</text>
+      <text class="ts" x="58" y="231" fill="var(--ink-soft)">从 ai_turns 账本重建 · 图与思考不进 buffer（防每轮重发滚雪球）</text>
+      <rect x="42" y="250" width="664" height="188" rx="8" fill="var(--sheet)" stroke="var(--line)"/>
+      <text class="tb" x="58" y="272" fill="var(--ink)">本轮 user turn ＝ renderUserTurn(InferenceView 蒸馏)</text>
+      <rect x="58" y="282" width="632" height="32" rx="6" fill="var(--sage-50)" stroke="var(--sage)"/>
+      <text class="ts" x="70" y="302" fill="var(--sage-90)">背景 · 本页已有批注 page_annotations（只为整页脉络、别逐条复述）</text>
+      <rect x="58" y="320" width="632" height="60" rx="6" fill="var(--gold-50)" stroke="var(--gold)"/>
+      <text class="ts" x="70" y="341" fill="var(--gold-90)">聚焦 · narrative 关系叙事 · marked 所标内容 ·〔question 手写问〕</text>
+      <text class="ts" x="70" y="361" fill="var(--gold-90)">referent_lines 指代行 · recall 回访〔旧标注+旧回复〕· thematic〔空〕· page_context~3000字</text>
+      <rect x="58" y="386" width="632" height="32" rx="6" fill="var(--sienna-50)" stroke="var(--sienna)"/>
+      <text class="ts" x="70" y="406" fill="var(--sienna-90)">〔可选〕图块 · crop 白底笔迹/合成图 → 多模态块（仅文字表达不了时）</text>
+
+      <!-- 合并 → 模型 -->
+      <path d="M724 94 H752" fill="none" stroke="var(--ink-faint)" stroke-width="1.4"/>
+      <path d="M724 300 H752" fill="none" stroke="var(--ink-faint)" stroke-width="1.4"/>
+      <path d="M752 94 V300" fill="none" stroke="var(--ink-faint)" stroke-width="1.4"/>
+      <path d="M752 297 H784" fill="none" stroke="var(--ink-faint)" stroke-width="1.4" marker-end="url(#arctx)"/>
+      <rect x="788" y="238" width="188" height="120" rx="10" fill="var(--sheet)" stroke="var(--sienna)"/>
+      <text class="tb" x="882" y="272" text-anchor="middle" fill="var(--sienna-90)">annotator 模型</text>
+      <text class="ts" x="882" y="293" text-anchor="middle" fill="var(--ink-soft)">＝ inferModel · 经网关</text>
+      <text class="ts" x="882" y="322" text-anchor="middle" fill="var(--ink-faint)">think 段：模型原生</text>
+      <text class="ts" x="882" y="339" text-anchor="middle" fill="var(--ink-faint)">（gemini 不回思考）</text>
+    </svg>
+    <figcaption>一次主推理调用的上下文：<b>system</b> 是按 role 取的静态提示词（不随轮变）；<b>messages</b> 是客户端每轮现组的动态半边——对话滑窗 buffer ＋ 本轮 <code>renderUserTurn</code>（背景 / 聚焦 / 可选图三层）。两半一起发给模型，<code>think</code> 段交模型原生。</figcaption>
+  </figure>
   <figure class="card-fig">
     <pre style="margin:0;font-family:var(--mono);font-size:12px;line-height:1.62;white-space:pre-wrap;color:var(--ink-soft)">&lt;task_context&gt;
 你是 InkLoop —— 嵌在阅读器里的旁注式 AI 同读者。读者在原文上用符号

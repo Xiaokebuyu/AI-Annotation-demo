@@ -15,7 +15,7 @@ import type { HMP, InferenceView, MarkFeatureType, NormBBox, OverlayState, Pipel
 import type { ReflowBlock } from '../surface/reflow';
 
 export const STORE_VERSION = '2'; // 1→2：strokes/overlays 出 docs 进 marks/ai_turns 账本（干净断裂，旧 docs 弃）
-export const DB_VERSION = 3;      // IDB 结构版本：v2(+pdf_blobs)→v3(+marks,+ai_turns)
+export const DB_VERSION = 6;      // v5→v6：marks 加 context_id + by_context 索引（C2 时间脊：按 surface 会话取笔）。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
 
 /** 一张图的解读：图本身可从 PDF 重渲，故只存 bbox + 文字解读。 */
 export interface PersistedImage {
@@ -83,8 +83,11 @@ export interface PersistedMark extends BaseEntry {
   pointer_type: string;             // pen / touch / mouse / unknown
   device_id: string;
   abs_timestamp: number;            // 组装时 Date.now()（reload 折回 perf 时间线算关系）
-  feature_type: MarkFeatureType;    // markup / handwriting / drawing
+  context_id?: string;              // C2 时间脊：落笔时活跃 surface 实例 id（'__reader__' / 'mtg_<id>' / 日记…）；按会话取笔用，老条目缺=undefined
+  feature_type: MarkFeatureType;    // markup / handwriting / drawing（路由/显示粗类型）
   feature_confidence: number;
+  kind?: string;                   // 识别裁定原始 kind：handwriting/sketch/mixed/none（比 feature_type 更细，保住 mixed=图+字）
+  kind_source?: string;            // 谁判的：local_board（端侧 HWR）/ cloud（VLM）
   scored_type: string;             // 中性几何形状（EventType / MarkShape）
   scored_score: number;
   hmp: HMP | null;                 // 取证（落库前剥掉 crop_ref/vector_ref，存料不存图）
@@ -113,4 +116,35 @@ export interface PersistedAiTurn extends BaseEntry {
   trigger: 'idle' | 'handwriting' | 'discussion';
   model: string;
   supersedes: string | null;       // 被本条取代的上一条 entry_id（同 overlay_id 链）
+}
+
+/* ── 会议工作区（v4）────────────────────────────────────────────────────────
+ * 顶层实体 = 群聊/工作区（≈一个飞书群）：装该群的会议记录。会议 = 群里的时间事件，
+ * 引用已导入资料（document_id），会后留手写档案（marks 账本）+ 思路总结（AI 综合）。 */
+
+/** 会议工作区（≈一个群聊）。source=manual 现阶段手建；接飞书后 source=feishu + feishu_chat_id。 */
+export interface PersistedWorkspace {
+  workspace_id: string;             // 'ws_'+shortId
+  name: string;
+  source: 'manual' | 'feishu';
+  feishu_chat_id?: string;          // 接飞书后填
+  created_at: string;
+  updated_at: string;
+}
+
+export type MeetingStatus = 'upcoming' | 'live' | 'ended'; // 待开始 / 进行中 / 已结束
+
+/** 一场会议：属某 workspace，引用资料（已导入书的 document_id），会后留手写档案 + 思路总结。 */
+export interface PersistedMeeting {
+  meeting_id: string;               // 'mtg_'+shortId
+  workspace_id: string;
+  title: string;
+  scheduled_at: string;             // ISO 计划时间（日程聚合 + 状态派生用）
+  status: MeetingStatus;
+  started_at?: string;              // ISO 真实「开始会议」墙钟（时间脊原点：会中每笔的相对时刻 = abs_timestamp − started_at；会后与飞书录音对轴的 t0）
+  ended_at?: string;                // ISO 真实「结束会议」墙钟
+  material_doc_ids: string[];       // 可能有用的文件（指向 docs/pdf_blobs 的 document_id）
+  summary?: string;                 // 会后「思路总结」（AI 综合，先空）
+  created_at: string;
+  updated_at: string;
 }

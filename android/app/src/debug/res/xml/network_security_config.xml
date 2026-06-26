@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 仅 debug 构建：内网代理(10.4.36.30:3000，npm run serve)走 http 明文，方便内网/板子联调。
+     此豁免覆盖 src/main 的严格版；release 构建拿不到本文件 → 自动只走 https。IP 变了改这里。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">10.4.36.30</domain>
+    </domain-config>
+</network-security-config>

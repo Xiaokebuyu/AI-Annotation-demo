@@ -5,18 +5,33 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "check": "tsc --noEmit",
+    "build": "npm run check && vite build",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "clean": "node scripts/clean.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "lint:ci": "biome check --error-on-warnings .",
+    "format": "biome format --write .",
+    "audit": "npm audit --audit-level=high",
+    "verify": "npm run check && npm run lint:ci && npm run test && vite build",
     "preview": "vite preview",
+    "serve": "tsx server/standalone.ts",
     "postinstall": "node scripts/copy-pdfjs-assets.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.141",
-    "@anthropic-ai/sdk": "^0.104.1",
-    "pdfjs-dist": "^4.6.82"
+    "pdfjs-dist": "^4.6.82",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.22.4",
     "typescript": "^5.5.4",
-    "vite": "^5.4.8"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6"
+  },
+  "overrides": {
+    "esbuild": ">=0.25.0"
   }
 }

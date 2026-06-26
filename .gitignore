@@ -2,12 +2,16 @@ node_modules/
 dist/
 .DS_Store
 *.log
+.idea/
 .env
 .env.bedrock
 .env.kimi
 
 # dev-only 调试通道遥测（server/debug.mjs 落盘，仅本地定位问题用）
 .dev-telemetry.jsonl
+
+# intent A/B 影子数据（standalone 代理落盘）
+.ab-intent.jsonl
 
 # pdfjs CMap/字体资产：postinstall 自动从 node_modules 拷入，不入库（见 scripts/copy-pdfjs-assets.mjs）
 public/cmaps/

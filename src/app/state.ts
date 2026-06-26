@@ -1,4 +1,6 @@
-import type { HMP, NormBBox, OcrTextBlock, PDFPageRecord, ScreenOverlay, StrokePoint, SurfaceIndex } from '../core/contracts';
+import type { HMP, NormBBox, OcrTextBlock, PDFPageRecord, ScreenOverlay, StrokePoint, SurfaceIndex, SurfaceType } from '../core/contracts';
+import { SurfaceContext } from './surface-context';
+import { setActiveDoc } from '../local/store';
 
 type Handler = (...args: unknown[]) => void;
 
@@ -55,6 +57,10 @@ export interface Settings {
   // 推理模型：按前缀路由渠道——kimi*→moonshot；claude/gpt/gemini*→DMX。默认 sonnet-4-6。
   // （无状态端点：识别/答问/重排走各 /api/* 端点；跨标注连贯交 chat/ 每本书 buffer。）
   inferModel: string;
+  // 识别分类器(/api/interpret)、上下文分类器(/api/classify-context)可各自单独选模型(A/B 评估用)；
+  // 空字符串 = 继承 inferModel。
+  interpretModel: string;
+  classifyModel: string;
   // 是否把合成图(墨迹叠原文)送给理解模型。**合成图非徐智强方案**——他的路线靠 HMP 取证事实
   //（命中原文 + text_hint）让 AI 理解，不靠截图。默认 false=纯徐路线验证；dev 控制台可临时 true 做 A/B。
   sendMarkImage: boolean;
@@ -76,22 +82,89 @@ export const settings: Settings = {
   gesture: { enabled: true, idleSeconds: 90 },
   inferModel: 'claude-sonnet-4-6', // 默认推理+识别模型：sonnet-4.6（DMX，中文手写实测准）。recognizeInk/chat 都随它。
   //   注：旧用户 localStorage 里存了别的会覆盖此默认——要用 sonnet 需在 dev 面板「推理模型」选一次或清 inkloop.settings.v1。
+  interpretModel: '', // 识别分类器(/api/interpret)模型；空=继承 inferModel。
+  classifyModel: '',  // 上下文分类器(/api/classify-context)模型；空=继承 inferModel。
   sendMarkImage: false, // 默认不送合成图：纯验证徐智强的取证路线（AI 只吃 HMP 事实+整页上下文）。
   devOverlay: false,    // dev bbox 叠层默认关。
   showRegion: true,     // dev 组装区域实时可视：默认开（手写时看受影响区域）。
   showRelations: true,  // dev 关联框：默认开（提交后看哪些标注被判为内容关联的一组）。
 };
 
-/** 持久化 dev 旋钮：刷新不丢（免每次手动重设）。模块加载即回填，故所有消费方从一开始就拿到持久值。 */
-const PREFS_KEY = 'inkloop.settings.v1';
-try {
-  const saved = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null');
-  if (saved && typeof saved === 'object') Object.assign(settings, saved); // 缺字段保留默认；多余字段无害
-} catch { /* localStorage 不可用/损坏：用默认值 */ }
+/**
+ * 设置持久化（C4）：拆「产品设置」与「dev/AB 旋钮」两键，各带 schema 版本 + 类型守卫。
+ *  · 产品键 inkloop.prefs.v1    —— 用户偏好（落点/阅读面/手势/重排引擎）。
+ *  · dev 键 inkloop.devflags.v1 —— 模型/AB/调试旋钮。**这半即将来 remote manifest 可覆盖的接缝**
+ *    （远程只动 dev 子集，不踩用户偏好；D1 复用 applyKnownSettings + DEV_FIELDS）。
+ * 旧扁平键 inkloop.settings.v1 首次升级时一次性导入，不丢已存设置。settings 在内存仍是统一对象，消费方零改。
+ */
+const SETTINGS_SCHEMA = 1;
+const PRODUCT_KEY = 'inkloop.prefs.v1';
+const DEV_KEY = 'inkloop.devflags.v1';
+const LEGACY_KEY = 'inkloop.settings.v1';
+const PRODUCT_FIELDS = ['placement', 'viewMode', 'reflowProvider', 'gesture'] as const;
+export const DEV_FIELDS = ['reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations'] as const;
+
+type SettingsRec = Record<string, unknown>;
+
+/** 把 src 的「已知字段」按类型守卫合并进 settings：typeof 不一致丢弃（防旧字符串污染新对象字段）。 */
+export function applyKnownSettings(src: SettingsRec, fields: readonly string[]): void {
+  const t = settings as unknown as SettingsRec;
+  for (const k of fields) {
+    if (!(k in src)) continue;
+    const cur = t[k], next = src[k];
+    if (typeof cur !== typeof next) continue;
+    if (typeof cur === 'object' && cur && next) Object.assign(cur as object, next as object); // 嵌套(gesture/preprocess)浅合并
+    else if (typeof cur !== 'object') t[k] = next;
+  }
+}
+
+/** 读带信封 {v,data} 的设置键；版本不符/损坏 → null。 */
+function loadSettingsBlob(key: string): SettingsRec | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || 'null');
+    if (raw && typeof raw === 'object' && raw.v === SETTINGS_SCHEMA && raw.data && typeof raw.data === 'object') return raw.data as SettingsRec;
+  } catch { /* 损坏：忽略 */ }
+  return null;
+}
+
+function pickSettings(fields: readonly string[]): SettingsRec {
+  const t = settings as unknown as SettingsRec, out: SettingsRec = {};
+  for (const k of fields) out[k] = t[k];
+  return out;
+}
 
 export function saveSettings(): void {
-  try { localStorage.setItem(PREFS_KEY, JSON.stringify(settings)); } catch { /* 忽略 */ }
+  try {
+    localStorage.setItem(PRODUCT_KEY, JSON.stringify({ v: SETTINGS_SCHEMA, data: pickSettings(PRODUCT_FIELDS) }));
+    localStorage.setItem(DEV_KEY, JSON.stringify({ v: SETTINGS_SCHEMA, data: pickSettings(DEV_FIELDS) }));
+  } catch { /* 忽略 */ }
 }
+
+/** 清掉所有持久化设置键（产品键 + dev 键 + 旧扁平键）——供 UI「恢复默认」复用，UI 不再硬编码 key。
+ *  LEGACY_KEY 必须一并删：否则 reload 后回填 IIFE 的「!prod && !dev」分支会从旧扁平键重新导入，等于没重置。 */
+export function resetSettings(): void {
+  for (const key of [PRODUCT_KEY, DEV_KEY, LEGACY_KEY]) {
+    try { localStorage.removeItem(key); } catch { /* 忽略 */ }
+  }
+}
+
+// 模块加载即回填：消费方从一开始就拿到持久值。
+(() => {
+  const prod = loadSettingsBlob(PRODUCT_KEY);
+  const dev = loadSettingsBlob(DEV_KEY);
+  if (prod) applyKnownSettings(prod, PRODUCT_FIELDS);
+  if (dev) applyKnownSettings(dev, DEV_FIELDS);
+  if (!prod && !dev) { // 首次升级：从旧扁平 inkloop.settings.v1 导入并落到新双键
+    try {
+      const legacy = JSON.parse(localStorage.getItem(LEGACY_KEY) || 'null');
+      if (legacy && typeof legacy === 'object') {
+        applyKnownSettings(legacy as SettingsRec, PRODUCT_FIELDS);
+        applyKnownSettings(legacy as SettingsRec, DEV_FIELDS);
+        saveSettings();
+      }
+    } catch { /* 忽略 */ }
+  }
+})();
 
 export interface Stroke {
   tool: Tool;
@@ -117,12 +190,44 @@ export const state = {
   // 徐智强「序列语义方案」：显式 SurfaceIndex（step①）+ HMP 取证记录（step④）
   surfaceIndex: null as SurfaceIndex | null, // 当前 surface 的轻量对象表（PDF 路径由 textBlocks/imageRegions 构建）
   lastHmps: [] as HMP[],                       // 最近 ~10 条 HMP 取证记录（dev-drawer 可读）
-  surfaceType: 'pdf' as 'pdf' | 'chat',        // 当前 surface 类型（决定 PDF 渲染 vs 合成聊天）
+  surfaceType: 'article' as SurfaceType, // 当前 surface 类型（article=PDF/有文层 / chat 合成聊天 / whiteboard 空白手写页）
 
   strokesByPage: new Map<string, Stroke[]>(),
   overlays: [] as ScreenOverlay[],
   inferProvider: 'cloud',
 };
+
+/**
+ * 方案 B 解耦 Stage 1：`state` 的 17 个「随文档/surface 走」字段委托到「当前激活的 SurfaceContext」。
+ * tool/inferProvider 仍是 state 自有属性（属用户的手、非文档）。消费方零改：仍 `state.documentId` 即可。
+ * 进/退会议 = setActiveContext 切换激活实例；上面字面量给的初值只为类型推导，运行时被 activeCtx 的同名初值替代（等价）。
+ */
+let activeCtx = new SurfaceContext('__reader__', 'reader');
+
+const DOC_FIELDS = [
+  'fileName', 'fileHash', 'documentId', 'pageCount', 'pageIndex', 'zoom', 'pageId', 'pageRecord',
+  'docMeta', 'outline', 'textBlocks', 'imageRegions', 'surfaceIndex', 'lastHmps', 'surfaceType',
+  'strokesByPage', 'overlays',
+] as const;
+
+for (const k of DOC_FIELDS) {
+  Object.defineProperty(state, k, {
+    get() { return (activeCtx as unknown as Record<string, unknown>)[k]; },
+    set(v: unknown) { (activeCtx as unknown as Record<string, unknown>)[k] = v; },
+    enumerable: true,
+    configurable: true,
+  });
+}
+
+/** 当前激活的 surface 实例（阅读 / 某个会议）。renderer/console 需直接拿 pdf 等非委托字段时用。 */
+export function getActiveContext(): SurfaceContext { return activeCtx; }
+
+/** 切换激活实例（进/退会议）。发 'context:switched' 让 main.ts 决定如何重绘（PDF→renderPage / 白板→renderBlankSurface）。 */
+export function setActiveContext(ctx: SurfaceContext): void {
+  activeCtx = ctx;
+  setActiveDoc(ctx.storeDoc); // store.current 跟随激活实例的文档：切回阅读 A 时 current 回到 A，不再误写会议材料 B（P0-4）
+  bus.emit('context:switched', ctx);
+}
 
 export function currentStrokes(): Stroke[] {
   if (!state.pageId) return [];
