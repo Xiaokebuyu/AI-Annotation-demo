@@ -19,6 +19,8 @@ const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getE
 let devBook: string | null = null;
 let captureSeg: 'hmp' | 'obj' = 'hmp';
 let preprocessText = '未运行';
+let openChat: string | null = null; // 抽屉式单开：当前展开的 turn entry_id（e-ink 零滑动·只渲展开项）
+let openHmp: string | null = null;  // 同上·当前展开的 HMP 卡 key
 
 const TRIGGER_CN: Record<string, string> = { idle: '长停顿综合', handwriting: '手写定向', discussion: '段落讨论' };
 const HMP_MODE: Record<string, [string, boolean]> = { anchored: ['锚定原文', true], self_content: ['自身内容', false], mixed: ['混合', false], unknown: ['未命中', false] };
@@ -55,6 +57,16 @@ async function buildHmpRows(book: string): Promise<HmpRow[]> {
   return rows.sort((a, b) => b.seq - a.seq);
 }
 const fmtTime = (iso: string): string => { try { return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }); } catch { return ''; } };
+const compactText = (s?: string | null): string => (s ?? '').replace(/\s+/g, ' ').trim();
+const clipText = (s?: string | null, max = 20): string => { const t = compactText(s); return t ? (t.length > max ? t.slice(0, max) : t) : '—'; };
+/** 抽屉表头一行摘要：手写问 / 所标内容 / 首个 mark 文本，截断。 */
+function turnSummary(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): string {
+  const firstMark = (t.anchor?.mark_ids ?? []).map((id) => compactText(markMap.get(id)?.marked_text)).find((x) => !!x);
+  return clipText(compactText(t.inference_view?.question) || compactText(t.inference_view?.marked) || firstMark, 20);
+}
+function hmpSummary(row: HmpRow): string {
+  return clipText(compactText(row.marked) || compactText(row.hmp.text_hint) || compactText(row.hmp.object_hint), 36);
+}
 
 /** 书目选择器（chat / capture 共用）。 */
 function bookSel(id: string, books: Array<{ document_id: string; filename: string }>): string {
@@ -76,25 +88,34 @@ export async function renderChat(): Promise<void> {
     const [turns, marks] = await Promise.all([getBookAiTurns(devBook), getFoldedMarks(devBook)]);
     const markMap = new Map(marks.map((m) => [m.mark_id, m]));
     const live = turns.filter((t) => t.overlay_state !== 'dismissed');
+    if (openChat && !live.some((t) => t.entry_id === openChat)) openChat = null; // 展开项已不在 → 复位
     if (!live.length) body = `<p class="dnote">这本书还没有 AI 会话。圈划 + 手写问题，长停顿/手写定向会触发回复。</p>`;
     else {
       const byPage = new Map<number, PersistedAiTurn[]>();
       for (const t of live) { const p = t.page_index ?? 0; if (!byPage.has(p)) byPage.set(p, []); byPage.get(p)!.push(t); }
       const pages = [...byPage.entries()].sort((a, b) => Math.max(...b[1].map((t) => t.seq)) - Math.max(...a[1].map((t) => t.seq)));
       body = pages.map(([pi, ts], gi) => {
-        const rows = ts.slice().sort((a, b) => b.seq - a.seq).map((t) => turnBlock(t, markMap)).join('');
-        return `<details class="grp"${gi === 0 ? ' open' : ''}><summary><span class="gc">第 ${pi + 1} 页</span><span class="gm">${ts.length} 轮 · ${fmtTime(ts[ts.length - 1].created_at)}</span></summary><div class="gbody">${rows}</div></details>`;
+        const sorted = ts.slice().sort((a, b) => b.seq - a.seq);
+        const rows = sorted.map((t) => turnBlock(t, markMap)).join('');
+        const hasOpen = sorted.some((t) => t.entry_id === openChat); // 展开项所在页默认展开
+        return `<details class="grp"${gi === 0 || hasOpen ? ' open' : ''}><summary><span class="gc">第 ${pi + 1} 页</span><span class="gm">${ts.length} 轮 · ${fmtTime(sorted[0].created_at)}</span></summary><div class="gbody">${rows}</div></details>`;
       }).join('');
     }
   }
   el('dv-chat').innerHTML =
     `<div class="dhead"><h1>AI 会话</h1><span class="sp"></span>${bookSel('dv-bk-chat', books)}</div><div class="dbody">${body}</div>`;
-  bindBookSel('dv-bk-chat', () => void renderChat());
+  bindBookSel('dv-bk-chat', () => { openChat = null; void renderChat(); });
 }
 function turnBlock(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): string {
+  const open = openChat === t.entry_id; // 抽屉单开：只渲展开项的 body
   const trg = TRIGGER_CN[t.trigger] || t.trigger;
   const trgCls = t.trigger === 'handwriting' ? 'trg hw' : 'trg';
-  const userInner = (t.pipeline && t.pipeline.length) ? pipelineSection(t.pipeline) : legacySection(t, markMap); // 有 pipeline 快照→逐组件复盘；否则旧轮兜底（与桌面对齐）
+  const head = `<button type="button" class="drawer-head turn-head" data-chat="${esc(t.entry_id)}" aria-expanded="${open ? 'true' : 'false'}">`
+    + `<span class="di">${open ? '▾' : '▸'}</span><span class="tpage">第 ${t.page_index + 1} 页</span><span class="sep">·</span>`
+    + `<span class="${trgCls}">${esc(trg)}</span><span class="sep">·</span><span class="tt">${fmtTime(t.created_at)}</span><span class="sep">·</span>`
+    + `<span class="turn-sum">${esc(turnSummary(t, markMap))}</span></button>`;
+  if (!open) return `<div class="turn drawer-turn" data-chat="${esc(t.entry_id)}">${head}</div>`;
+  const userInner = (t.pipeline && t.pipeline.length) ? pipelineSection(t.pipeline, true) : legacySection(t, markMap); // 有 pipeline 快照→逐组件复盘（电纸屏 collapsed=全收起·点触逐展）；否则旧轮兜底
   const folded = !t.ai_reply && t.diag?.classify && t.diag.classify.respond === false;
   const reason = t.diag?.classify?.reason;
   const result = folded
@@ -103,8 +124,8 @@ function turnBlock(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): str
     : `<div class="abub">${esc(t.ai_reply || '（无回复）')}`
       + (t.thinking ? `<details class="think"><summary>思考过程</summary><div>${esc(t.thinking)}</div></details>` : '')
       + `<div class="ameta">${esc(t.model || '')}${t.supersedes ? ' · 改写' : ''}</div></div>`;
-  return `<div class="turn"><div class="tlab">发送给 AI 的内容 · 第 ${t.page_index + 1} 页 <span class="${trgCls}">${trg}</span><span class="tt">${fmtTime(t.created_at)}</span></div>`
-    + `<div class="ucard">${userInner}</div>` + result + `</div>`; // 用户卡=pipeline 复盘/旧轮兜底（HTML·不 esc）；result 只拼一次（旧版 folded 重复渲染）
+  return `<div class="turn drawer-turn open" data-chat="${esc(t.entry_id)}">${head}<div class="drawer-body turn-body">`
+    + `<div class="ucard">${userInner}</div>` + result + `</div></div>`; // 用户卡=pipeline 复盘/旧轮兜底（HTML·不 esc）
 }
 
 // ════ 采集取证 ════
@@ -117,6 +138,7 @@ export async function renderCapture(): Promise<void> {
   else {
     const rows = await buildHmpRows(devBook);
     if (captureSeg === 'hmp') {
+      if (openHmp && !rows.some((r) => r.key === openHmp)) openHmp = null; // 展开项已不在 → 复位
       const si = state.surfaceIndex;
       const objMap = si ? new Map(si.objects.map((o) => [o.id, o])) : null;
       inner = `<p class="dnote">逐笔 HMP 取证 —— 最新在上。共 ${rows.length} 笔。历史标注落库剥了 crop/vector，唯本会话 state.lastHmps 还有取证图。</p>`
@@ -126,7 +148,7 @@ export async function renderCapture(): Promise<void> {
   el('dv-hmp').innerHTML =
     `<div class="dhead"><h1>采集取证</h1>${seg}<span class="sp"></span>${bookSel('dv-bk-hmp', books)}</div><div class="dbody">${inner}</div>`;
   el('dv-hmp').querySelectorAll<HTMLElement>('.seg [data-seg]').forEach((b) => b.addEventListener('click', () => { captureSeg = b.dataset.seg as 'hmp' | 'obj'; void renderCapture(); }));
-  bindBookSel('dv-bk-hmp', () => void renderCapture());
+  bindBookSel('dv-bk-hmp', () => { openHmp = null; void renderCapture(); });
   applyPendingFlash();
 }
 /** 取证图：本会话 live 的 crop/vector dataURL（持久落库已剥·历史无图如实标注）。 */
@@ -150,13 +172,17 @@ function hmpTargetRow(row: HmpRow, objMap: Map<string, SurfaceObject> | null): s
 }
 function hmpCard(row: HmpRow, objMap: Map<string, SurfaceObject> | null): string {
   const h = row.hmp;
+  const open = openHmp === row.key; // 抽屉单开
   const [modeLabel, anchor] = HMP_MODE[h.mode] || ['未知', false];
   const region = `[${h.target_region.map((n) => n.toFixed(2)).join(', ')}]`;
-  return `<div class="hcard" data-mark="${esc(row.key)}"><div class="hch"><span class="mode${anchor ? ' anchor' : ''}">${esc(modeLabel)}</span>`
-    + `<span class="act">${esc(HMP_ACTION[h.action] || h.action)}</span><span class="feat">${esc(HMP_FEAT[row.feature] || row.feature)}</span>`
-    + `${row.unsaved ? '<span class="live">未落库</span>' : row.live ? '<span class="live">本会话</span>' : ''}`
-    + `<span class="hm">${esc(h.object_hint)} · ${h.confidence.toFixed(2)} · ${esc(h.version)} · 第${row.page_index + 1}页</span></div>`
-    + `<div class="hcb">${hmpShots(row)}<div class="hf">`
+  const head = `<button type="button" class="drawer-head hmp-head" data-hmp="${esc(row.key)}" aria-expanded="${open ? 'true' : 'false'}">`
+    + `<span class="di">${open ? '▾' : '▸'}</span><span class="mode${anchor ? ' anchor' : ''}">${esc(modeLabel)}</span><span class="sep">·</span>`
+    + `<span class="act">${esc(HMP_ACTION[h.action] || h.action)}</span><span class="sep">·</span><span class="hmp-text">${esc(hmpSummary(row))}</span></button>`;
+  if (!open) return `<div class="hcard" data-mark="${esc(row.key)}">${head}</div>`;
+  return `<div class="hcard open" data-mark="${esc(row.key)}">${head}`
+    + `<div class="drawer-body hcb">${hmpShots(row)}<div class="hf">`
+    + `<div><b>取证</b>${esc(h.object_hint || '—')} · ${h.confidence.toFixed(2)} · ${esc(h.version)} · 第${row.page_index + 1}页${row.unsaved ? ' · 未落库' : row.live ? ' · 本会话' : ''}</div>`
+    + `<div><b>类型</b>${esc(HMP_FEAT[row.feature] || row.feature)}</div>`
     + `<div><b>所标内容</b>${esc(row.marked || '—')}</div>`
     + `<div><b>命中对象</b>${hmpTargetRow(row, objMap)}</div>`
     + `<div><b>读出</b>${esc(h.text_hint || '—')}</div>`
@@ -285,12 +311,18 @@ function fillDiag(): void {
   if (box) box.innerHTML = diagHtml();
 }
 
-// ── 取证页 HMP↔对象互跳：切段后滚动到目标 + 闪一下 ──
+// ── 取证页 HMP↔对象互跳：切段后定位到目标 + 闪一下（e-ink 瞬时·不平滑滚） ──
 const attrSel = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+function inDevViewport(n: HTMLElement): boolean {
+  const port = el('dv-hmp').querySelector<HTMLElement>('.dbody');
+  const r = n.getBoundingClientRect();
+  const v = port?.getBoundingClientRect() ?? { top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight };
+  return r.top >= v.top && r.bottom <= v.bottom && r.left >= v.left && r.right <= v.right;
+}
 function flashTarget(selector: string): void {
   const n = el('dv-hmp').querySelector<HTMLElement>(selector);
   if (!n) return;
-  n.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (!inDevViewport(n)) n.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior }); // 已在视野就不滚·要滚也瞬时
   n.classList.remove('cap-flash'); void n.offsetWidth; n.classList.add('cap-flash');
   window.setTimeout(() => n.classList.remove('cap-flash'), 1400);
 }
@@ -322,10 +354,14 @@ export function initMobileDev(): void {
   document.getElementById('surf-dev')?.addEventListener('click', (e) => {
     const target = e.target as HTMLElement;
     if (target.id === 'dv-trace-dl') { downloadTrace(); return; }
+    const chatHead = target.closest('.turn-head') as HTMLElement | null; // 抽屉表头：单开切换
+    if (chatHead?.dataset.chat) { openChat = openChat === chatHead.dataset.chat ? null : chatHead.dataset.chat; void renderChat(); return; }
+    const hmpHead = target.closest('.hmp-head') as HTMLElement | null;
+    if (hmpHead?.dataset.hmp) { openHmp = openHmp === hmpHead.dataset.hmp ? null : hmpHead.dataset.hmp; void renderCapture(); return; }
     const ref = target.closest('.cap-link') as HTMLElement | null;
     if (ref?.dataset.ref) { captureSeg = 'obj'; pendingFlash = { seg: 'obj', selector: `tr[data-objid="${attrSel(ref.dataset.ref)}"]` }; void renderCapture(); return; }
     const mark = target.closest('.cap-markchip') as HTMLElement | null;
-    if (mark?.dataset.mark) { captureSeg = 'hmp'; pendingFlash = { seg: 'hmp', selector: `.hcard[data-mark="${attrSel(mark.dataset.mark)}"]` }; void renderCapture(); }
+    if (mark?.dataset.mark) { captureSeg = 'hmp'; openHmp = mark.dataset.mark; pendingFlash = { seg: 'hmp', selector: `.hcard[data-mark="${attrSel(mark.dataset.mark)}"]` }; void renderCapture(); } // 互跳同时展开该卡
   });
   // 账本/索引变化 → 刷新当前 dev 页（仅 dev 面激活时）
   const live = (): void => { if (document.body.dataset.mode === 'dev') renderActive(); };

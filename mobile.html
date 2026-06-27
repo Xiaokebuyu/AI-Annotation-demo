@@ -315,9 +315,18 @@
   .grp .gc{font-weight:600;}
   .grp .gm{font:11px var(--mono);color:var(--mut);}
   .grp .gp{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
-  .gbody{padding:2px 13px 10px;border-top:1px solid var(--hair);}
-  .turn{padding:12px 0;border-bottom:1px solid var(--hair);}
+  .gbody{padding:0;border-top:1px solid var(--hair);}
+  .turn{padding:0;border-bottom:1px solid var(--hair);}
   .turn:last-child{border-bottom:none;}
+  /* 抽屉式表头（e-ink 零滑动·点触单开·▸/▾） */
+  .drawer-head{width:100%;min-height:44px;box-sizing:border-box;border:0;background:var(--page);color:var(--ink);display:flex;align-items:center;gap:6px;padding:10px 11px;font:12.5px var(--sans);text-align:left;cursor:pointer;white-space:nowrap;}
+  .drawer-head .di{font:12px var(--mono);color:var(--mut);width:12px;flex:0 0 12px;}
+  .drawer-head .sep{font:11px var(--mono);color:var(--mut2);flex:0 0 auto;}
+  .drawer-body{border-top:1px solid var(--hair);}
+  .turn-body{padding:10px 11px 12px;}
+  .turn-head .tpage{font-weight:600;flex:0 0 auto;}
+  .turn-head .tt{font:11px var(--mono);color:var(--mut);margin-left:0;flex:0 0 auto;}
+  .turn-head .turn-sum{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);}
   .tlab{font:10.5px var(--mono);color:var(--mut);display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:7px;}
   .tlab .tt{margin-left:auto;}
   .trg{font:10px var(--sans);color:var(--ink);border:1px solid var(--hair2);border-radius:5px;padding:0 6px;}
@@ -361,7 +370,7 @@
   .cns-ctx summary::-webkit-details-marker{display:none;}
   .cns-ctx summary::before{content:"▸";color:var(--mut2);}
   .cns-ctx[open] summary::before{content:"▾";}
-  .cns-ctx-body{border-top:1px dashed var(--hair);padding:7px 9px;font:11.5px/1.55 var(--mono);white-space:pre-wrap;max-height:220px;overflow:auto;}
+  .cns-ctx-body{border-top:1px dashed var(--hair);padding:7px 9px;font:11.5px/1.55 var(--mono);white-space:pre-wrap;word-break:break-word;overflow:visible;}
   .cns-pl{margin-top:4px;position:relative;padding-left:13px;}
   .cns-pl::before{content:"";position:absolute;left:4px;top:6px;bottom:6px;width:1px;background:var(--hair2);}
   .cns-pl-stage{position:relative;border:1px solid var(--hair);border-radius:8px;margin:7px 0;background:var(--page);}
@@ -380,17 +389,19 @@
   .cns-pl-kv{font:11.5px/1.55 var(--mono);word-break:break-word;}
   .cns-pl-kv .k{color:var(--mut);}
   .cns-pl-kv .v{white-space:pre-wrap;}
-  .cns-pl-kv .v.long{display:block;margin-top:3px;max-height:180px;overflow:auto;background:#f8f8f8;border-radius:6px;padding:6px 7px;}
+  .cns-pl-kv .v.long{display:block;margin-top:3px;overflow:visible;background:#f8f8f8;border-radius:6px;padding:6px 7px;}
   .cns-pl-imgs{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
   .cns-pl-img{display:flex;flex-direction:column;gap:3px;align-items:center;}
   .cns-pl-img img{max-height:86px;max-width:124px;border:1px solid var(--hair);border-radius:6px;background:#fff;}
   .cns-pl-img span{font:10px var(--mono);color:var(--mut);max-width:124px;text-align:center;}
   /* HMP 卡 */
-  .hcard{border:1px solid var(--hair);border-radius:10px;margin-bottom:12px;overflow:hidden;}
+  .hcard{border:1px solid var(--hair);border-radius:8px;margin-bottom:8px;overflow:hidden;background:var(--page);}
+  .hcard.open{margin-bottom:12px;}
   .hch{display:flex;align-items:center;gap:7px;padding:9px 11px;border-bottom:1px solid var(--hair);flex-wrap:wrap;}
-  .hch .mode{font:10.5px var(--sans);border:1px solid var(--hair2);border-radius:5px;padding:1px 7px;color:var(--mut);}
-  .hch .mode.anchor{border-color:#111;color:#111;font-weight:600;}
-  .hch .act{font:12.5px var(--sans);color:var(--ink);}
+  .hch .mode,.hmp-head .mode{font:10.5px var(--sans);border:1px solid var(--hair2);border-radius:5px;padding:1px 7px;color:var(--mut);flex:0 0 auto;}
+  .hch .mode.anchor,.hmp-head .mode.anchor{border-color:#111;color:#111;font-weight:600;}
+  .hch .act,.hmp-head .act{font:12.5px var(--sans);color:var(--ink);flex:0 0 auto;}
+  .hmp-head .hmp-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);}
   .hch .feat{font:10.5px var(--mono);color:var(--mut);}
   .hch .hm{margin-left:auto;font:10px var(--mono);color:var(--mut2);}
   .hcb{display:flex;gap:11px;padding:11px;}
@@ -411,8 +422,8 @@
   .himg.hnone{line-height:1.35;text-align:center;}
   .cap-link{color:var(--ink);text-decoration:underline dotted;text-underline-offset:2px;cursor:pointer;}
   .cap-markchip{display:inline-block;font:10px var(--sans);border:1px solid var(--hair2);border-radius:5px;padding:0 5px;margin:1px 3px 1px 0;cursor:pointer;color:var(--ink);}
-  .otbl tr.cap-flash,.hcard.cap-flash{animation:capflash 1.4s ease;}
-  @keyframes capflash{0%,30%{background:#eeeeee;}100%{background:transparent;}}
+  .otbl tr.cap-flash,.hcard.cap-flash{background:#eeeeee;outline:2px solid var(--ink);outline-offset:-2px;}
+  .otbl tr.cap-flash>td{background:#eeeeee;}
   /* 设置 */
   .sgrp-h{font:600 12px var(--sans);color:var(--mut);letter-spacing:.4px;margin:18px 0 2px;padding-bottom:7px;border-bottom:1px solid var(--hair2);}
   .sgrp-h:first-child{margin-top:0;}
@@ -434,7 +445,7 @@
   .diag .dl{display:flex;justify-content:space-between;gap:10px;font:11.5px var(--mono);color:var(--whisper);padding:7px 0;border-bottom:1px solid var(--hair);}
   .diag .dl b{color:var(--mut);font-weight:600;}
   .diag .dl a{color:var(--ink);}
-  .diag .dl.stack{display:block;}
+  .diag .dl.stack{display:block;overflow:visible;}
   .diag .mtbl{width:100%;border-collapse:collapse;margin-top:6px;font:10.5px var(--mono);}
   .diag .mtbl th,.diag .mtbl td{border-bottom:1px solid var(--hair);padding:5px 4px;text-align:left;}
   .diag .mtbl th{color:var(--mut);font-weight:600;}

@@ -34,9 +34,10 @@ function imgRow(imgs?: Array<{ role: string; thumb: string }>): string {
     }).join('')
     + `</div>`;
 }
-/** 一个组件阶段卡：summary（mark 标 + 名 + 状态 + note）+ body（收到 → 图 → 产出）。 */
-function stageCard(st: PipelineStage): string {
-  const open = (st.stage === 'model' || st.stage === 'inferview') ? ' open' : ''; // 末两步默认展开
+/** 一个组件阶段卡：summary（mark 标 + 名 + 状态 + note）+ body（收到 → 图 → 产出）。
+ *  collapsed=true（电纸屏 e-ink）→ 全阶段默认收起、点触逐个展开（零滑动·避免一开整轮就几千 px 高）。 */
+function stageCard(st: PipelineStage, collapsed = false): string {
+  const open = collapsed ? '' : ((st.stage === 'model' || st.stage === 'inferview') ? ' open' : ''); // 末两步默认展开（桌面）；电纸屏全收起
   const tag = st.status === 'skipped' ? '<span class="cns-pl-tag skipped">跳过</span>'
     : st.status === 'error' ? '<span class="cns-pl-tag error">出错</span>' : '';
   const markChip = st.mark_ord ? `<span class="cns-pl-mark">mark ${st.mark_ord}·${esc(st.mark_label || '')}</span>` : '';
@@ -48,9 +49,9 @@ function stageCard(st: PipelineStage): string {
     + (st.output?.length ? `<div class="cns-pl-io"><div class="cns-pl-io-h out">↑ 产出（输出）</div>${ioRows(st.output)}</div>` : '')
     + `</div></details>`;
 }
-export function pipelineSection(stages: PipelineStage[]): string {
+export function pipelineSection(stages: PipelineStage[], collapsed = false): string {
   return `<div class="cns-sec">处理流水线（逐组件：收到什么 → 产出什么 · ${stages.length} 步）</div>`
-    + `<div class="cns-pl">` + stages.map(stageCard).join('') + `</div>`;
+    + `<div class="cns-pl">` + stages.map((st) => stageCard(st, collapsed)).join('') + `</div>`;
 }
 
 /** 旧轮（无 pipeline 快照）的兜底展示：保留分类器判定 + 蒸馏字段 + 正文/prompt 折叠块。 */
