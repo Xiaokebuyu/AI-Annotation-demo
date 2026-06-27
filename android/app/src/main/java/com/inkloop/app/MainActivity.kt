@@ -8,6 +8,8 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.webkit.ValueCallback
@@ -34,7 +36,9 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val APP_HOST = "appassets.androidplatform.net"
-        private const val APP_URL = "https://appassets.androidplatform.net/assets/index.html"
+        // 电纸屏壳加载移动版前端（mobile.html，reMarkable 黑白·单画布·会议/dev/书籍全接真）。
+        // 桌面 web 仍由 index.html 提供（浏览器访问）；两页都打进 assets（vite 多页构建）。
+        private const val APP_URL = "https://appassets.androidplatform.net/assets/mobile.html"
     }
 
     private lateinit var webView: WebView
@@ -93,6 +97,11 @@ class MainActivity : ComponentActivity() {
         // abstract socket 交 eink-helper(root) 推 IT8951 电纸屏。无 helper/无电纸屏时静默失败、不影响 HDMI 显示。
         com.example.hmpocrpoc.EinkBridge.attach(webView, this)
 
+        // WebView 内文件浏览器桥：注册 window.InkLoopFiles（list/readBase64 /sdcard）。
+        // 电纸屏系统 SAF 选择器看不见 → 移动版导入走 #files 浮层，由本桥喂真实文件；无桥则前端降级系统选择器。
+        com.example.hmpocrpoc.InkLoopFilesBridge.attach(webView, this)
+        ensureAllFilesAccess() // Android 11+ 读 /sdcard 任意文件需「所有文件访问」，启动时尝试请求一次
+
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (webView.canGoBack()) webView.goBack()
@@ -104,6 +113,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun configureWebView(assetLoader: WebViewAssetLoader) {
+        val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         with(webView.settings) {
             javaScriptEnabled = true          // 前端是 Vite/TS 应用，必须开
             domStorageEnabled = true          // localStorage / IndexedDB（标注/账本持久化）
@@ -111,7 +121,9 @@ class MainActivity : ComponentActivity() {
             allowContentAccess = false
             @Suppress("DEPRECATION") allowFileAccessFromFileURLs = false
             @Suppress("DEPRECATION") allowUniversalAccessFromFileURLs = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            // 内容在 https appassets origin。debug 构建联调内网 http 代理(10.4.36.30，与 debug network_security_config 一致)
+            //   需放行主动混合内容(fetch)，否则 AI/识别 /api/* 被拦；release 严格只走 https，禁混合内容。
+            mixedContentMode = if (debuggable) WebSettings.MIXED_CONTENT_ALWAYS_ALLOW else WebSettings.MIXED_CONTENT_NEVER_ALLOW
             mediaPlaybackRequiresUserGesture = true
             setSupportZoom(false)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
@@ -148,6 +160,20 @@ class MainActivity : ComponentActivity() {
                     pendingFileCallback = null; filePathCallback.onReceiveValue(null); false
                 }
             }
+        }
+    }
+
+    /** Android 11+ 读 /sdcard 任意文件需「所有文件访问」。未授权则拉一次系统授权页（best-effort，失败静默）。
+     *  电纸屏定制板多半可直接授予/已授；授权后 InkLoopFilesBridge.list 才能枚举到 /sdcard/Download 的书。 */
+    private fun ensureAllFilesAccess() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return // 旧系统走 manifest READ_EXTERNAL_STORAGE
+        if (Environment.isExternalStorageManager()) return
+        try {
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
+            )
+        } catch (_: ActivityNotFoundException) {
+            try { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } catch (_: Throwable) { /* 静默 */ }
         }
     }
 

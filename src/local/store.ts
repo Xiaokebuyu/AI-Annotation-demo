@@ -241,10 +241,40 @@ export async function listDiaries(): Promise<PersistedDoc[]> {
     .sort((a, b) => (b.saved_at || '').localeCompare(a.saved_at || ''));
 }
 
+/** 删除一篇日记：移除 doc 记录 + 它在各账本（marks/ai_turns/基岩段+块）的所有条目。
+ *  删的是当前活跃文档则连 saveTimer 一起清，防去抖回写把已删文档复活。 */
+export async function deleteDiary(documentId: string): Promise<void> {
+  const db = await openDB();
+  if (!db) return;
+  if (current?.document_id === documentId) {
+    window.clearTimeout(saveTimer); saveTimer = undefined; // 取消去抖回写
+    current = null;
+  }
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction([STORE, MARKS, TURNS, INK_SEGMENTS, INK_SAMPLES], 'readwrite');
+      tx.objectStore(STORE).delete(documentId);
+      for (const name of [MARKS, TURNS, INK_SEGMENTS, INK_SAMPLES]) {
+        const req = tx.objectStore(name).index('by_doc').getAllKeys(IDBKeyRange.only(documentId));
+        req.onsuccess = () => { for (const k of (req.result as IDBValidKey[]) ?? []) tx.objectStore(name).delete(k); };
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch { resolve(); }
+  });
+}
+
 /** 记阅读位置（去抖落盘）。 */
 export function setLastReadPage(page: number): void {
   if (!current || current.last_read_page === page) return;
   current.last_read_page = page;
+  scheduleSave();
+}
+
+/** 日记 materialize：写到新页时把当前日记的 page_count 抬到 count 并落盘（只增不减·空白翻页页不落）。 */
+export function setDiaryPageCount(count: number): void {
+  if (!current || count <= current.page_count) return;
+  current.page_count = count;
   scheduleSave();
 }
 

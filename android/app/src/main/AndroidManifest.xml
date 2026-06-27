@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- WebView 内文件浏览器（InkLoopFilesBridge）枚举/读 /sdcard 下的书：Android 11+ 需「所有文件访问」，旧系统用 READ_EXTERNAL_STORAGE。 -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="false"
@@ -19,6 +22,15 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- 电纸屏设备形态：可作为 HOME 启动器（应用即桌面）。开机自启 + 按 home 回到 InkLoop，
+                 别的 app 难以长期占前台。启用方式（主机侧，可逆）：
+                   cmd package set-home-activity com.inkloop.app/.MainActivity   # 设为默认桌面
+                   cmd package set-home-activity com.android.launcher3/.uioverrides.QuickstepLauncher  # 改回 -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>

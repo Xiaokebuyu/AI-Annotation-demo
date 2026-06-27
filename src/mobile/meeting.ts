@@ -1,0 +1,476 @@
+/**
+ * 移动版（电纸屏）会议 controller —— 复用 web 同一批 store/feishu/引擎数据，换 mobile.html 的黑白 markup。
+ * 不 import 桌面 features/meeting/meeting.ts（那套绑 #app-pages / .mtg-* 桌面类 / host.go 导航壳，移动版用不上）。
+ *
+ * 四级视图（body[data-mtg]）：home 日程聚合 → ws 群会议三桶 → detail 四区块 → live 会中工作台。
+ * 会中白板：渲染器是单画布深单例，故进会议时把 #stage-wrap 物理搬进 #mtg-stage-host（renderer 持元素引用、搬动后照常），
+ * 退会议搬回 #rv-new；新建 meetingCtx + setActiveContext + renderBlankSurface('mtgboard_<id>')，标注落本会议白板账本。
+ */
+import { bus, settings, setActiveContext, getActiveContext } from '../app/state';
+import { SurfaceContext } from '../app/surface-context';
+import { renderBlankSurface, reopenBook, openPdfFromUrl } from '../surface/renderer';
+import {
+  listWorkspaces, listAllMeetings, getWorkspace, listMeetings, createWorkspace,
+  createMeeting, getMeeting, updateMeeting, getFoldedMarks, getFoldedMarksByContext, listBooks, upsertFeishuWorkspace, startSimMeeting,
+} from '../local/store';
+import { esc } from '../core/escape';
+import { infoSheet, promptSheet, formSheet, pickSheet } from './sheet';
+import type { MeetingStatus, PersistedMeeting, PersistedWorkspace, PersistedDoc, PersistedMark } from '../core/store-format';
+
+// ── 飞书后端（feishu-service）+ 文档转换（convert-service）：同 web 默认端口；服务不在则静默退回纯本地 ──
+const FEISHU_BASE = ((import.meta.env.VITE_FEISHU_BASE_URL as string | undefined) ?? 'http://localhost:4321').replace(/\/+$/, '');
+const CONVERT_BASE = ((import.meta.env.VITE_CONVERT_BASE_URL as string | undefined) ?? 'http://localhost:4330').replace(/\/+$/, '');
+async function feishuGet<T>(path: string): Promise<T | null> {
+  try { const r = await fetch(FEISHU_BASE + path); return r.ok ? (await r.json() as T) : null; }
+  catch { return null; }
+}
+
+interface FeishuMsg { message_id: string; msg_type: string; sender_id?: string; create_time?: string; text?: string; file_name?: string; file_key?: string; image_key?: string; }
+interface FeishuEvent { event_id: string; summary?: string; start_time?: { timestamp?: string; date?: string }; recurring?: boolean }
+const isConvertible = (f: FeishuMsg): boolean => f.msg_type === 'file' && /\.html?$/i.test(f.file_name || '');
+function feishuFileUrl(f: FeishuMsg): string {
+  const img = f.msg_type === 'image';
+  const key = img ? f.image_key : f.file_key;
+  const name = img ? '［图片］' : (f.file_name || '文件');
+  return `${FEISHU_BASE}/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
+}
+const convertedPdfUrl = (f: FeishuMsg): string => `${CONVERT_BASE}/convert/to-pdf?url=${encodeURIComponent(feishuFileUrl(f))}`;
+
+// ── 时间/格式 ──
+const WD = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const fsEventWhen = (e: FeishuEvent): number => {
+  const ts = e.start_time?.timestamp;
+  if (ts) return Number(ts) * 1000;
+  const d = e.start_time?.date;
+  return d ? new Date(d.replace(/-/g, '/')).getTime() : 0;
+};
+function fsDayLabel(ms: number): string {
+  const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const d0 = new Date(ms); d0.setHours(0, 0, 0, 0);
+  const diff = Math.round((d0.getTime() - t0.getTime()) / 86400000);
+  const rel = diff === 0 ? '今天' : diff === 1 ? '明天' : diff === 2 ? '后天' : '';
+  const d = new Date(ms);
+  const base = `${d.getMonth() + 1}/${d.getDate()} ${WD[d.getDay()]}`;
+  return rel ? `${rel} · ${base}` : base;
+}
+const fsHHMM = (ms: number): string => { const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const fmtMs = (ms?: string): string => { const n = Number(ms); return Number.isFinite(n) && n > 0 ? fmtDateTime(new Date(n).toISOString()) : ''; };
+const fmtDateTime = (iso: string): string => {
+  try { return new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }); } catch { return iso; }
+};
+function parseWhen(s: string): string {
+  const t = s.trim();
+  if (!t) return new Date().toISOString();
+  const d = new Date(t.replace(/-/g, '/'));
+  return Number.isFinite(d.getTime()) ? d.toISOString() : new Date().toISOString();
+}
+const clk = (ms: number): string => {
+  const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}` : `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+};
+
+// ── 内联 SVG（mobile 黑白线性）──
+const SVG_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg>';
+const SVG_IMG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 14l4-3 4 3 4-4 4 3"/></svg>';
+const SVG_GO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+const SVG_BACK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>';
+const SVG_USERS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15 5.2a3 3 0 0 1 0 5.6"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg>';
+const SVG_PEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg>';
+
+const ST: Record<MeetingStatus, [string, string]> = { live: ['live', '进行中'], upcoming: ['up', '待开始'], ended: ['end', '已结束'] };
+const stBadge = (s: MeetingStatus): string => `<span class="st ${ST[s][0]}"><span class="d"></span>${ST[s][1]}</span>`;
+
+const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
+
+// ── controller 内部状态 ──
+let mv: { wsId?: string; mtgId?: string } = {};
+let readerCtx: SurfaceContext;
+// 会中
+let meetingCtx: SurfaceContext | null = null;
+let liveMtg: { id: string; title: string; chatId?: string; startedAt: number; frozenAt: number } | null = null;
+let clockTimer = 0;
+let prevGesture = true;
+let liveMarkCount = 0;
+
+function setMtg(view: 'home' | 'ws' | 'detail' | 'live'): void {
+  document.body.dataset.mtg = view;
+  document.body.classList.toggle('writable', view === 'live'); // 会中白板=可写（露工具格子）
+}
+
+// ════ home：日程时间线 + 群聊书架 ════
+async function renderHome(): Promise<void> {
+  // 飞书群 → 幂等同步成工作区
+  const wsRes = await feishuGet<{ workspaces: Array<{ chat_id: string; name: string; chat_status: string }> }>('/api/feishu/workspaces');
+  if (wsRes) for (const w of wsRes.workspaces || []) if (w.chat_status === 'normal') await upsertFeishuWorkspace(w.chat_id, w.name);
+  // 飞书日历
+  let fsEvents: FeishuEvent[] = [];
+  const oauth = await feishuGet<{ connected: boolean }>('/api/feishu/oauth/status');
+  const fsConnected = !!oauth?.connected;
+  if (fsConnected) {
+    const ev = await feishuGet<{ events: FeishuEvent[] }>('/api/feishu/my/events');
+    fsEvents = (ev?.events || []).slice().sort((a, b) => fsEventWhen(a) - fsEventWhen(b));
+  }
+  const [workspaces, allMeetings] = await Promise.all([listWorkspaces(), listAllMeetings()]);
+  const wsName = new Map(workspaces.map((w) => [w.workspace_id, w.name]));
+  const count = new Map<string, number>();
+  for (const m of allMeetings) count.set(m.workspace_id, (count.get(m.workspace_id) ?? 0) + 1);
+  const sched = allMeetings.filter((m) => m.status !== 'ended').sort((a, b) => (a.scheduled_at || '').localeCompare(b.scheduled_at || ''));
+
+  const fsOk = fsConnected
+    ? `<span class="fs-ok"><span class="d"></span>飞书已连${fsEvents.length ? ` · ${fsEvents.length} 条` : ''}</span>`
+    : '';
+  const tl = timeline(fsEvents);
+  const schedRows = sched.map((m) => mrow(m, wsName.get(m.workspace_id))).join('')
+    || (tl ? '' : `<p class="empty">还没接飞书日历，本地也没有会议。进群聊「+ 新建会议」。</p>`);
+  const wsGrid = workspaces.length
+    ? `<div class="ws-grid">${workspaces.map((w) => wsCard(w, count.get(w.workspace_id) ?? 0)).join('')}</div>`
+    : `<p class="empty">还没有群聊。点右上「新建群聊」（接飞书后从群自动汇入）。</p>`;
+
+  el('mv-home').innerHTML =
+    `<div class="vhead"><h1>会议</h1><span class="cnt">${workspaces.length} 群 · ${allMeetings.length} 场</span><span class="sp"></span>`
+    + `<button class="hbtn" id="mh-sim">模拟会议</button><button class="hbtn pri" id="mh-new-ws">+ 新建群聊</button></div>`
+    + `<div class="mbody">`
+    + `<section class="msec"><div class="msec-h"><span class="mt">会议日程</span><span class="mb">飞书 + 本地 · 待开始/进行中</span>${fsOk}</div>${tl}${schedRows}</section>`
+    + `<section class="msec"><div class="msec-h"><span class="mt">群聊书架</span><span class="mb">以群聊为单位</span></div>${wsGrid}</section>`
+    + `</div>`;
+
+  el('mv-home').querySelector('#mh-new-ws')?.addEventListener('click', async () => {
+    const name = await promptSheet({ title: '新建群聊 / 工作区', placeholder: '群聊或工作区名称', confirm: '创建' });
+    if (name == null || !name) return;
+    await createWorkspace(name); void renderHome();
+  });
+  el('mv-home').querySelector('#mh-sim')?.addEventListener('click', async () => {
+    const m = await startSimMeeting();
+    if (!m) { await infoSheet({ title: '模拟会议', message: '先连一个飞书群（机器人所在群会自动同步成工作区）再开模拟会议。' }); return; }
+    mv = { wsId: m.workspace_id, mtgId: m.meeting_id }; setMtg('detail'); void renderDetail();
+  });
+  el('mv-home').querySelectorAll<HTMLElement>('.ws-card[data-ws]').forEach((c) => c.addEventListener('click', () => { mv = { wsId: c.dataset.ws }; setMtg('ws'); void renderWs(); }));
+  wireRows(el('mv-home'));
+}
+
+function timeline(events: FeishuEvent[]): string {
+  if (!events.length) return '';
+  const today = fsDayLabel(Date.now()).split(' · ').pop() || '';
+  const cards = events.slice(0, 6).map((e) => {
+    const ms = fsEventWhen(e);
+    return `<div class="tl-card"><div class="d">${esc(fsDayLabel(ms))}</div><div class="t">${esc(fsHHMM(ms))}</div><div class="n">${esc(e.summary || '(无标题日程)')}</div><span class="bd">${e.recurring ? '每周' : '单次'}</span></div>`;
+  }).join('');
+  const more = events.length > 6 ? `<div class="tl-more">还有 ${events.length - 6} 场 ›</div>` : '';
+  return `<div class="tl"><div class="tl-now"><span class="d"></span><span class="l">今天<br>${esc(today)}</span></div>${cards}${more}</div>`;
+}
+function mrow(m: PersistedMeeting, wsLabel?: string): string {
+  return `<button class="mrow" data-mtgid="${esc(m.meeting_id)}" data-wsid="${esc(m.workspace_id)}">${stBadge(m.status)}`
+    + `<span class="mc"><span class="mt">${esc(m.title)}</span><span class="mm">${esc(fmtDateTime(m.scheduled_at))}${wsLabel ? ` · ${esc(wsLabel)}` : ''}</span></span>`
+    + `<span class="go">${SVG_GO}</span></button>`;
+}
+function wsCard(w: PersistedWorkspace, n: number): string {
+  return `<div class="ws-card" data-ws="${esc(w.workspace_id)}"><div class="ico">${SVG_USERS}</div>`
+    + `<div class="wn">${esc(w.name)}${w.source === 'feishu' ? ' <span class="fs">飞书</span>' : ''}</div><div class="wm">${n} 场会议</div></div>`;
+}
+/** 会议行点击 → 进详情。 */
+function wireRows(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('.mrow[data-mtgid]').forEach((b) => b.addEventListener('click', () => {
+    mv = { wsId: b.dataset.wsid, mtgId: b.dataset.mtgid }; setMtg('detail'); void renderDetail();
+  }));
+}
+
+// ════ ws：一个群聊的会议（参会人 + 群动态 + 三桶）════
+async function renderWs(): Promise<void> {
+  const ws = mv.wsId ? await getWorkspace(mv.wsId) : null;
+  if (!ws) { setMtg('home'); void renderHome(); return; }
+  const meetings = await listMeetings(ws.workspace_id);
+  let membersHtml = '', feedHtml = '';
+  if (ws.source === 'feishu' && ws.feishu_chat_id) {
+    const cid = ws.feishu_chat_id;
+    const [mem, msg] = await Promise.all([
+      feishuGet<{ total: number; members: Array<{ open_id: string; name: string }> }>(`/api/feishu/workspaces/${cid}/members`),
+      feishuGet<{ messages: FeishuMsg[] }>(`/api/feishu/workspaces/${cid}/messages?limit=30`),
+    ]);
+    if (mem) {
+      membersHtml = `<section class="msec"><div class="msec-h"><span class="mt">参会人</span><span class="mb">${mem.total} 人 · 飞书群成员</span></div>`
+        + `<div class="chips">${mem.members.map((p) => `<span class="chip">${esc(p.name)}</span>`).join('')}</div></section>`;
+      feedHtml = feed(msg?.messages || [], new Map(mem.members.map((p) => [p.open_id, p.name])));
+    } else {
+      membersHtml = `<section class="msec"><div class="msec-h"><span class="mt">参会人</span></div><p class="empty">加载失败（feishu-service 未运行 / 权限不足？）</p></section>`;
+    }
+  }
+  const buckets: Array<[MeetingStatus, string]> = [['live', '进行中'], ['upcoming', '待开始'], ['ended', '已结束']];
+  const secs = buckets.map(([st, label]) => {
+    const ms = meetings.filter((m) => m.status === st);
+    return ms.length ? `<section class="msec"><div class="msec-h"><span class="mt">${label}</span><span class="mb">${ms.length}</span></div>${ms.map((m) => mrow(m)).join('')}</section>` : '';
+  }).join('') || `<p class="empty" style="padding:16px 18px">这个群聊还没有会议。点右上「+ 新建会议」。</p>`;
+
+  el('mv-ws').innerHTML =
+    `<div class="mtop"><span class="bk" data-back="home">${SVG_BACK}</span><span class="ti">${esc(ws.name)}</span><span class="sp"></span><button class="hbtn" id="mw-new">+ 新建会议</button></div>`
+    + `<div class="mbody">${membersHtml}${feedHtml}${secs}</div>`;
+  el('mv-ws').querySelector('#mw-new')?.addEventListener('click', async () => {
+    const form = await formSheet({
+      title: '新建会议',
+      fields: [
+        { key: 'title', label: '会议标题', placeholder: '如 架构评审 v4' },
+        { key: 'when', label: '计划时间', placeholder: '如 2026-06-28 14:30，留空=现在' },
+      ],
+      confirm: '创建',
+    });
+    if (!form || !form.title) return;
+    await createMeeting(ws.workspace_id, { title: form.title, scheduled_at: parseWhen(form.when) }); void renderWs();
+  });
+  wireBack(el('mv-ws')); wireRows(el('mv-ws'));
+}
+function feed(msgs: FeishuMsg[], nameOf: Map<string, string>): string {
+  if (!msgs.length) return '';
+  const assetN = msgs.filter((m) => m.msg_type === 'file' || m.msg_type === 'image').length;
+  const rows = msgs.map((m) => {
+    const who = m.sender_id ? (nameOf.get(m.sender_id) || (m.sender_id.startsWith('cli_') ? '机器人' : '成员')) : '系统';
+    let body = '', asset = false;
+    if (m.msg_type === 'text') body = m.text || '';
+    else if (m.msg_type === 'image') { body = '［图片］'; asset = true; }
+    else if (m.msg_type === 'file') { body = '［文件］' + (m.file_name || ''); asset = true; }
+    else if (m.msg_type === 'interactive') body = '［卡片］';
+    else if (m.msg_type === 'system') body = '［系统消息］';
+    else body = `［${m.msg_type}］`;
+    return `<div class="fitem"><span class="fs-n">${esc(who)}</span><span class="fb${asset ? ' mat' : ''}">${esc(body)}${asset ? '<span class="matbadge">资料</span>' : ''}</span><span class="ft">${esc(fmtMs(m.create_time))}</span></div>`;
+  }).join('');
+  return `<section class="msec"><div class="msec-h"><span class="mt">群动态</span><span class="mb">近 ${msgs.length} 条${assetN ? ` · ${assetN} 资料` : ''}</span></div><div class="feed">${rows}</div></section>`;
+}
+
+// ════ detail：四区块 + 动作 ════
+async function renderDetail(): Promise<void> {
+  const m = mv.mtgId ? await getMeeting(mv.mtgId) : null;
+  if (!m) { setMtg('home'); void renderHome(); return; }
+  const books = await listBooks();
+  const bookMap = new Map(books.map((b) => [b.document_id, b]));
+  const mats = m.material_doc_ids.map((id) => bookMap.get(id)).filter((b): b is PersistedDoc => !!b);
+  const markLists = await Promise.all(mats.map((b) => getFoldedMarks(b.document_id)));
+  const ws = await getWorkspace(m.workspace_id);
+
+  // 群里收集到的资料（飞书）
+  let groupSec = '';
+  if (ws?.source === 'feishu' && ws.feishu_chat_id) {
+    const res = await feishuGet<{ messages: FeishuMsg[] }>(`/api/feishu/workspaces/${ws.feishu_chat_id}/messages?limit=50`);
+    const fileMsgs = (res?.messages || []).filter((x) => (x.msg_type === 'file' && x.file_key) || (x.msg_type === 'image' && x.image_key));
+    const cards = fileMsgs.map((f) => {
+      const img = f.msg_type === 'image';
+      const name = img ? '［图片］' : (f.file_name || '文件');
+      if (isConvertible(f)) {
+        return `<div class="matcard" data-conv="${esc(convertedPdfUrl(f))}" data-docid="mtgdoc_${esc(m.meeting_id)}_${esc(f.message_id)}" data-name="${esc(name)}"><span class="ic">${SVG_FILE}</span><div><div class="nm">${esc(name)}</div><div class="mt">群文件 · ${esc(fmtMs(f.create_time))} · 可批注</div></div></div>`;
+      }
+      return `<a class="matcard" href="${esc(feishuFileUrl(f))}" target="_blank" rel="noopener"><span class="ic">${img ? SVG_IMG : SVG_FILE}</span><div><div class="nm">${esc(name)}</div><div class="mt">群文件 · ${esc(fmtMs(f.create_time))}</div></div></a>`;
+    }).join('') || `<p class="empty">群里近期没有文件。</p>`;
+    groupSec = `<section class="msec"><div class="msec-h"><span class="mt">群里收集到的资料</span><span class="mb">机器人捞 · ${esc(ws.name)}</span></div>${res ? cards : '<p class="empty">拉取群资料失败（feishu-service 未运行？）</p>'}</section>`;
+  }
+
+  const filesHtml = mats.length
+    ? mats.map((b) => `<div class="matcard" data-docid="${esc(b.document_id)}" data-name="${esc(b.filename)}"><span class="ic">${SVG_FILE}</span><div><div class="nm">${esc(b.filename || '(未命名)')}</div><div class="mt">${b.page_count} 页 · 借阅读器打开</div></div></div>`).join('')
+    : `<p class="empty">还没有资料。点右上「+ 添加资料」从已导入的 PDF 里挑。</p>`;
+  const archiveHtml = mats.length
+    ? mats.map((b, i) => {
+        const hand = markLists[i].filter((mk) => mk.feature_type === 'handwriting').length;
+        return `<div class="matcard" data-docid="${esc(b.document_id)}" data-name="${esc(b.filename)}"><span class="ic">${SVG_PEN}</span><div><div class="nm">${esc(b.filename || '(未命名)')}</div><div class="mt">${markLists[i].length} 处标注 · 手写 ${hand}</div></div></div>`;
+      }).join('')
+    : `<div class="empty">${m.status === 'ended' ? '本场会议没有留下手写档案。' : '会议进行 / 结束后，你在资料与转写上的手写会汇总在这里。'}</div>`;
+  const summaryHtml = m.summary
+    ? `<div class="summary">${esc(m.summary)}</div>`
+    : `<div class="empty">${m.status === 'ended' ? '还没生成思路总结。' : '会议结束后可对手写档案做思路总结。'}\n会后 AI 综合（送云端处理）——接线后置。</div>`;
+  // 「进入会议」即开始（enterMeeting 内置置 live + 落 started_at），故不再单列「开始会议」按钮，去职责重叠。
+  const enterLabel = m.status === 'live' ? '✏ 进入会议（继续）' : m.status === 'ended' ? '✏ 回看记录' : '✏ 进入会议';
+  const endBtn = m.status === 'live' ? '<button class="hbtn" id="md-end">⏹ 结束会议</button>' : '';
+
+  el('mv-detail').innerHTML =
+    `<div class="mtop"><span class="bk" data-back="ws">${SVG_BACK}</span><span class="ti">${esc(m.title)}</span>${stBadge(m.status).replace('class="st', 'style="margin-left:8px" class="st')}</div>`
+    + `<div class="mbody">`
+    + `<div class="dact"><button class="hbtn pri" id="md-enter">${enterLabel}</button>${endBtn}<button class="hbtn" id="md-add">+ 添加资料</button></div>`
+    + `<section class="msec"><div class="msec-h"><span class="mt">可能有用的文件</span><span class="mb">${mats.length} 份</span></div>${filesHtml}</section>`
+    + groupSec
+    + `<section class="msec"><div class="msec-h"><span class="mt">你的手写档案</span></div>${archiveHtml}</section>`
+    + `<section class="msec"><div class="msec-h"><span class="mt">思路总结</span><span class="sp" style="flex:1"></span><button class="hbtn" id="md-sum"${m.status === 'ended' ? '' : ' disabled style="opacity:.45"'}>生成思路总结</button></div>${summaryHtml}</section>`
+    + `</div>`;
+
+  el('mv-detail').querySelector('#md-enter')?.addEventListener('click', () => { void enterMeeting(m.meeting_id); });
+  el('mv-detail').querySelector('#md-end')?.addEventListener('click', async () => { await updateMeeting(m.meeting_id, { status: 'ended', ended_at: new Date().toISOString() }); void renderDetail(); });
+  el('mv-detail').querySelector('#md-sum')?.addEventListener('click', () => void infoSheet({ title: '思路总结', message: '会后经 MCP 把手写档案 + 转写交外部 agent 综合——待接入。' }));
+  el('mv-detail').querySelector('#md-add')?.addEventListener('click', async () => {
+    const avail = books.filter((b) => !m.material_doc_ids.includes(b.document_id));
+    const add = await pickSheet({
+      title: '添加资料',
+      items: avail.map((b) => ({ id: b.document_id, label: b.filename || '(未命名)', sub: `${b.page_count} 页` })),
+      empty: '没有可添加的资料。先到「阅读 · 书籍」导入 PDF。',
+      confirm: '添加',
+    });
+    if (add && add.length) { await updateMeeting(m.meeting_id, { material_doc_ids: [...new Set([...m.material_doc_ids, ...add])] }); void renderDetail(); }
+  });
+  // 资料卡 → 进这场会议的工作台并开进该资料（不跳全局阅读·批注归本会议时间脊）。本地 PDF / 群 HTML 转 PDF 都由 enterMeeting→openMaterialInMeeting 处理。
+  el('mv-detail').querySelectorAll<HTMLElement>('.matcard[data-docid]').forEach((card) => card.addEventListener('click', () => {
+    void enterMeeting(m.meeting_id, { docId: card.dataset.docid!, name: card.dataset.name || '资料', conv: card.dataset.conv });
+  }));
+  wireBack(el('mv-detail'));
+}
+
+/** 会中打开资料：**不退出会议**。把 PDF 载进会中共享画布（loadIntoState 载入当前活跃 meetingCtx），
+ *  时钟/时间脊照常，资料上的笔带同一 context_id='mtg_<id>' → 汇入时间脊。返回白板=点抽屉「空白笔记页」。 */
+async function openMaterialInMeeting(docId: string, name: string, convUrl?: string): Promise<void> {
+  const mtg = liveMtg, ctx = meetingCtx; // capture：转 PDF/解码慢时用户退会再进别场，迟到结果不能写当前 live UI
+  if (!mtg) return;
+  document.body.classList.remove('side-open'); // 收起资料抽屉
+  try {
+    if (convUrl) await openPdfFromUrl(docId, name, convUrl);
+    else await reopenBook(docId, name);
+  } catch (e) { void infoSheet({ title: '打开失败', message: String((e as Error)?.message || e) }); return; }
+  if (liveMtg !== mtg || getActiveContext() !== ctx) return; // 已退会/切会：不改标题、不刷脊
+  el('mlive-title').textContent = name; // 顶栏显当前资料名
+  void refreshSpine();
+}
+
+// ════ live：会中工作台（白板搬进 #mtg-stage-host + 时间脊 + 资料栏 + 计时）════
+async function enterMeeting(mtgId: string, material?: { docId: string; name: string; conv?: string }): Promise<void> {
+  const m = await getMeeting(mtgId);
+  if (!m) return;
+  const ws = await getWorkspace(m.workspace_id);
+  const startedIso = m.started_at ?? new Date().toISOString();
+  // 已结束=回看模式：不复活成 live、时钟冻结在会议时长。只有 upcoming/缺 started_at 才置 live + 落开始墙钟。
+  const reviewing = m.status === 'ended';
+  if (!reviewing && (m.status !== 'live' || !m.started_at)) await updateMeeting(mtgId, { status: 'live', started_at: startedIso });
+  const startedMs = new Date(startedIso).getTime();
+  const endedMs = reviewing && m.ended_at ? new Date(m.ended_at).getTime() : 0;
+  liveMtg = { id: mtgId, title: m.title, chatId: ws?.feishu_chat_id, startedAt: startedMs, frozenAt: endedMs || (reviewing ? startedMs : 0) };
+  liveMarkCount = 0;
+  setMtg('live');
+  el('mlive-title').textContent = m.title; // 默认会议标题；直接开资料时 openMaterialInMeeting 覆成资料名
+  // 白板搬进 live 视图（renderer 持元素引用，搬动后照常工作）
+  el('mtg-stage-host').appendChild(el('stage-wrap'));
+  // 会中关实时 AI：暂停手势综合（marks 仍捕获、落本会议白板账本）
+  prevGesture = settings.gesture.enabled; settings.gesture.enabled = false; bus.emit('settings:changed');
+  meetingCtx = new SurfaceContext('mtg_' + mtgId, 'meeting');
+  setActiveContext(meetingCtx);
+  startClock(); // 立即起表（不等资料解码）
+  if (material) {
+    // 从详情页直接点资料进会议：开进该资料（免先闪一下白板）。资料载进 meetingCtx → 批注汇本会议时间脊。
+    await openMaterialInMeeting(material.docId, material.name, material.conv);
+  } else {
+    const host = el('mtg-stage-host');
+    renderBlankSurface('mtgboard_' + mtgId, m.title, { width: host.clientWidth, height: host.clientHeight }); // document:loaded → 还原本会议白板墨迹
+    void refreshSpine();
+  }
+  void mountSide();
+}
+
+function teardownLive(): void {
+  if (!liveMtg) return;
+  liveMtg = null;
+  stopClock();
+  settings.gesture.enabled = prevGesture; bus.emit('settings:changed'); // 恢复手势综合
+  // 白板搬回 #rv-new（diary-bar 之后、whisper-layer 之前）
+  el('rv-new').insertBefore(el('stage-wrap'), el('whisper-layer'));
+  meetingCtx = null;
+  if (readerCtx) setActiveContext(readerCtx); // 切回主阅读实例
+  document.body.classList.remove('side-open');
+  el('mtg-spine').hidden = true;
+}
+function exitToDetail(): void { teardownLive(); setMtg('detail'); void renderDetail(); }
+
+function startClock(): void {
+  stopClock();
+  if (!liveMtg) return;
+  if (liveMtg.frozenAt) { // 回看已结束会议：冻结在会议时长、不跑表、空心点表示非进行中
+    el('mtg-clk').innerHTML = `<span class="dot off"></span>${clk(liveMtg.frozenAt - liveMtg.startedAt)}`;
+    return;
+  }
+  const tick = (): void => { if (liveMtg) el('mtg-clk').innerHTML = `<span class="dot"></span>${clk(Date.now() - liveMtg.startedAt)}`; };
+  tick();
+  clockTimer = window.setInterval(tick, 1000);
+}
+function stopClock(): void { if (clockTimer) { window.clearInterval(clockTimer); clockTimer = 0; } }
+
+async function mountSide(): Promise<void> {
+  const mtg = liveMtg; // capture：await 期间退会/切会则丢弃，不写错会议侧栏
+  if (!mtg) return;
+  const list = el('mtg-side-list');
+  // ① 会议本地资料（material_doc_ids，添加资料挑的本地 PDF）——之前抽屉漏列，这里补上
+  const [m, books] = await Promise.all([getMeeting(mtg.id), listBooks()]);
+  if (liveMtg !== mtg) return;
+  const bookMap = new Map(books.map((b) => [b.document_id, b]));
+  const locals = (m?.material_doc_ids || []).map((id) => bookMap.get(id)).filter((b): b is PersistedDoc => !!b);
+  const localCards = locals.map((b) =>
+    `<div class="scard" data-docid="${esc(b.document_id)}" data-name="${esc(b.filename)}"><div class="fn">${SVG_FILE}${esc(b.filename || '(未命名)')}</div><div class="fm">${b.page_count} 页 · 本地 · 可批注</div></div>`
+  ).join('');
+  // ② 飞书群文件
+  let files: FeishuMsg[] = [];
+  if (mtg.chatId) {
+    const res = await feishuGet<{ messages: FeishuMsg[] }>(`/api/feishu/workspaces/${mtg.chatId}/messages?limit=50`);
+    if (liveMtg !== mtg) return;
+    files = (res?.messages || []).filter((x) => (x.msg_type === 'file' && x.file_key) || (x.msg_type === 'image' && x.image_key));
+  }
+  const feishuCards = files.map((f) => {
+    const img = f.msg_type === 'image';
+    const name = img ? '［图片］' : (f.file_name || '文件');
+    if (isConvertible(f)) {
+      return `<div class="scard" data-conv="${esc(convertedPdfUrl(f))}" data-docid="mtgdoc_${esc(mtg.id)}_${esc(f.message_id)}" data-name="${esc(name)}"><div class="fn">${SVG_FILE}${esc(name)}</div><div class="fm">群文件 · 可批注</div></div>`;
+    }
+    return `<a class="scard" href="${esc(feishuFileUrl(f))}" target="_blank" rel="noopener"><div class="fn">${img ? SVG_IMG : SVG_FILE}${esc(name)}</div><div class="fm">群文件</div></a>`;
+  }).join('');
+
+  el('mtg-side-tab').textContent = `资料 ${locals.length + files.length}`;
+  const cards = localCards + feishuCards;
+  list.innerHTML = `<div class="scard blank" id="mside-blank">✏ 空白笔记页 · 画板</div>${cards || '<p class="empty" style="padding:8px">还没有资料。回详情「+ 添加资料」或在群里发文件。</p>'}`;
+  // 回白板：reload 本会议白板 surface（document:loaded → 还原白板墨迹）+ 复位顶栏标题
+  list.querySelector('#mside-blank')?.addEventListener('click', () => {
+    if (!liveMtg) return;
+    document.body.classList.remove('side-open');
+    renderBlankSurface('mtgboard_' + liveMtg.id, liveMtg.title, { width: el('mtg-stage-host').clientWidth, height: el('mtg-stage-host').clientHeight });
+    el('mlive-title').textContent = liveMtg.title;
+  });
+  // 资料卡：会中打开（保活会议）。本地无 conv 走 reopenBook，群 HTML 带 conv 走 openPdfFromUrl。
+  list.querySelectorAll<HTMLElement>('.scard[data-docid]').forEach((c) => c.addEventListener('click', () => {
+    void openMaterialInMeeting(c.dataset.docid!, c.dataset.name || '资料', c.dataset.conv);
+  }));
+}
+
+/** 时间脊（会中工作台左缘）：按 context_id 聚合本场会议**所有 surface**（白板 + 各资料）的标注，
+ *  按「会议相对时刻」排。资料上的笔靠会中保持 meetingCtx 活跃而带同一 context_id，故一并汇入。chip 点击切显隐。 */
+async function refreshSpine(): Promise<void> {
+  const mtg = liveMtg; // capture：await 期间可能退会/切会，迟到结果不能用新 liveMtg 解释（跨会污染/空指针）
+  if (!mtg) return;
+  const marks = (await getFoldedMarksByContext('mtg_' + mtg.id)).sort((a, b) => (a.abs_timestamp || 0) - (b.abs_timestamp || 0));
+  if (liveMtg !== mtg) return;
+  liveMarkCount = marks.length;
+  el('mtg-chip-n').textContent = `${marks.length} 笔`;
+  // surface 源标签：白板 + 各资料文件名，让聚合后的脊能区分笔来自哪儿
+  const boardId = 'mtgboard_' + mtg.id;
+  const nameOf = new Map((await listBooks()).map((b) => [b.document_id, b.filename || '(未命名)']));
+  if (liveMtg !== mtg) return;
+  const labelFor = (docId: string): string => (docId === boardId ? '白板' : nameOf.get(docId) || '资料');
+  const blocks = marks.map((mk: PersistedMark) => {
+    const rel = clk(Math.max(0, (mk.abs_timestamp || 0) - mtg.startedAt));
+    const lines = (mk.marked_text || '').split('\n').filter(Boolean);
+    const body = lines.length ? lines.map((l) => `<div class="hw"${/[一-龥]/.test(l) ? ' style="font-size:24px"' : ''}>${esc(l)}</div>`).join('') : '<div class="hw" style="color:var(--mut2);font-size:20px">（图形标注）</div>';
+    return `<div class="mblk"><span class="tk"></span><div class="t">${rel}</div><div class="c"><div class="src">${esc(labelFor(mk.document_id))}</div>${body}</div></div>`;
+  }).join('');
+  el('mtg-spine').innerHTML = `<div class="mpg"><div class="mspine"></div>${blocks || '<p class="empty" style="padding:20px">还没有标注。在白板或资料上写下的内容会按会议时刻出现在这里。</p>'}</div>`;
+}
+
+function wireBack(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('[data-back]').forEach((b) => b.addEventListener('click', () => {
+    const to = b.dataset.back;
+    if (to === 'home') { setMtg('home'); void renderHome(); }
+    else if (to === 'ws') { setMtg('ws'); void renderWs(); }
+    else if (to === 'detail') { setMtg('detail'); void renderDetail(); }
+  }));
+}
+
+/** 入口：mobile-main boot 时调一次。绑定会议 nav 进入 + live 静态控件 + 标注计数刷新。 */
+export function initMobileMeeting(opts: { readerCtx: SurfaceContext }): void {
+  readerCtx = opts.readerCtx;
+
+  // 会议 rail 进入 → home（inline 已切 data-mode=meet + 高亮；这里补真数据）
+  document.querySelector('.nav [data-mode="meet"]')?.addEventListener('click', () => { teardownLive(); setMtg('home'); void renderHome(); });
+  // 离开会议面（点阅读/dev）→ 若在会中，先收起白板搬回阅读
+  document.querySelectorAll('.nav [data-mode="read"], .nav [data-mode="dev"]').forEach((b) => b.addEventListener('click', () => teardownLive()));
+
+  // live 静态控件
+  el('mlive-back').addEventListener('click', () => exitToDetail());
+  el('mtg-side-tab').addEventListener('click', () => document.body.classList.toggle('side-open'));
+  el('mtg-chip').addEventListener('click', () => { const sp = el('mtg-spine'); sp.hidden = !sp.hidden; if (!sp.hidden) void refreshSpine(); });
+
+  // 白板新标注 → 刷新计数（会中时）。document:loaded=进会议还原后首刷。
+  bus.on('mark:resolved', () => { if (liveMtg) { liveMarkCount += 1; el('mtg-chip-n').textContent = `${liveMarkCount} 笔`; if (!el('mtg-spine').hidden) void refreshSpine(); } });
+}

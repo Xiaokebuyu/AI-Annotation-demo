@@ -6,114 +6,803 @@
 <title>InkLoop · 移动版布局原型</title>
 <style>
   :root{
-    --page:#ffffff;         /* 纸面：纯白满幅 */
-    --ink:#111111;          /* 墨 / 图标：近黑 */
-    --mut:#8a8a8a;          /* 次要 */
-    --hair:#e6e6e6;         /* 发丝分隔 */
-    --grid:#efefef;         /* 极淡点阵（书写参考） */
-    --sel:#111111;          /* 选中反色块 */
+    --page:#ffffff;--ink:#111111;--ink-soft:#1c1c1c;--mut:#8a8a8a;--mut2:#b4b4b4;
+    --whisper:#5a5a5a;--hair:#e6e6e6;--hair2:#d8d8d8;--grid:#ededed;
+    --sel:#e9e9e9;--sel-line:#cfcfcf;
     --sans:-apple-system,"PingFang SC","Noto Sans SC","Helvetica Neue",sans-serif;
     --mono:ui-monospace,"SF Mono",Menlo,"Roboto Mono",monospace;
     --serif:"Noto Serif SC","Songti SC","Source Han Serif SC",Georgia,serif;
+    --hand:"Bradley Hand","Segoe Print","Noteworthy","Comic Sans MS",cursive;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
   html,body{height:100%;margin:0;}
-  body{font:14px/1.5 var(--sans);color:var(--ink);background:var(--page);overflow:hidden;}
-
+  body{font:14px/1.5 var(--sans);color:var(--ink);background:var(--page);overflow:hidden;-webkit-font-smoothing:antialiased;}
   #m-app{height:100%;display:flex;}
 
-  /* ── 左缘竖条工具栏 ── */
-  #m-rail{
-    flex:0 0 auto;width:48px;display:flex;flex-direction:column;align-items:center;
-    padding:6px 0;border-right:1px solid var(--hair);background:var(--page);
-    transition:transform .12s ease;z-index:5;
-  }
-  .rl-btn{width:38px;height:38px;display:grid;place-items:center;border:none;background:transparent;color:var(--ink);border-radius:10px;cursor:pointer;margin:2px 0;}
+  /* ════ 导航脊 ════ */
+  #m-rail{flex:0 0 auto;width:50px;display:flex;flex-direction:column;align-items:center;padding:8px 0;border-right:1px solid var(--hair);background:var(--page);transition:transform .12s ease;z-index:5;overflow:hidden;}
+  .rl-btn{position:relative;width:38px;height:38px;display:grid;place-items:center;border:none;background:transparent;color:var(--ink);border-radius:10px;cursor:pointer;padding:0;}
   .rl-btn:active{background:#f1f1f1;}
-  .rl-btn.on{background:var(--sel);color:#fff;}
-  .rl-btn svg{width:21px;height:21px;}
+  .rl-btn.on{background:var(--sel);color:var(--ink);box-shadow:inset 0 0 0 1px var(--sel-line);}
   .rl-btn.dim{color:var(--mut);}
-  .rl-sep{width:22px;height:1px;background:var(--hair);margin:6px 0;}
-  .rl-spacer{flex:1;}
-
-  /* 收起态：栏滑出，左缘留一个细把手 */
-  body.rail-off #m-rail{transform:translateX(-48px);}
-  #m-tab{
-    position:fixed;left:6px;top:8px;width:30px;height:30px;display:none;place-items:center;
-    border:1px solid var(--hair);border-radius:9px;background:var(--page);color:var(--ink);cursor:pointer;z-index:6;
-  }
+  .rl-btn svg{width:21px;height:21px;}
+  .rl-item{display:flex;flex-direction:column;align-items:center;margin:1px 0;}
+  .rl-lab{font:9px var(--sans);color:var(--mut);margin-top:1px;letter-spacing:.2px;}
+  .rl-item.cur .rl-lab{color:var(--ink);}
+  .rl-sep{width:24px;height:1px;background:var(--hair);margin:7px 0;}
+  .rl-spacer{flex:1;min-height:8px;}
+  .nav,.sub{display:flex;flex-direction:column;align-items:center;}
+  #read-sub,#dev-sub{display:none;}
+  body[data-mode="read"] #read-sub{display:flex;}
+  body[data-mode="dev"] #dev-sub{display:flex;}
+  #tools{display:none;flex-direction:column;align-items:center;margin-top:4px;}
+  body.writable #tools{display:flex;}
+  #tools-toggle .chev{position:absolute;right:2px;bottom:2px;width:9px;height:9px;color:var(--mut);transition:transform .12s ease;}
+  body.tools-open #tools-toggle .chev{transform:rotate(90deg);}
+  #tools-list{display:none;flex-direction:column;align-items:center;}
+  body.tools-open #tools-list{display:flex;}
+  body.tools-open #tools-toggle{background:transparent;box-shadow:none;color:var(--mut);}
+  body.rail-off #m-rail{transform:translateX(-50px);}
+  body.rail-off #m-canvas{margin-left:-50px;}
+  #m-tab{position:fixed;left:6px;top:8px;width:30px;height:30px;display:none;place-items:center;border:1px solid var(--hair);border-radius:9px;background:var(--page);color:var(--ink);cursor:pointer;z-index:6;}
   body.rail-off #m-tab{display:grid;}
   #m-tab svg{width:18px;height:18px;}
 
-  /* ── 满幅可写页面 ── */
-  #m-canvas{flex:1;min-height:0;position:relative;overflow:hidden;}
-  #m-page{
-    position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--page);
-    background-image:radial-gradient(var(--grid) 1.1px, transparent 1.1px);
-    background-size:22px 22px;background-position:10px 12px;
-  }
-  /* 底部居中、极轻的页码（空白页隐去；PDF 才显） */
-  #m-pageind{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);font:11px var(--mono);color:var(--mut);opacity:.0;}
+  /* ════ 内容区 ════ */
+  #m-canvas{flex:1;min-height:0;position:relative;overflow:hidden;transition:margin .12s ease;}
+  .surf{position:absolute;inset:0;display:none;}
+  body[data-mode="read"] #surf-read{display:block;}
+  body[data-mode="meet"] #surf-meet{display:block;}
+  body[data-mode="dev"]  #surf-dev{display:block;}
+  .rv{position:absolute;inset:0;display:none;}
+  body[data-read="new"]   #rv-new{display:block;}
+  body[data-read="book"]  #rv-new{display:block;} /* 书籍复用同一张可写画布（renderer 单画布），surfaceType=article 分流 */
+  body[data-read="books"] #rv-books{display:block;}
+  body[data-read="diary"] #rv-diary{display:block;}
+  body[data-read="open"]  #rv-open{display:block;}
 
-  /* AI 旁注：页边的等宽声音（无竖线、贴行下方）—— 示意位 */
-  .m-whisper{position:absolute;font:12px/1.6 var(--mono);color:#555;width:min(72%,240px);}
+  .paper{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--page);background-image:radial-gradient(var(--grid) 1.1px,transparent 1.1px);background-size:23px 23px;background-position:14px 16px;}
+  .pg{position:relative;min-height:100%;padding:54px 40px 96px 44px;}
+  .hw{font:400 30px/1.46 var(--hand);color:var(--ink-soft);letter-spacing:.2px;}
+  .hw+.hw{margin-top:2px;}
+  .hw.cn{font-family:var(--serif);font-weight:600;font-size:25px;line-height:1.5;}
+  .whisper{font:12.5px/1.62 var(--mono);color:var(--whisper);max-width:250px;margin:9px 0 0 6px;letter-spacing:.1px;}
+  .whisper .wq{color:var(--mut);}
+  .blk{margin-bottom:46px;}.blk:last-child{margin-bottom:0;}
+  .foot{position:absolute;left:0;right:0;bottom:0;height:30px;display:flex;align-items:center;justify-content:center;font:11px var(--mono);color:var(--mut);letter-spacing:.4px;pointer-events:none;background:linear-gradient(to top,var(--page) 55%,transparent);}
+  /* 新日记=接引擎的空白可写页（复用同名 id：page-layer/ink-layer/stage/stage-wrap/whisper-layer） */
+  #diary-bar{position:absolute;top:0;left:0;right:0;height:42px;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--hair);background:var(--page);z-index:4;}
+  #diary-title{font:600 15px var(--sans);color:var(--ink);outline:none;max-width:78%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  #diary-title:empty::before{content:"未命名";color:var(--mut2);}
+  #diary-title[data-auto="1"]{color:var(--mut);font-weight:500;}  /* 自动（待手写命名）态：淡一点 */
+  #diary-title{max-width:46%;}
+  #diary-bar .dsp{flex:1;}
+  .pgbtn{width:30px;height:30px;display:grid;place-items:center;border:none;background:transparent;color:var(--mut);border-radius:7px;cursor:pointer;padding:0;}
+  .pgbtn:active{background:#f1f1f1;}
+  .pgbtn svg{width:18px;height:18px;}
+  #pg-ind{font:11px var(--mono);color:var(--mut);min-width:30px;text-align:center;}
+  /* 写区=除边栏+标题外的整块，满铺到边、无框、无内边距 */
+  #stage-wrap{position:absolute;top:42px;left:0;right:0;bottom:0;overflow:hidden;background:var(--page);}
+  #stage{position:absolute;top:0;left:0;}
+  #page-layer,#ink-layer,#diary-lines{position:absolute;top:0;left:0;}
+  #page-layer{z-index:0;}
+  #diary-lines{z-index:1;width:100%;height:100%;pointer-events:none;background-image:repeating-linear-gradient(to bottom,transparent 0 29px,rgba(0,0,0,.05) 29px 30px);background-position:0 36px;}
+  body.lines-off #diary-lines{display:none;}
+  /* 书籍读书面（PDF）：无稿纸线、无「加一页」、标题=文件名（近黑、不淡） */
+  body[data-read="book"] #diary-lines{display:none;}
+  body[data-surface="article"] #diary-lines{display:none;} /* PDF（含会中打开的资料）一律不叠稿纸线 */
+  body[data-read="book"] #diary-title{color:var(--ink);font-weight:600;}
+  #ink-layer{z-index:2;touch-action:none;}
+  #whisper-layer{position:absolute;inset:42px 0 0;pointer-events:none;z-index:3;}
+  /* ── 重排阅读视图（#reader·黑白·AI 注内联段落下方·仅书籍态有切换钮）── */
+  #view-toggle{display:none;font:12px var(--sans);color:var(--ink);background:var(--page);border:1px solid var(--hair2);border-radius:7px;padding:4px 11px;cursor:pointer;}
+  #view-toggle:active{background:#f2f2f2;}
+  #view-toggle.on{background:#111;color:#fff;border-color:#111;}
+  body[data-read="book"] #view-toggle{display:inline-block;}
+  #reader{position:absolute;top:42px;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden;background:var(--page);padding:36px 24px 96px;touch-action:pan-y;z-index:1;}
+  #reader[hidden]{display:none;}
+  .reader-ink{position:absolute;left:0;top:0;pointer-events:none;z-index:2;}
+  .reader-page{position:relative;max-width:600px;margin:0 auto;}
+  .reader-col{font:16.5px/1.78 var(--serif);color:var(--ink);}
+  .reader-h{font:600 21px/1.4 var(--serif);margin:1.6em 0 .5em;letter-spacing:.2px;}
+  .reader-h:first-child{margin-top:0;}
+  .reader-h[data-level="1"]{font-size:25px;}
+  .reader-h[data-level="3"]{font-size:18px;}
+  .reader-p{margin:0 0 1.05em;text-align:left;}
+  .reader-list{margin:0 0 1.05em;padding-left:1.4em;}
+  .reader-list li{margin:0 0 .4em;}
+  .reader-note{font:12.5px/1.62 var(--mono);color:var(--whisper);margin:2px 0 18px;letter-spacing:.1px;}
+  .reader-mark-highlight{border-left:2px solid var(--ink);padding-left:9px;margin-left:-11px;}
+  .reader-fig{margin:1.3em 0;}
+  .reader-fig img{display:block;max-width:100%;height:auto;border:1px solid var(--hair);border-radius:6px;}
+  .reader-figcap{margin:.5em 0 0;font:12.5px/1.6 var(--mono);color:var(--mut);}
+  .reader-figcap[data-pending="1"]{color:var(--mut2);}
+  .reader-empty{max-width:560px;margin:48px auto;color:var(--mut2);font:14px/1.8 var(--serif);text-align:center;}
+  .reader-warn{max-width:560px;margin:0 auto 1.2em;padding:8px 12px;background:#f6f6f6;border-left:2px solid var(--mut2);color:var(--mut);font:12.5px/1.6 var(--sans);border-radius:0 6px 6px 0;}
+  /* AI 页边低语：等宽灰声音、无卡片框（whisper.ts 负责定位，这里只管观感） */
+  #whisper-layer .whisper{position:absolute;max-width:250px;font:12.5px/1.62 var(--mono);color:var(--whisper);letter-spacing:.1px;pointer-events:auto;}
+  #whisper-layer .whisper.error{color:var(--mut2);}
+  #whisper-layer .w-sentence{}
+  #whisper-layer .whisper-acts{display:flex;gap:13px;margin-top:5px;}
+  #whisper-layer .whisper-acts button{font:11px var(--sans);color:var(--mut);background:none;border:none;padding:0;cursor:pointer;}
+  #whisper-layer .whisper-acts button:active{color:var(--ink);}
+  .backbar{position:absolute;top:14px;left:14px;z-index:3;display:flex;align-items:center;gap:5px;font:12px var(--sans);color:var(--mut);cursor:pointer;}
+  .backbar svg{width:17px;height:17px;}
+
+  /* 列表/网格通用页头 */
+  .vhead{position:absolute;top:0;left:0;right:0;min-height:50px;display:flex;align-items:center;gap:9px;padding:10px 18px 8px;border-bottom:1px solid var(--hair);background:var(--page);z-index:2;}
+  .vhead h1{font:600 18px var(--sans);margin:0;}
+  .vhead .cnt{font:12px var(--mono);color:var(--mut);}
+  .vhead .sp{flex:1;}
+  .hbtn{font:12.5px var(--sans);color:var(--ink);background:var(--page);border:1px solid var(--hair2);border-radius:8px;padding:6px 11px;cursor:pointer;}
+  .hbtn.pri{background:#111;color:#fff;border-color:#111;}
+  .hbtn:active{background:#f2f2f2;}.hbtn.pri:active{background:#000;}
+  .vbody{position:absolute;top:50px;left:0;right:0;bottom:0;overflow-y:auto;padding:10px 18px 32px;}
+
+  /* 书籍卡片墙 */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .bcard{aspect-ratio:3/4;border:1px solid var(--hair);border-radius:10px;background:var(--page);padding:14px 13px;display:flex;flex-direction:column;cursor:pointer;position:relative;overflow:hidden;}
+  .bcard:active{background:#f7f7f7;}
+  .bcard .spine{position:absolute;left:0;top:0;bottom:0;width:4px;background:#ececec;}
+  .bcard .bt{font:600 14px/1.34 var(--serif);color:var(--ink);margin-left:4px;}
+  .bcard .bm{margin-top:auto;font:10.5px var(--mono);color:var(--mut);}
+  .bcard .tag{display:inline-block;margin-top:5px;font:10px var(--sans);color:var(--mut);border:1px solid var(--hair);border-radius:5px;padding:1px 5px;}
+  .bcard.imp{border-style:dashed;border-color:var(--hair2);align-items:center;justify-content:center;text-align:center;color:var(--mut);}
+  .bcard.imp .pl{width:30px;height:30px;border-radius:50%;border:1.6px solid var(--mut2);display:grid;place-items:center;margin-bottom:9px;}
+  .bcard.imp .pl svg{width:17px;height:17px;}
+  .bcard.imp .il{font:12.5px var(--sans);color:var(--mut);}
+  .bcard.imp .is{font:10.5px var(--mono);color:var(--mut2);margin-top:2px;}
+
+  /* 日记列表 */
+  .drow{display:flex;gap:14px;padding:15px 8px;border-bottom:1px solid var(--hair);cursor:pointer;}
+  .drow:active{background:#f7f7f7;}
+  .drow .dd{flex:0 0 46px;font:11px var(--mono);color:var(--mut);padding-top:3px;line-height:1.5;}
+  .drow .dd .wk{display:block;color:var(--mut2);font-size:10px;}
+  .drow .dc{flex:1;min-width:0;}
+  .drow .dc .dt{font:14.5px/1.45 var(--sans);color:var(--ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  .drow .dc .dm{margin-top:5px;font:11px var(--mono);color:var(--mut);}
+  .drow .ins{flex:0 0 auto;align-self:center;font:11px var(--mono);color:var(--mut);display:flex;align-items:center;gap:3px;}
+  .drow .ins svg{width:12px;height:12px;}
+  .drow .drow-del{flex:0 0 auto;align-self:center;width:32px;height:32px;display:grid;place-items:center;border:none;background:none;color:var(--mut2);border-radius:8px;cursor:pointer;}
+  .drow .drow-del:active{background:#eee;color:var(--ink);}
+  .drow .drow-del svg{width:17px;height:17px;}
+
+  /* ════ 会议 ════ */
+  .mview{position:absolute;inset:0;display:none;}
+  body[data-mtg="home"]   #mv-home{display:block;}
+  body[data-mtg="ws"]     #mv-ws{display:block;}
+  body[data-mtg="detail"] #mv-detail{display:block;}
+  body[data-mtg="live"]   #mv-live{display:block;}
+  .mtop{position:absolute;top:0;left:0;right:0;min-height:48px;display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--hair);background:var(--page);z-index:3;}
+  .mtop .bk{width:26px;height:26px;display:grid;place-items:center;color:var(--ink);cursor:pointer;margin-left:-6px;}
+  .mtop .bk svg{width:20px;height:20px;}
+  .mtop .ti{font:600 15px var(--sans);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .mtop .sp{flex:1;}
+  .mbody{position:absolute;top:48px;left:0;right:0;bottom:0;overflow-y:auto;padding:6px 0 30px;}
+  .msec{padding:14px 18px;border-bottom:1px solid var(--hair);}
+  .msec:last-child{border-bottom:none;}
+  .msec-h{display:flex;align-items:baseline;gap:8px;margin-bottom:11px;}
+  .msec-h .mt{font:600 13px var(--sans);color:var(--ink);}
+  .msec-h .mb{font:10.5px var(--mono);color:var(--mut2);}
+  /* 状态徽章（黑白：实点=进行中 / 空点=待开始 / 淡=已结束） */
+  .st{display:inline-flex;align-items:center;gap:5px;font:10.5px var(--sans);padding:1px 8px 1px 6px;border-radius:6px;border:1px solid var(--hair2);color:var(--mut);}
+  .st .d{width:6px;height:6px;border-radius:50%;border:1.4px solid var(--mut);}
+  .st.live{border-color:#111;color:#111;font-weight:600;}.st.live .d{background:#111;border-color:#111;}
+  .st.up .d{background:transparent;}
+  .st.end{color:var(--mut2);border-color:var(--hair);}.st.end .d{border-color:var(--mut2);}
+  /* 飞书横向日程时间线 */
+  .tl{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:2px 0 10px;margin:0 -2px;}
+  .tl::-webkit-scrollbar{height:0;}
+  .tl-now{flex:0 0 auto;display:flex;flex-direction:column;justify-content:center;padding-right:14px;border-right:1px dashed var(--hair2);margin-right:14px;}
+  .tl-now .d{width:9px;height:9px;border-radius:50%;background:#111;margin-bottom:6px;}
+  .tl-now .l{font:10px var(--mono);color:var(--ink);line-height:1.35;}
+  .tl-card{flex:0 0 132px;border:1px solid var(--hair);border-radius:10px;padding:9px 11px;margin-right:10px;}
+  .tl-card .d{font:10px var(--mono);color:var(--mut);}
+  .tl-card .t{font:600 15px var(--sans);margin:2px 0 3px;}
+  .tl-card .n{font:12px/1.3 var(--sans);color:var(--ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:31px;}
+  .tl-card .bd{display:inline-block;margin-top:6px;font:9.5px var(--sans);color:var(--mut);border:1px solid var(--hair);border-radius:5px;padding:0 5px;}
+  .tl-more{flex:0 0 auto;align-self:center;font:11px var(--mono);color:var(--mut);padding:0 8px;}
+  .fs-ok{margin-left:auto;font:10.5px var(--mono);color:var(--mut);display:flex;align-items:center;gap:5px;}
+  .fs-ok .d{width:6px;height:6px;border-radius:50%;background:#111;}
+  /* 会议行 */
+  .mrow{display:flex;align-items:center;gap:11px;width:100%;text-align:left;background:var(--page);border:none;border-bottom:1px solid var(--hair);padding:13px 2px;cursor:pointer;}
+  .mrow:last-child{border-bottom:none;}.mrow:active{background:#f7f7f7;}
+  .mrow .mc{flex:1;min-width:0;display:flex;flex-direction:column;}
+  .mrow .mc .mt{font:14.5px var(--sans);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .mrow .mc .mm{font:11px var(--mono);color:var(--mut);margin-top:3px;}
+  .mrow .go{color:var(--mut2);}.mrow .go svg{width:17px;height:17px;}
+  /* 群聊书架 */
+  .ws-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .ws-card{border:1px solid var(--hair);border-radius:11px;padding:13px 13px 12px;cursor:pointer;}
+  .ws-card:active{background:#f7f7f7;}
+  .ws-card .ico{width:30px;height:30px;border-radius:8px;border:1px solid var(--hair);display:grid;place-items:center;color:var(--mut);margin-bottom:9px;}
+  .ws-card .ico svg{width:17px;height:17px;}
+  .ws-card .wn{font:600 14px var(--sans);display:flex;align-items:center;gap:6px;}
+  .ws-card .wn .fs{font:9.5px var(--sans);font-weight:400;color:var(--mut);border:1px solid var(--hair);border-radius:5px;padding:0 5px;}
+  .ws-card .wm{font:11px var(--mono);color:var(--mut);margin-top:4px;}
+  /* 参会人 chips */
+  .chips{display:flex;flex-wrap:wrap;gap:7px;}
+  .chip{font:12px var(--sans);color:var(--ink);background:#f4f4f4;border-radius:14px;padding:4px 11px;}
+  /* 群动态 feed */
+  .feed{display:flex;flex-direction:column;}
+  .fitem{display:flex;gap:9px;padding:9px 0;border-bottom:1px solid var(--hair);font-size:13px;}
+  .fitem:last-child{border-bottom:none;}
+  .fitem .fs-n{flex:0 0 56px;font:600 12px var(--sans);color:var(--ink);}
+  .fitem .fb{flex:1;min-width:0;color:var(--ink);line-height:1.45;}
+  .fitem .fb.mat{color:var(--mut);}
+  .fitem .matbadge{display:inline-block;font:9.5px var(--sans);color:var(--mut);border:1px solid var(--hair2);border-radius:5px;padding:0 5px;margin-left:4px;}
+  .fitem .ft{flex:0 0 auto;font:10px var(--mono);color:var(--mut2);}
+  /* 详情页 */
+  .dact{display:flex;gap:8px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--hair);}
+  .matcard{display:flex;align-items:center;gap:11px;padding:11px 2px;border-bottom:1px solid var(--hair);cursor:pointer;}
+  .matcard:last-child{border-bottom:none;}.matcard:active{background:#f7f7f7;}
+  .matcard .ic{width:30px;height:30px;flex:0 0 auto;display:grid;place-items:center;border:1px solid var(--hair);border-radius:8px;color:var(--mut);}
+  .matcard .ic svg{width:16px;height:16px;}
+  .matcard .nm{font:13.5px var(--sans);color:var(--ink);}
+  .matcard .mt{font:10.5px var(--mono);color:var(--mut);margin-top:2px;}
+  .empty{font:12.5px/1.7 var(--sans);color:var(--mut2);padding:6px 2px;white-space:pre-line;}
+  .summary{background:#f6f6f6;border-radius:9px;padding:12px 13px;font:12.5px/1.7 var(--mono);color:var(--whisper);white-space:pre-line;}
+  /* 会中工作台 */
+  #mtg-clk{margin-left:auto;font:12px var(--mono);display:flex;align-items:center;gap:6px;}
+  #mtg-clk .dot{width:7px;height:7px;border-radius:50%;background:#111;}
+  #mtg-clk .dot.off{background:transparent;border:1px solid var(--mut2);}
+  .mpg{position:relative;min-height:100%;padding:26px 36px 90px 0;}
+  .mspine{position:absolute;top:0;bottom:0;left:54px;width:1px;background:var(--hair2);}
+  .mblk{position:relative;display:grid;grid-template-columns:54px 1fr;gap:18px;margin-bottom:34px;}
+  .mblk .t{font:10.5px var(--mono);color:var(--mut);text-align:right;padding-top:9px;padding-right:8px;}
+  .mblk .tk{position:absolute;left:51px;top:13px;width:7px;height:7px;border-radius:50%;background:var(--page);border:1.5px solid var(--mut);}
+  .mblk .c .src{font:10px var(--mono);color:var(--mut2);margin-bottom:5px;letter-spacing:.3px;}
+  .mblk .c .hw{font-size:27px;}
+  #mtg-chip{position:absolute;left:0;right:0;bottom:0;height:34px;display:flex;align-items:center;justify-content:center;font:11px var(--mono);color:var(--mut);background:linear-gradient(to top,var(--page) 60%,transparent);}
+  #mtg-side{position:absolute;top:48px;right:0;bottom:0;width:212px;transform:translateX(180px);transition:transform .14s ease;background:var(--page);border-left:1px solid var(--hair);z-index:4;display:flex;flex-direction:column;}
+  body.side-open #mtg-side{transform:translateX(0);}
+  #mtg-side .tab{position:absolute;left:-26px;top:50%;transform:translateY(-50%) rotate(180deg);writing-mode:vertical-rl;width:26px;padding:12px 4px;background:var(--page);border:1px solid var(--hair);border-right:none;border-radius:9px 0 0 9px;font:11px var(--sans);color:var(--mut);letter-spacing:2px;cursor:pointer;}
+  #mtg-side .shd{padding:12px 13px 9px;font:600 12px var(--sans);border-bottom:1px solid var(--hair);}
+  #mtg-side .sls{flex:1;overflow-y:auto;padding:8px;}
+  .scard{border:1px solid var(--hair);border-radius:9px;padding:9px 10px;margin-bottom:8px;cursor:pointer;}
+  .scard.blank{border-style:dashed;color:var(--mut);text-align:center;font:12px var(--sans);}
+  .scard .fn{font:12.5px var(--sans);display:flex;align-items:center;gap:6px;}
+  .scard .fn svg{width:14px;height:14px;color:var(--mut);flex:0 0 auto;}
+  .scard .fm{font:10px var(--mono);color:var(--mut);margin-top:3px;}
+  /* 会中白板：可写画布搬进这里（renderer 单画布·物理搬动）；时间脊为可切显隐的覆盖层 */
+  #mtg-stage-host{position:absolute;top:48px;left:0;right:0;bottom:0;overflow:hidden;background:var(--page);z-index:1;}
+  #mtg-stage-host #stage-wrap{top:0;} /* 搬进会中：填满 host（覆盖日记态 top:42px）*/
+  #mtg-spine{position:absolute;top:48px;left:0;right:0;bottom:0;overflow-y:auto;background:var(--page);z-index:3;}
+  #mtg-chip{cursor:pointer;z-index:6;}
+
+  /* ════ dev 三页 ════ */
+  .dv{position:absolute;inset:0;display:none;}
+  body[data-dev="chat"] #dv-chat,body[data-dev="hmp"] #dv-hmp,body[data-dev="set"] #dv-set{display:block;}
+  .dhead{position:absolute;top:0;left:0;right:0;min-height:50px;display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--hair);background:var(--page);z-index:2;flex-wrap:wrap;}
+  .dhead h1{font:600 17px var(--sans);margin:0;}
+  .dhead .sp{flex:1;}
+  .dsel{font:12px var(--sans);color:var(--ink);border:1px solid var(--hair2);border-radius:7px;padding:5px 9px;display:flex;align-items:center;gap:6px;cursor:pointer;}
+  .dsel svg{width:11px;height:11px;color:var(--mut);}
+  .dic{width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--hair2);border-radius:7px;background:var(--page);color:var(--mut);cursor:pointer;}
+  .dic svg{width:15px;height:15px;}
+  .dbody{position:absolute;top:50px;left:0;right:0;bottom:0;overflow-y:auto;padding:12px 16px 30px;}
+  .dnote{font:11.5px/1.5 var(--mono);color:var(--mut2);margin:0 0 12px;}
+  .seg{display:inline-flex;border:1px solid var(--hair2);border-radius:8px;overflow:hidden;}
+  .seg button{font:12px var(--sans);padding:5px 11px;background:var(--page);border:none;color:var(--mut);cursor:pointer;}
+  .seg button.on{background:var(--sel);color:var(--ink);box-shadow:inset 0 0 0 1px var(--sel-line);}
+  /* AI 会话 */
+  .grp{border:1px solid var(--hair);border-radius:10px;margin-bottom:10px;overflow:hidden;}
+  .grp>summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:8px;padding:11px 13px;font-size:13px;}
+  .grp>summary::-webkit-details-marker{display:none;}
+  .grp>summary::before{content:"▸";color:var(--mut2);font-size:10px;}
+  .grp[open]>summary::before{content:"▾";}
+  .grp .gc{font-weight:600;}
+  .grp .gm{font:11px var(--mono);color:var(--mut);}
+  .grp .gp{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
+  .gbody{padding:2px 13px 10px;border-top:1px solid var(--hair);}
+  .turn{padding:12px 0;border-bottom:1px solid var(--hair);}
+  .turn:last-child{border-bottom:none;}
+  .tlab{font:10.5px var(--mono);color:var(--mut);display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:7px;}
+  .tlab .tt{margin-left:auto;}
+  .trg{font:10px var(--sans);color:var(--ink);border:1px solid var(--hair2);border-radius:5px;padding:0 6px;}
+  .trg.hw{border-color:#111;font-weight:600;}
+  .ucard{background:#f6f6f6;border-radius:9px;padding:10px 12px;font-size:13.5px;color:var(--ink);margin-bottom:8px;}
+  .abub{background:var(--page);border:1px solid var(--hair);border-radius:9px;padding:11px 13px;font:13.5px/1.55 var(--sans);}
+  .think{margin-top:8px;}
+  .think>summary{font:11px var(--mono);color:var(--mut);cursor:pointer;list-style:none;}
+  .think>summary::-webkit-details-marker{display:none;}
+  .think>summary::before{content:"▸ ";}.think[open]>summary::before{content:"▾ ";}
+  .think>div{font:12px/1.55 var(--sans);color:var(--whisper);margin-top:6px;padding-left:10px;border-left:2px solid var(--hair);}
+  .ameta{margin-top:8px;font:10.5px var(--mono);color:var(--mut2);}
+  .turn.folded{font:12.5px/1.5 var(--mono);color:var(--mut);border:1px dashed var(--hair2);border-radius:8px;padding:12px;background:#fafafa;}
+  /* HMP 卡 */
+  .hcard{border:1px solid var(--hair);border-radius:10px;margin-bottom:12px;overflow:hidden;}
+  .hch{display:flex;align-items:center;gap:7px;padding:9px 11px;border-bottom:1px solid var(--hair);flex-wrap:wrap;}
+  .hch .mode{font:10.5px var(--sans);border:1px solid var(--hair2);border-radius:5px;padding:1px 7px;color:var(--mut);}
+  .hch .mode.anchor{border-color:#111;color:#111;font-weight:600;}
+  .hch .act{font:12.5px var(--sans);color:var(--ink);}
+  .hch .feat{font:10.5px var(--mono);color:var(--mut);}
+  .hch .hm{margin-left:auto;font:10px var(--mono);color:var(--mut2);}
+  .hcb{display:flex;gap:11px;padding:11px;}
+  .himg{flex:0 0 74px;height:74px;border:1px dashed var(--hair2);border-radius:7px;display:grid;place-items:center;font:9.5px var(--mono);color:var(--mut2);}
+  .hf{flex:1;font:12px/1.75 var(--sans);min-width:0;}
+  .hf b{font-weight:600;color:var(--mut);font-size:11px;margin-right:5px;}
+  .hf .lk{color:var(--ink);text-decoration:underline;text-decoration-color:var(--mut2);}
+  .otbl{width:100%;border-collapse:collapse;font:11px var(--mono);}
+  .otbl th{text-align:left;color:var(--mut);font-weight:600;border-bottom:1px solid var(--hair2);padding:6px 6px;}
+  .otbl td{border-bottom:1px solid var(--hair);padding:7px 6px;color:var(--ink);vertical-align:top;}
+  .otbl .mc{font:10px var(--sans);border:1px solid var(--hair2);border-radius:4px;padding:0 5px;}
+  /* 设置 */
+  .sgrp-h{font:600 12px var(--sans);color:var(--mut);letter-spacing:.4px;margin:18px 0 2px;padding-bottom:7px;border-bottom:1px solid var(--hair2);}
+  .sgrp-h:first-child{margin-top:0;}
+  .srow{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--hair);}
+  .srow .sl{flex:1;min-width:0;}
+  .srow .sn{font-size:13.5px;color:var(--ink);display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+  .srow .sd{font:10px var(--mono);color:var(--mut2);margin-top:3px;}
+  .sbadge{font:9px var(--sans);border-radius:5px;padding:1px 6px;border:1px solid var(--hair2);color:var(--mut);white-space:nowrap;}
+  .sbadge.eff{background:#111;color:#fff;border-color:#111;}
+  .sbadge.weak{color:var(--mut2);}
+  select.sctl,input.sctl{font:12px var(--sans);border:1px solid var(--hair2);border-radius:7px;padding:5px 8px;background:var(--page);color:var(--ink);max-width:148px;}
+  input[type="checkbox"].sck{width:19px;height:19px;accent-color:#111;flex:0 0 auto;}
+  input[type="number"].sctl{width:62px;max-width:62px;}
+  .sfold{border-top:1px solid var(--hair2);}
+  .sfold>summary{font:12.5px var(--sans);color:var(--mut);cursor:pointer;padding:13px 0;list-style:none;}
+  .sfold>summary::-webkit-details-marker{display:none;}
+  .sfold>summary::before{content:"▸ ";color:var(--mut2);}
+  .sfold[open]>summary::before{content:"▾ ";}
+  .diag .dl{display:flex;justify-content:space-between;gap:10px;font:11.5px var(--mono);color:var(--whisper);padding:7px 0;border-bottom:1px solid var(--hair);}
+  .diag .dl b{color:var(--mut);font-weight:600;}
+  .diag .dl a{color:var(--ink);}
+
+  /* 应用内浮层 sheet（替原生 prompt/alert，src/mobile/sheet.ts 动态挂载）*/
+  .msheet-scrim{position:fixed;inset:0;background:rgba(20,20,20,.16);z-index:40;display:flex;align-items:flex-end;justify-content:center;opacity:0;transition:opacity .16s ease;}
+  .msheet-scrim.open{opacity:1;}
+  .msheet{width:100%;max-width:540px;background:var(--page);border-top:1px solid var(--hair2);border-radius:16px 16px 0 0;box-shadow:0 -10px 36px rgba(0,0,0,.12);padding:8px 18px max(18px,env(safe-area-inset-bottom)) 18px;transform:translateY(16px);transition:transform .16s ease;max-height:86vh;display:flex;flex-direction:column;}
+  .msheet-scrim.open .msheet{transform:translateY(0);}
+  .msheet-grip{width:36px;height:4px;border-radius:2px;background:var(--hair2);margin:2px auto 12px;}
+  .msheet-h{font:600 15px var(--sans);color:var(--ink);margin-bottom:13px;}
+  .msheet-bd{overflow-y:auto;}
+  .msheet-msg{font:13.5px/1.6 var(--sans);color:var(--ink-soft);white-space:pre-wrap;margin:0 0 4px;}
+  .msheet-in{width:100%;box-sizing:border-box;font:15px var(--sans);color:var(--ink);background:var(--page);border:1px solid var(--hair2);border-radius:9px;padding:11px 12px;outline:none;}
+  .msheet-in:focus{border-color:var(--ink);}
+  .msheet-field{display:block;margin-bottom:13px;}
+  .msheet-lab{display:block;font:11px var(--mono);color:var(--mut);margin-bottom:6px;}
+  .msheet-picks{display:flex;flex-direction:column;}
+  .msheet-pick{display:flex;align-items:center;gap:11px;padding:11px 2px;border-bottom:1px solid var(--hair);cursor:pointer;}
+  .msheet-pick:last-child{border-bottom:none;}
+  .msheet-box{flex:0 0 auto;width:20px;height:20px;border:1.5px solid var(--hair2);border-radius:6px;position:relative;}
+  .msheet-pick.on .msheet-box{background:#111;border-color:#111;}
+  .msheet-pick.on .msheet-box::after{content:"";position:absolute;left:6px;top:2px;width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);}
+  .msheet-pl{min-width:0;display:flex;flex-direction:column;}
+  .msheet-pt{font:14px var(--sans);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .msheet-ps{font:10.5px var(--mono);color:var(--mut);margin-top:2px;}
+  .msheet-ft{display:flex;gap:10px;justify-content:flex-end;padding-top:14px;margin-top:4px;}
+  .msheet-ft .hbtn{padding:9px 18px;font:13.5px var(--sans);}
+
+  /* 文件浏览器 */
+  .scrim{position:fixed;inset:0;background:rgba(20,20,20,.16);display:none;z-index:20;}
+  body.files-open #scrim-files{display:block;}
+  #files{position:fixed;inset:24px 18px;background:var(--page);border:1px solid var(--hair);border-radius:14px;box-shadow:0 16px 44px rgba(0,0,0,.16);display:none;flex-direction:column;z-index:21;overflow:hidden;}
+  body.files-open #files{display:flex;}
+  #files .fh{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--hair);}
+  #files .fh .ti{font:600 15px var(--sans);}
+  #files .fh .x{margin-left:auto;width:28px;height:28px;display:grid;place-items:center;border-radius:8px;color:var(--mut);cursor:pointer;}
+  #files .crumb{padding:8px 16px;font:11px var(--mono);color:var(--mut);border-bottom:1px solid var(--hair);}
+  #files .fls{flex:1;overflow-y:auto;padding:6px;}
+  .frow{display:flex;align-items:center;gap:13px;padding:13px 12px;border-radius:9px;cursor:pointer;}
+  .frow:active{background:#f5f5f5;}
+  .frow .ic{width:30px;height:30px;flex:0 0 auto;display:grid;place-items:center;color:var(--ink);border:1px solid var(--hair);border-radius:8px;}
+  .frow .ic svg{width:16px;height:16px;}
+  .frow.dir .ic{color:var(--mut);}
+  .frow .nm{font:14px var(--sans);}
+  .frow .mt{font:11px var(--mono);color:var(--mut);margin-top:2px;}
+  .frow .go{margin-left:auto;color:var(--mut2);}.frow .go svg{width:16px;height:16px;}
+
+  /* AI 洞察抽屉（#rl-ai 拉出·复用 surface/insight-panel.ts 的 .hist 卡）*/
+  #m-insight{position:fixed;top:0;right:0;bottom:0;width:300px;max-width:84vw;background:var(--page);border-left:1px solid var(--hair);transform:translateX(100%);transition:transform .14s ease;z-index:22;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.06);}
+  body.insight-open #m-insight{transform:translateX(0);}
+  body.insight-open #scrim-insight{display:block;}
+  #m-insight .ih{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid var(--hair);}
+  #m-insight .ih h2{font:600 15px var(--sans);margin:0;}
+  #m-insight .ih .c{font:11px var(--mono);color:var(--mut);}
+  #m-insight .ih .x{margin-left:auto;width:28px;height:28px;display:grid;place-items:center;border-radius:8px;color:var(--mut);cursor:pointer;}
+  #m-insight .ih .x svg{width:18px;height:18px;}
+  #m-cards{flex:1;overflow-y:auto;padding:12px 14px;}
+  #m-panel-foot{padding:11px 16px;border-top:1px solid var(--hair);font:11px var(--mono);color:var(--mut);min-height:14px;}
+  .hist{border:1px solid var(--hair);border-radius:9px;padding:10px 12px;margin-bottom:9px;}
+  .hist[data-state="dismissed"]{opacity:.45;}
+  .hist.error{border-color:var(--hair2);}
+  .hist-tag{display:inline-block;font:10px var(--sans);color:var(--mut);border:1px solid var(--hair2);border-radius:5px;padding:0 6px;margin-bottom:6px;}
+  .hist-body{font:13px/1.55 var(--sans);color:var(--ink);}
+  .hist-page{margin-top:6px;font:10px var(--mono);color:var(--mut2);}
+  .empty-hint{color:var(--mut2);font:13px/1.6 var(--sans);padding:22px 4px;}
 </style>
 </head>
-<body>
+<body class="eink-shell" data-mode="read" data-read="diary" data-mtg="home" data-dev="chat">
 <div id="m-app">
 
+  <!-- ════ 导航脊 ════ -->
   <nav id="m-rail">
-    <button class="rl-btn dim" id="rl-menu" aria-label="菜单 / 模式 / 笔记本">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-    </button>
-    <div class="rl-sep"></div>
-
-    <button class="rl-btn on" data-tool aria-label="钢笔">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg>
-    </button>
-    <button class="rl-btn" data-tool aria-label="高亮">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l-1 4h8M8.5 14.5l7-7 3 3-7 7h-3v-3z"/><path d="M3 21h18" opacity=".4"/></svg>
-    </button>
-    <button class="rl-btn" data-tool aria-label="橡皮">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16l8.5-8.5a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8L12 18H8l-2-2z"/><path d="M5 21h14" opacity=".4"/></svg>
-    </button>
-    <button class="rl-btn" data-tool aria-label="手型 / 拖动">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-1.5a4 4 0 0 1-3-1.4L5 16.5a1.5 1.5 0 0 1 2.3-2L8 15.3"/></svg>
-    </button>
+    <div class="nav">
+      <div class="rl-item cur"><button class="rl-btn on" data-mode="read" aria-label="阅读"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.6C10.4 5.6 7.8 5 4 5v13c3.8 0 6.4.6 8 1.6 1.6-1 4.2-1.6 8-1.6V5c-3.8 0-6.4.6-8 1.6z"/><path d="M12 6.6V19.6"/></svg></button><span class="rl-lab">阅读</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-mode="meet" aria-label="会议"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.1"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15.2 5.3a3.1 3.1 0 0 1 0 5.4"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg></button><span class="rl-lab">会议</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-mode="dev" aria-label="dev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 8.5 5 12l3.5 3.5"/><path d="M15.5 8.5 19 12l-3.5 3.5"/><path d="M13.5 6l-3 12"/></svg></button><span class="rl-lab">dev</span></div>
+    </div>
 
     <div class="rl-sep"></div>
-    <button class="rl-btn dim" aria-label="撤销">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 6L3 10l4 4"/><path d="M3 10h11a6 6 0 1 1 0 12h-4"/></svg>
-    </button>
+
+    <!-- 阅读子导航 -->
+    <div class="sub" id="read-sub">
+      <div class="rl-item"><button class="rl-btn dim" data-read="new" aria-label="新日记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h9l5 5v11H5z"/><path d="M14 4v5h5"/><path d="M11.5 12.5v4M9.5 14.5h4"/></svg></button><span class="rl-lab">新日记</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-read="books" aria-label="书籍"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H18a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H6.5A1.5 1.5 0 0 1 5 18.5z"/><path d="M5 17.5A1.5 1.5 0 0 1 6.5 16H19"/></svg></button><span class="rl-lab">书籍</span></div>
+      <div class="rl-item cur"><button class="rl-btn on" data-read="diary" aria-label="日记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></button><span class="rl-lab">日记</span></div>
+    </div>
+
+    <!-- dev 子导航 -->
+    <div class="sub" id="dev-sub">
+      <div class="rl-item cur"><button class="rl-btn on" data-dev="chat" aria-label="AI会话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-4 3z"/></svg></button><span class="rl-lab">会话</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-dev="hmp" aria-label="采集取证"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg></button><span class="rl-lab">取证</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-dev="set" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/></svg></button><span class="rl-lab">设置</span></div>
+    </div>
+
+    <!-- 工具收纳格子 -->
+    <div id="tools">
+      <button class="rl-btn on" id="tools-toggle" aria-label="工具">
+        <svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <div id="tools-list">
+        <button class="rl-btn on" data-tool="pen" aria-label="钢笔"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg></button>
+        <button class="rl-btn" data-tool="hi" aria-label="高亮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l-1 4h8M8.5 14.5l7-7 3 3-7 7h-3v-3z"/><path d="M3 21h18" opacity=".4"/></svg></button>
+        <button class="rl-btn" data-tool="er" aria-label="橡皮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16l8.5-8.5a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8L12 18H8l-2-2z"/><path d="M5 21h14" opacity=".4"/></svg></button>
+        <button class="rl-btn" data-tool="hand" aria-label="手型"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-1.5a4 4 0 0 1-3-1.4L5 16.5a1.5 1.5 0 0 1 2.3-2L8 15.3"/></svg></button>
+        <div class="rl-sep"></div>
+        <button class="rl-btn dim" data-act="undo" aria-label="撤销"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 6L3 10l4 4"/><path d="M3 10h11a6 6 0 1 1 0 12h-4"/></svg></button>
+      </div>
+    </div>
 
     <div class="rl-spacer"></div>
-
-    <button class="rl-btn dim" aria-label="AI 洞察">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>
-    </button>
-    <button class="rl-btn dim" id="rl-collapse" aria-label="收起工具栏">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
-    </button>
+    <button class="rl-btn dim" id="rl-ai" aria-label="AI 洞察"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg></button>
+    <button class="rl-btn dim" id="rl-collapse" aria-label="收起导航脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
   </nav>
+  <div id="m-tab" aria-label="展开导航脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
 
-  <div id="m-tab" aria-label="展开工具栏">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
-  </div>
-
+  <!-- ════ 内容区 ════ -->
   <main id="m-canvas">
-    <div id="m-page"></div>
-    <div id="m-pageind">1 / 1</div>
-  </main>
 
+    <!-- 阅读 -->
+    <section class="surf" id="surf-read">
+      <div class="rv" id="rv-new">
+        <div id="diary-bar">
+          <span id="diary-title" contenteditable="true" spellcheck="false">未命名</span>
+          <span class="dsp"></span>
+          <button id="view-toggle" class="vt" aria-label="重排/原版">重排</button>
+          <button id="pg-prev" class="pgbtn" aria-label="上一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+          <span id="pg-ind">1/1</span>
+          <button id="pg-next" class="pgbtn" aria-label="下一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+        </div>
+        <div id="stage-wrap"><div id="stage"><canvas id="page-layer"></canvas><div id="diary-lines"></div><canvas id="ink-layer"></canvas></div></div>
+        <div id="whisper-layer"></div>
+        <div id="reader" hidden></div>
+      </div>
+
+      <div class="rv" id="rv-books">
+        <div class="vhead"><h1>书籍</h1><span class="cnt">4 本</span></div>
+        <div class="vbody"><div class="grid">
+          <div class="bcard"><span class="spine"></span><div class="bt">注意力与工作记忆</div><div class="bm">PDF · 248 页<br/>读到 62 页</div></div>
+          <div class="bcard"><span class="spine"></span><div class="bt">RK3588 技术手册</div><div class="bm">PDF · 1140 页<br/>读到 30 页</div></div>
+          <div class="bcard"><span class="spine"></span><div class="bt">端云协同 v3</div><span class="tag">HTML→PDF</span><div class="bm">9 页 · 未开始</div></div>
+          <div class="bcard"><span class="spine"></span><div class="bt">深度工作</div><div class="bm">PDF · 302 页<br/>读完</div></div>
+          <div class="bcard imp" id="imp-card"><div class="pl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg></div><div class="il">导入文件</div><div class="is">PDF · HTML · 图片</div></div>
+        </div></div>
+      </div>
+
+      <div class="rv" id="rv-diary">
+        <div class="vhead"><h1>日记</h1><span class="cnt">5 篇</span></div>
+        <div class="vbody">
+          <div class="drow" data-open><div class="dd">6.26<span class="wk">周四</span></div><div class="dc"><div class="dt">Why does attention collapse under load? — 注意力 ≈ 带宽，不是开关</div><div class="dm">3 段 · 12 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>3</div></div>
+          <div class="drow" data-open><div class="dd">6.25<span class="wk">周三</span></div><div class="dc"><div class="dt">把识别当"手写 vs 画"的类型分类器，几何只判 markup</div><div class="dm">2 段 · 7 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>2</div></div>
+          <div class="drow" data-open><div class="dd">6.24<span class="wk">周二</span></div><div class="dc"><div class="dt">chunk before you try to hold. 先分块，再去记。</div><div class="dm">1 段 · 4 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>1</div></div>
+          <div class="drow" data-open><div class="dd">6.22<span class="wk">周日</span></div><div class="dc"><div class="dt">时间脊几乎白捡——每笔本就带 abs_timestamp</div><div class="dm">2 段 · 9 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>2</div></div>
+          <div class="drow" data-open><div class="dd">6.20<span class="wk">周五</span></div><div class="dc"><div class="dt">surface 要从 "PDF 页" 上抬成 "可标注的表面"</div><div class="dm">1 段 · 5 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>1</div></div>
+        </div>
+      </div>
+
+      <div class="rv" id="rv-open"><div class="paper"><div class="pg">
+        <div class="backbar" id="open-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>日记</div>
+        <div class="blk" style="margin-top:18px"><div class="hw">Why does attention</div><div class="hw">collapse under load?</div><div class="whisper">A working-memory limit — when items exceed ~4 chunks, retrieval competes and accuracy drops. You circled <span class="wq">"load"</span> twice; want the Cowan vs. Miller framing?</div></div>
+        <div class="blk"><div class="hw cn">注意力 ≈ 带宽，不是开关</div><div class="whisper">把它当一条会被占满的通道，而不是"集中/不集中"。下一页可以试 dual-task 那张图。</div></div>
+        <div class="blk"><div class="hw">— so: chunk before you</div><div class="hw">try to hold.</div></div>
+      </div><div class="foot">日记 · 6.26　·　第 3 页</div></div></div>
+    </section>
+
+    <!-- ════ 会议 ════ -->
+    <section class="surf" id="surf-meet">
+
+      <!-- home -->
+      <div class="mview" id="mv-home">
+        <div class="vhead"><h1>会议</h1><span class="cnt">2 群 · 5 场</span><span class="sp"></span><button class="hbtn pri">+ 新建群聊</button></div>
+        <div class="mbody">
+          <section class="msec">
+            <div class="msec-h"><span class="mt">会议日程</span><span class="mb">飞书 · 待开始 / 进行中</span><span class="fs-ok"><span class="d"></span>飞书已连 · 14 条</span></div>
+            <div class="tl">
+              <div class="tl-now"><span class="d"></span><span class="l">今天<br>6.26 周四</span></div>
+              <div class="tl-card"><div class="d">6.26 今天</div><div class="t">15:00</div><div class="n">项目同步周会</div><span class="bd">每周</span></div>
+              <div class="tl-card"><div class="d">6.27 明天</div><div class="t">10:00</div><div class="n">端侧 OCR 方案评审</div><span class="bd">单次</span></div>
+              <div class="tl-card"><div class="d">6.28 周六</div><div class="t">14:00</div><div class="n">硬件选型终审</div><span class="bd">单次</span></div>
+              <div class="tl-card"><div class="d">7.01 周二</div><div class="t">11:00</div><div class="n">季度复盘</div><span class="bd">每月</span></div>
+              <div class="tl-more">还有 3 场 ›</div>
+            </div>
+            <button class="mrow" data-detail><span class="st live"><span class="d"></span>进行中</span><span class="mc"><span class="mt">项目同步周会</span><span class="mm">15:00 · Nova 群</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
+            <button class="mrow" data-detail><span class="st up"><span class="d"></span>待开始</span><span class="mc"><span class="mt">端侧 OCR 方案评审</span><span class="mm">明天 10:00 · Nova 群</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
+          </section>
+
+          <section class="msec">
+            <div class="msec-h"><span class="mt">群聊书架</span><span class="mb">以群聊为单位</span></div>
+            <div class="ws-grid">
+              <div class="ws-card" data-ws><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15 5.2a3 3 0 0 1 0 5.6"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg></div><div class="wn">Nova <span class="fs">飞书</span></div><div class="wm">3 场会议</div></div>
+              <div class="ws-card" data-ws><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15 5.2a3 3 0 0 1 0 5.6"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg></div><div class="wn">DeskHub</div><div class="wm">2 场会议</div></div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- workspace -->
+      <div class="mview" id="mv-ws">
+        <div class="mtop"><span class="bk" data-back="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti">Nova</span><span class="sp"></span><button class="hbtn">+ 新建会议</button></div>
+        <div class="mbody">
+          <section class="msec">
+            <div class="msec-h"><span class="mt">参会人</span><span class="mb">10 人 · 飞书群成员</span></div>
+            <div class="chips"><span class="chip">宋健</span><span class="chip">王辰炜</span><span class="chip">金哲帆</span><span class="chip">姚梦娜</span><span class="chip">刘万钢</span><span class="chip">徐智强</span><span class="chip">倪子璇</span><span class="chip">张宇</span><span class="chip">蒋蕾</span><span class="chip">王晓东</span></div>
+          </section>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">群动态</span><span class="mb">近 5 条 · 3 资料</span></div>
+            <div class="feed">
+              <div class="fitem"><span class="fs-n">王辰炜</span><span class="fb mat">[文件] 端云协同_v3.html<span class="matbadge">资料</span></span><span class="ft">09:12</span></div>
+              <div class="fitem"><span class="fs-n">张宇</span><span class="fb mat">[文件] 硬件选型页.html<span class="matbadge">资料</span></span><span class="ft">昨天</span></div>
+              <div class="fitem"><span class="fs-n">徐智强</span><span class="fb">端侧 OCR POC 跑通了，CER 0.0075</span><span class="ft">昨天</span></div>
+              <div class="fitem"><span class="fs-n">蒋蕾</span><span class="fb mat">[图片]<span class="matbadge">资料</span></span><span class="ft">周二</span></div>
+              <div class="fitem"><span class="fs-n">金哲帆</span><span class="fb">同步会改到今天下午 3 点</span><span class="ft">周二</span></div>
+            </div>
+          </section>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">进行中</span><span class="mb">1</span></div>
+            <button class="mrow" data-detail><span class="st live"><span class="d"></span>进行中</span><span class="mc"><span class="mt">项目同步周会</span><span class="mm">15:00</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
+          </section>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">待开始</span><span class="mb">2</span></div>
+            <button class="mrow" data-detail><span class="st up"><span class="d"></span>待开始</span><span class="mc"><span class="mt">端侧 OCR 方案评审</span><span class="mm">明天 10:00</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
+            <button class="mrow" data-detail><span class="st up"><span class="d"></span>待开始</span><span class="mc"><span class="mt">硬件选型终审</span><span class="mm">6.28 14:00</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
+          </section>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">已结束</span><span class="mb">2</span></div>
+            <button class="mrow" data-detail><span class="st end"><span class="d"></span>已结束</span><span class="mc"><span class="mt">上周项目同步</span><span class="mm">6.19</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
+            <button class="mrow" data-detail><span class="st end"><span class="d"></span>已结束</span><span class="mc"><span class="mt">飞书接入对齐</span><span class="mm">6.17</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
+          </section>
+        </div>
+      </div>
+
+      <!-- meeting detail -->
+      <div class="mview" id="mv-detail">
+        <div class="mtop"><span class="bk" data-back="ws"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti">项目同步周会</span><span class="st live" style="margin-left:8px"><span class="d"></span>进行中</span></div>
+        <div class="mbody">
+          <div class="dact"><button class="hbtn pri" data-enter>✏ 进入会议</button><button class="hbtn">⏹ 结束会议</button><button class="hbtn">+ 添加资料</button></div>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">可能有用的文件</span><span class="mb">2 份</span></div>
+            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">注意力与工作记忆.pdf</div><div class="mt">248 页 · 借阅读器打开</div></div></div>
+            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">端云协同 v3</div><div class="mt">9 页 · HTML→PDF</div></div></div>
+          </section>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">群里收集到的资料</span><span class="mb">机器人捞 · Nova</span></div>
+            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">端云协同_v3.html</div><div class="mt">群文件 · 09:12 · 可批注</div></div></div>
+            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">硬件选型页.html</div><div class="mt">群文件 · 昨天 · 可批注</div></div></div>
+            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 14l4-3 4 3 4-4 4 3"/></svg></span><div><div class="nm">白板草图.png</div><div class="mt">群文件 · 周二</div></div></div>
+          </section>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">你的手写档案</span></div>
+            <div class="empty">会议进行 / 结束后，你在资料与转写上的手写会汇总在这里。</div>
+          </section>
+          <section class="msec">
+            <div class="msec-h"><span class="mt">思路总结</span><span class="sp" style="flex:1"></span><button class="hbtn" disabled style="opacity:.45">生成思路总结</button></div>
+            <div class="empty">会议结束后可对手写档案做思路总结。
+会后 AI 综合（送云端处理）——接线后置。</div>
+          </section>
+        </div>
+      </div>
+
+      <!-- 会中工作台（白板=可写画布搬进 #mtg-stage-host；时间脊=点底部 chip 切显隐；右缘半掩群资料栏）-->
+      <div class="mview" id="mv-live">
+        <div class="mtop"><span class="bk" id="mlive-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti" id="mlive-title">会议</span><span id="mtg-clk"><span class="dot"></span>00:00</span></div>
+        <div id="mtg-stage-host"></div>
+        <div id="mtg-spine" hidden></div>
+        <div id="mtg-chip"><span id="mtg-chip-n">0 笔</span> · 按会议时刻记录（点开看时间脊）</div>
+        <aside id="mtg-side">
+          <div class="tab" id="mtg-side-tab">资料 0</div>
+          <div class="shd">可能有用的文件</div>
+          <div class="sls" id="mtg-side-list"></div>
+        </aside>
+      </div>
+
+    </section>
+
+    <!-- ════ dev 三页 ════ -->
+    <section class="surf" id="surf-dev">
+
+      <!-- AI 会话 -->
+      <div class="dv" id="dv-chat">
+        <div class="dhead"><h1>AI 会话</h1><span class="sp"></span>
+          <span class="dsel">注意力与工作记忆 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          <button class="dic" aria-label="刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-1 5"/><path d="M20 5v6h-6"/></svg></button>
+          <button class="dic" aria-label="清空"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13"/></svg></button>
+        </div>
+        <div class="dbody">
+          <details class="grp" open>
+            <summary><span class="gc">第 62 页</span><span class="gm">2 轮 · 14:32</span><span class="gp">工作记忆容量为什么是 4±1…</span></summary>
+            <div class="gbody">
+              <div class="turn">
+                <div class="tlab">发送给 AI 的内容 · 第 62 页 <span class="trg">长停顿综合</span><span class="tt">14:32</span></div>
+                <div class="ucard">圈了「工作记忆容量」+ 手写「为什么是 4±1 而不是 7±2?」</div>
+                <div class="abub">Miller 的 7±2 是 1956 年的估计；Cowan(2001) 用排除复述/组块的实验把纯容量收到约 4。你圈的这处正是 Cowan 的下界——两套范式测的不是同一个东西。
+                  <details class="think"><summary>思考过程</summary><div>用户在质疑经典数字，要分清 Miller（信息量·含组块）与 Cowan（纯存储·排除复述）两套范式，别混着答。</div></details>
+                  <div class="ameta">#1 · claude-sonnet-4-6</div>
+                </div>
+              </div>
+              <div class="turn">
+                <div class="tlab">发送给 AI 的内容 · 第 62 页 <span class="trg hw">手写定向</span><span class="tt">14:28</span></div>
+                <div class="ucard">手写「组块能不能突破这个上限?」</div>
+                <div class="abub">能——组块把多个项打包成一个单位，容量按"块"算。所以"4"是块数不是项数，熟练度越高每块装得越多。<div class="ameta">#2 · claude-sonnet-4-6</div></div>
+              </div>
+            </div>
+          </details>
+          <details class="grp">
+            <summary><span class="gc">第 58 页</span><span class="gm">1 轮 · 14:10</span><span class="gp">（折叠为自我笔记）</span></summary>
+            <div class="gbody"><div class="turn folded">🚫 折叠为「写给自己的笔记」——这处手写没有指向性、不触发回复，留作下次综合。</div></div>
+          </details>
+        </div>
+      </div>
+
+      <!-- 采集取证 -->
+      <div class="dv" id="dv-hmp">
+        <div class="dhead"><h1>采集取证</h1>
+          <div class="seg"><button class="on" data-seg="hmp">HMP 取证</button><button data-seg="obj">对象</button></div>
+          <span class="sp"></span>
+          <span class="dsel">注意力与工作记忆 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+        </div>
+        <div class="dbody">
+          <div id="seg-hmp">
+            <p class="dnote">逐笔 HMP 取证——按页分组，最新页默认展开。共 12 笔。</p>
+            <div class="hcard">
+              <div class="hch"><span class="mode anchor">锚定原文</span><span class="act">圈</span><span class="feat">markup</span><span class="hm">命中区 · 0.92 · v3 · 第62页</span></div>
+              <div class="hcb"><div class="himg">合成图</div><div class="hf"><div><b>所标内容</b>工作记忆容量</div><div><b>命中对象</b><span class="lk">obj_12</span></div><div><b>读出</b>为什么是 4±1?</div><div><b>区域</b>[0.12, 0.34, 0.56, 0.41]</div></div></div>
+            </div>
+            <div class="hcard">
+              <div class="hch"><span class="mode">自身内容</span><span class="act">手写</span><span class="feat">handwriting</span><span class="hm">空 · 0.88 · v3 · 第62页</span></div>
+              <div class="hcb"><div class="himg">合成图</div><div class="hf"><div><b>所标内容</b>—</div><div><b>命中对象</b>空（自身内容）</div><div><b>读出</b>组块能不能突破上限?</div><div><b>区域</b>[0.18, 0.52, 0.70, 0.59]</div></div></div>
+            </div>
+          </div>
+          <div id="seg-obj" hidden>
+            <p class="dnote">本页 SurfaceIndex 对象表 · surface=article · 共 38 个 · text 34 · image 4</p>
+            <table class="otbl"><thead><tr><th>id</th><th>type</th><th>bbox</th><th>text</th><th>命中</th></tr></thead><tbody>
+              <tr><td>obj_12</td><td>text</td><td>.12,.34</td><td>工作记忆容量…</td><td><span class="mc">圈</span></td></tr>
+              <tr><td>obj_13</td><td>text</td><td>.12,.42</td><td>Cowan(2001)…</td><td></td></tr>
+              <tr><td>obj_27</td><td>text</td><td>.12,.66</td><td>组块（chunk）…</td><td><span class="mc">写</span></td></tr>
+              <tr><td>obj_30</td><td>image</td><td>.55,.20</td><td>—</td><td></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 设置 -->
+      <div class="dv" id="dv-set">
+        <div class="dhead"><h1>设置</h1><span class="sp"></span><button class="hbtn" id="reset-btn">恢复默认设置</button></div>
+        <div class="dbody">
+          <div class="sgrp-h">界面</div>
+          <div class="srow"><div class="sl"><div class="sn">日记稿纸线 <span class="sbadge eff">生效</span></div><div class="sd">空白页横线</div></div><input type="checkbox" class="sck" id="set-lines" checked></div>
+          <div class="sgrp-h">核心 · 影响真实行为</div>
+          <div class="srow"><div class="sl"><div class="sn">推理模型 <span class="sbadge eff">生效</span></div><div class="sd">答问 · 分类器默认</div></div><select class="sctl"><option>kimi-k2.6</option><option>claude-opus-4-8</option><option>claude-sonnet-4-6</option><option>gemini-3.5-flash</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">识别分类器模型 <span class="sbadge eff">生效</span></div><div class="sd">/api/interpret</div></div><select class="sctl"><option>继承</option><option>端侧手写·OpenVINO</option><option>claude-sonnet-4-6</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">上下文分类器模型 <span class="sbadge eff">生效</span></div><div class="sd">/api/classify-context</div></div><select class="sctl"><option>端侧规则·徐</option><option>继承</option><option>kimi-k2.6</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">送合成图给模型 <span class="sbadge eff">生效</span></div></div><input type="checkbox" class="sck"></div>
+          <div class="srow"><div class="sl"><div class="sn">输出落点 <span class="sbadge eff">生效</span></div></div><select class="sctl"><option>右侧留白</option><option>贴正文浮动</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">手势响应（总开关）<span class="sbadge eff">生效</span></div></div><input type="checkbox" class="sck" checked></div>
+          <div class="srow"><div class="sl"><div class="sn">长停顿综合阈值 <span class="sbadge eff">生效</span></div><div class="sd">10–600 秒</div></div><input type="number" class="sctl" value="90"></div>
+          <div class="srow"><div class="sl"><div class="sn">重排引擎 <span class="sbadge eff">生效</span></div></div><select class="sctl"><option>启发式+模型精修</option><option>AI 结构重建</option><option>仅启发式</option><option>VLM 看图重写</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">重排模型 <span class="sbadge eff">生效</span></div></div><select class="sctl"><option>gemini-3.1-flash-lite</option><option>kimi-k2.6</option><option>claude-sonnet-4-6</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">重排前置（渲染即急算）<span class="sbadge eff">生效</span></div></div><input type="checkbox" class="sck"></div>
+
+          <div class="sgrp-h">调试叠层</div>
+          <div class="srow"><div class="sl"><div class="sn">显示 bbox 叠层 <span class="sbadge">调试</span></div><div class="sd">对象框 + 命中高亮 + HMP 浮窗</div></div><input type="checkbox" class="sck"></div>
+          <div class="srow"><div class="sl"><div class="sn">显示组装区域 <span class="sbadge">调试</span></div><div class="sd">手写实时框</div></div><input type="checkbox" class="sck"></div>
+          <div class="srow"><div class="sl"><div class="sn">显示关联框 <span class="sbadge">调试</span></div><div class="sd">综合后虚框</div></div><input type="checkbox" class="sck"></div>
+
+          <details class="sfold"><summary>历史 / 弱效</summary>
+            <div class="srow"><div class="sl"><div class="sn">预排版前 N 页 <span class="sbadge weak">弱效</span></div><div class="sd">仅下次导入生效</div></div><input type="checkbox" class="sck"></div>
+            <div class="srow" style="border-bottom:none"><div class="sl"><div class="sn">预排版页数 <span class="sbadge weak">弱效</span></div></div><input type="number" class="sctl" value="3"></div>
+          </details>
+          <details class="sfold"><summary>诊断</summary>
+            <div class="diag">
+              <div class="dl"><b>坐标自测</b><span>✓ 5 点 · maxErr 0.3 · zoom 100%</span></div>
+              <div class="dl"><b>预处理</b><span>完成</span></div>
+              <div class="dl"><b>识别延迟 P50</b><span>last 412ms · P50 380ms</span></div>
+              <div class="dl"><b>Trace</b><span>本会话 142 条 · <a>下载 JSONL</a></span></div>
+            </div>
+          </details>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
 </div>
 
+<!-- 文件浏览器 -->
+<div class="scrim" id="scrim-files"></div>
+<div id="files">
+  <div class="fh"><span class="ti">导入文件</span><span class="x" id="files-x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></div>
+  <div class="crumb">/sdcard/Download</div>
+  <div class="fls">
+    <div class="frow dir"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span><div><div class="nm">书籍</div><div class="mt">12 项</div></div><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">注意力与工作记忆.pdf</div><div class="mt">2.4 MB · 6.24</div></div></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">端云协同_v3.html</div><div class="mt">82 KB · 可转 PDF · 6.25</div></div></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">RK3588_datasheet.pdf</div><div class="mt">9.1 MB · 6.20</div></div></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 14l4-3 4 3 4-4 4 3"/></svg></span><div><div class="nm">扫描笔记_0612.jpg</div><div class="mt">1.8 MB · 单页转 PDF</div></div></div>
+  </div>
+</div>
+
+<!-- AI 洞察抽屉（#rl-ai 拉出·复用 surface/insight-panel.ts）-->
+<div class="scrim" id="scrim-insight"></div>
+<aside id="m-insight">
+  <div class="ih"><h2>本页洞察</h2><span class="c" id="m-insight-count"></span><span class="x" id="insight-x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></div>
+  <div id="m-cards"><div class="empty-hint">这一页还没有 AI 洞察。圈划 + 手写问题后，AI 的旁注会在这里留存（收下 / 散去率）。</div></div>
+  <div id="m-panel-foot"></div>
+</aside>
+
+<!-- 导入用隐藏文件选择器（dev/preview 走它；电纸屏设备需 WebView 内文件浏览器=InkLoopFiles 原生桥，见 mobile-main） -->
+<input type="file" id="m-file-in" accept="application/pdf,.pdf" style="display:none">
+
+<script type="module" src="/src/mobile-main.ts"></script>
 <script>
-  document.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => {
-    document.querySelectorAll('[data-tool]').forEach(x => x.classList.remove('on'));
-    b.classList.add('on');
+  const B = document.body;
+  function updateWritable(){
+    const w = (B.dataset.mode==='read' && (B.dataset.read==='new'||B.dataset.read==='book'))
+           || (B.dataset.mode==='meet' && B.dataset.mtg==='live');
+    B.classList.toggle('writable', w);
+  }
+  function setRead(v){
+    B.dataset.read=v;
+    document.querySelectorAll('#read-sub [data-read]').forEach(b=>{
+      const on=b.dataset.read===v || (v==='open' && b.dataset.read==='diary');
+      b.classList.toggle('on',on);b.classList.toggle('dim',!on);b.closest('.rl-item').classList.toggle('cur',on);
+    });
+    updateWritable();
+  }
+  document.querySelectorAll('.nav [data-mode]').forEach(b=>b.addEventListener('click',()=>{
+    document.querySelectorAll('.nav [data-mode]').forEach(x=>{x.classList.remove('on');x.classList.add('dim');x.closest('.rl-item').classList.remove('cur');});
+    b.classList.add('on');b.classList.remove('dim');b.closest('.rl-item').classList.add('cur');
+    B.dataset.mode=b.dataset.mode;
+    updateWritable(); // 会议进入 + 钻取/返回由 mobile/meeting.ts controller 接管（真数据）
   }));
-  document.getElementById('rl-collapse').addEventListener('click', () => document.body.classList.add('rail-off'));
-  document.getElementById('m-tab').addEventListener('click', () => document.body.classList.remove('rail-off'));
+  document.querySelectorAll('#read-sub [data-read]').forEach(b=>b.addEventListener('click',()=>setRead(b.dataset.read)));
+  // dev 子导航
+  document.querySelectorAll('#dev-sub [data-dev]').forEach(b=>b.addEventListener('click',()=>{
+    document.querySelectorAll('#dev-sub [data-dev]').forEach(x=>{x.classList.remove('on');x.classList.add('dim');x.closest('.rl-item').classList.remove('cur');});
+    b.classList.add('on');b.classList.remove('dim');b.closest('.rl-item').classList.add('cur');
+    B.dataset.dev=b.dataset.dev;
+  }));
+  // 采集取证 段切换 / 设置·恢复默认 由 mobile/dev.ts controller 接管（真绑 settings + resetSettings）
+  document.querySelectorAll('[data-open]').forEach(r=>r.addEventListener('click',()=>setRead('open')));
+  document.getElementById('open-back').addEventListener('click',()=>setRead('diary'));
+  // 会议钻取/返回/资料栏由 mobile/meeting.ts controller 接管（真数据）
+  // 工具
+  const tt=document.getElementById('tools-toggle');
+  tt.addEventListener('click',()=>B.classList.toggle('tools-open'));
+  document.querySelectorAll('[data-tool]').forEach(b=>b.addEventListener('click',()=>{
+    document.querySelectorAll('[data-tool]').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    const ni=b.querySelector('svg').cloneNode(true);ni.classList.add('ti');
+    tt.querySelector('.ti').replaceWith(ni);
+  }));
+  document.getElementById('rl-collapse').addEventListener('click',()=>B.classList.add('rail-off'));
+  document.getElementById('m-tab').addEventListener('click',()=>B.classList.remove('rail-off'));
+  const files=on=>B.classList.toggle('files-open',on);
+  // 书架/导入卡由 mobile-main 动态渲染并绑定（imp-card 走 importBook → 文件选择器 / 原生文件桥）
+  document.getElementById('files-x').addEventListener('click',()=>files(false));
+  document.getElementById('scrim-files').addEventListener('click',()=>files(false));
 </script>
 </body>
 </html>

@@ -28,6 +28,8 @@ let el: HTMLElement;             // #reader 滚动容器
 let pageWrap: HTMLElement | null = null; // 居中的阅读块（正文列 + AI 注栏）
 let inkCv: HTMLCanvasElement;    // 行内圈画画布（内容坐标，随内容滚动）
 let inkCtx: CanvasRenderingContext2D | null = null;
+// AI 旁注摆放：'margin'=桌面右栏绝对定位；'inline'=移动版段落下方内联低语（贴电纸屏 AI 语言）。
+let notePlacement: 'margin' | 'inline' = 'margin';
 
 interface BlockRef { id: string; el: HTMLElement; source: NormBBox; }
 let blockRefs: BlockRef[] = [];
@@ -338,12 +340,14 @@ function renderNote(o: ScreenOverlay): void {
   note.dataset.for = o.overlay_id;
   note.dataset.block = ref.id;
   note.textContent = o.display_text;
-  (pageWrap ?? el).appendChild(note); // 绝对定位进右侧留白，不进文档流 → 不扰乱正文排版
+  if (notePlacement === 'inline') ref.el.insertAdjacentElement('afterend', note); // 移动版：插到所属段落之后，进文档流、贴行下方
+  else (pageWrap ?? el).appendChild(note); // 桌面：绝对定位进右侧留白，不进文档流 → 不扰乱正文排版
   layoutNotes();
 }
 
 /** 把右侧 AI 注按所属段的纵向位置摆好，重叠则下推。绝对定位，不影响正文。 */
 function layoutNotes(): void {
+  if (notePlacement === 'inline') return; // 内联：旁注在文档流里、随段落自然排，无需绝对定位
   const items = ([...el.querySelectorAll('.reader-note')] as HTMLElement[])
     .map((n) => ({ n, top: blockRefs.find((b) => b.id === n.dataset.block)?.el.offsetTop ?? 0 }))
     .sort((a, b) => a.top - b.top);
@@ -507,8 +511,9 @@ function setReaderTouchAction(): void {
   el.style.touchAction = settings.viewMode === 'reader' && readerIntent() === 'annotate' ? 'none' : 'pan-y';
 }
 
-export function initReader(readerEl: HTMLElement): void {
+export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'margin' | 'inline' }): void {
   el = readerEl;
+  notePlacement = opts?.notePlacement ?? 'margin';
   inkCv = document.createElement('canvas');
   inkCv.className = 'reader-ink';
   el.appendChild(inkCv);
