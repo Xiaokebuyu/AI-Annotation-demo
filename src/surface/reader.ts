@@ -14,6 +14,7 @@ import { getBookAiTurns, getFoldedMarks, getImageExplain, getReflow, putImageExp
 import { bboxOf, classifyScored } from '../capture/classify';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
 import { pageCss } from '../core/transform';
+import { devEmit } from '../core/dev-telemetry';
 
 /** 重排阅读流里的一项：重排出的文本块，或保留的原页图像（带 AI 解读）。 */
 interface FigureItem { kind: 'figure'; id: string; source: NormBBox; }
@@ -55,6 +56,12 @@ function resolveBlockForRefs(refs: string[]): BlockRef | null {
     const bid = charToBlock.get(r);
     if (bid) { const ref = blockRefs.find((b) => b.id === bid); if (ref) return ref; }
   }
+  return null;
+}
+/** 一组 source run id → 含其一的当前重排块（refs=0 自由笔落笔时存的"位置真相锚"·= reflow_anchor_runs）：
+ *  认存下的段、不靠（可能溢出的）坐标猜 → 同布局恒等、重开跟段走。重排重分组时取第一个仍含该 run 的块。 */
+function resolveBlockByRuns(runs: string[]): BlockRef | null {
+  for (const r of runs) { const ref = blockRefs.find((b) => b.runIds.includes(r)); if (ref) return ref; }
   return null;
 }
 /** 几何就近兜底：ref 空/未命中（如空白手写、旧缓存、VLM）时，取 source bbox y 中心最近的块。 */
@@ -376,7 +383,7 @@ function projectSpan(strokes: PersistedStroke[], located: Array<{ obj: SurfaceOb
     height: Math.max(...line.map((i) => i.r.top + i.r.height)) - minTop };
   return translateWhole(strokes, Math.min(...line.map((i) => i.b[0])), Math.min(...line.map((i) => i.b[1])), dst); // src 也取首行 refs
 }
-/** 一条 mark → restored 笔触：按 action/refs 分流。下划线·高亮=切段跟随换行；圈=整笔首行；符号/手写=就近整笔；都不行=旧块级兜底（不丢笔）。 */
+/** 一条 mark → restored 笔触：按 action/refs 分流。下划线·高亮=切段跟随换行；圈=整笔首行；refs=0 自由笔/兜底=块级（恒等·跟段落）。 */
 function projectPersistedMark(m: PersistedMark, fallback: BlockRef | null): ReaderStroke[] {
   const action = m.hmp?.action ?? '';
   const strokes = m.strokes ?? [];
@@ -387,12 +394,18 @@ function projectPersistedMark(m: PersistedMark, fallback: BlockRef | null): Read
     if (action === 'underline' || action === 'highlight') return segmentByChars(strokes, located, action);
     return projectSpan(strokes, located); // 圈/箭头/有 refs 的手写：整笔锚首行并集（不误入切段·也不丢 refs 改用 nearest）
   }
-  if (refs.length === 0) { // 真·无 refs（手写符号 why/?·self_content）→ 空间线就近文本对象整笔平移
-    const near = nearestObjectRect(m.bbox);
-    if (near) return translateWhole(strokes, near.obj.bbox[0], near.obj.bbox[1], near.rect);
-  }
-  // refs 非空但全定位失败（列表多节点 / rewrite / 改写文字致一致性校验不过）→ 退块级（保守·不乱锚到邻段）
-  return fallback ? strokes.map((ps) => projectPersistedStroke(ps, fallback)) : [];
+  // 块级反投影（projectPersistedStroke）——refs=0 自由笔（手写/画/边注·无字可锚·self_content）走这条：
+  //  · **逐笔认各自落笔的块**（stroke.anchor_runs）：多笔手写常跨段落交界、各笔命中不同块；onPenUp 把每笔的坐标存成
+  //    **它自己那个块**的相对坐标，故重投影也必须**逐笔回各自的块**才恒等——若整 mark 统一锚一个块，别块的笔会被按
+  //    「原版页块间距≠重排块间距」拉拢/塌缩（实测：3 笔 mark live y122–169、统一锚后 restored 塌成 y122–133）。
+  //  · 缺自己 anchor（老 mark/原版落笔）→ 退 mark 级 fallback 块（nearestBlockByBbox 几何就近·近似）。
+  //  · ⚠️别再改回 nearestObjectRect 字符锚——非恒等、当场漂移（M10 回归，已撤）。
+  return strokes
+    .map((ps) => {
+      const blk = (ps.anchor_runs?.length ? resolveBlockByRuns(ps.anchor_runs) : null) ?? fallback;
+      return blk ? projectPersistedStroke(ps, blk) : null;
+    })
+    .filter((s): s is ReaderStroke => !!s);
 }
 
 /** 重排里同步旧标注：高亮被标注块；restoreStrokes 开时再把该 mark 的真笔触反投影进 restoredStrokes 重画。
@@ -410,10 +423,22 @@ async function syncRestoredMarks(): Promise<void> {
   if (restoreStrokes) anchorCachesReset(); // 本次 sync 重建对象表 + 每块字符偏移 + 对象矩形缓存（一次 sync 内复用）
   for (const m of marks) {
     if (m.page_id !== pageId) continue;
-    const block = resolveBlockForRefs(m.hmp?.target_object_refs ?? []) ?? nearestBlockByBbox(m.bbox);
+    // 块锚优先级：①存下的位置真相锚（reflow_anchor_runs·恒等定段）②markup 的字符 refs 所在块 ③几何就近（老 mark/原版落笔的兜底·近似）
+    const block = (m.reflow_anchor_runs?.length ? resolveBlockByRuns(m.reflow_anchor_runs) : null)
+      ?? resolveBlockForRefs(m.hmp?.target_object_refs ?? []) ?? nearestBlockByBbox(m.bbox);
     if (block) block.el.classList.add('reader-mark-highlight'); // 被标注块高亮（桌面 styles.css 用·移动版 CSS 已去竖线不绘）
     if (!restoreStrokes) continue;
     const segs = projectPersistedMark(m, block); // 标注锚到文本对象（按类型投影），非纯块级
+    // 遥测·重排锚定：live 落点（用户实际画处）vs 重投影落点 + 认到的块 → live==restored 即恒等不漂；不等=漂/塌缩、看漂去哪。
+    {
+      const bb = (pts: { x: number; y: number }[]): number[] | null => pts.length ? [Math.round(Math.min(...pts.map((p) => p.x))), Math.round(Math.min(...pts.map((p) => p.y))), Math.round(Math.max(...pts.map((p) => p.x))), Math.round(Math.max(...pts.map((p) => p.y)))] : null;
+      const livePts = inkStrokes.filter((s) => s.committed && strokeMarkIds.get(s.committed) === m.mark_id).flatMap((s) => s.points);
+      const restPts = segs.flatMap((s) => s.points);
+      const refs0 = !(m.hmp?.target_object_refs?.length);
+      if (refs0) devEmit('reflow', () => ({ at: 'reproj', mark: m.mark_id, ft: m.feature_type, ns: m.strokes.length,
+        anchor: (m.reflow_anchor_runs ?? []).slice(0, 5), block: block?.id ?? null, blockRuns: (block?.runIds ?? []).slice(0, 5),
+        liveBbox: bb(livePts), restoredBbox: bb(restPts) }));
+    }
     for (const rs of segs) if (rs.points.length) restoredStrokes.push({ ...rs, markId: m.mark_id });
     if (segs.some((s) => s.points.length >= 2)) restoredMarkIds.add(m.mark_id); // 只有真画出可绘 restored 才标记（否则去重会误跳该 mark 的 live inkStroke）
   }
@@ -760,13 +785,14 @@ function hitBlock(pts: { x: number; y: number }[]): { ref: BlockRef; left: numbe
 
 // geometry.bbox 用该笔的**紧 bbox**（PDF 归一化），与原版页一致——main.ingestStroke 的 nearRegion/unionBb 要按
 // 笔粒度判近邻才能正确组装（旧版传整块 bbox 会让组装退化到整块粒度）。pts 已由 onPenUp 映进命中块的 PDF 坐标。
-function makeEvent(kind: EventType, pts: StrokePoint[]): AnnotationEvent {
+function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[]): AnnotationEvent {
   return {
     event_id: shortId('evt'), trace_id: shortId('trc'),
     document_id: state.documentId ?? '', page_id: state.pageId ?? '',
     event_type: kind, geometry: { bbox: bboxOf(pts) }, stroke_points: pts,
     text_note: null, created_at: new Date().toISOString(),
     device_id: DEVICE_ID, session_id: SESSION_ID, pointer_type: 'reader', version: SCHEMA_VERSION,
+    anchor_runs: anchorRuns,         // 命中块的 source run ids → 随 mark 落库当位置锚（repr 经手保留）
   };
 }
 
@@ -792,8 +818,13 @@ function onPenUp(st: ReaderStroke): void {
   const scored = classifyScored(pts, bboxOf(pts));
   const stroke: Stroke = { tool: st.tool, points: pts };
   st.committed = stroke; // 橡皮用：命中此重排笔 → strokeMarkIds.get(committed) 拿整 mark
+  // 遥测·重排锚定：每笔命中哪个块 + 屏幕中心（看一个 mark 的多笔是否命中**不同**块 → 逐笔块锚的依据）。
+  devEmit('reflow', () => ({ at: 'draw', block: ref.id, runs: ref.runIds.slice(0, 5), nr: ref.runIds.length,
+    scYc: Math.round(raw.reduce((s, p) => s + p.y, 0) / raw.length), scXc: Math.round(raw.reduce((s, p) => s + p.x, 0) / raw.length),
+    blkTop: Math.round(top), styp: scored.type }));
   // 当正常 page-ledger mark：发 bus 给 main 走 ingestStroke（组装 + 跨视图 + 持久 + 同享 session/idle）
-  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts), stroke });
+  // ref.runIds = 命中块的 source run ids → 随事件落库当**位置真相锚**（重投影认它定段、不靠坐标猜，治"刚画完就乱飘"）
+  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds), stroke });
 }
 
 /** 落笔意图（仅重排面）：tool 决定——hand=滚动浏览、pen/highlighter=落笔(笔与手指都画)。

@@ -58,6 +58,7 @@ export interface AnnotationEvent {
   session_id: string;
   pointer_type: string;
   version: string;
+  anchor_runs?: string[];           // 仅重排面落笔：命中重排块的 source run ids（位置真相锚=锚在哪一段）；原版落笔/老事件缺=undefined
 }
 
 export interface OcrTextBlock {

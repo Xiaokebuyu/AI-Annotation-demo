@@ -185,7 +185,8 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
   const raw_ref = mergeRawRefs(rawRefs); // 基岩回链：合并本区各笔在 ingestStroke 同步取的 seq 区间（精确·不受 far-stroke/await 污染）
   void appendMarkEntry({
     document_id: bookId, page_id: pid, page_index: pageIdxOf(pid), mark_id: mark.id,
-    strokes: realStrokes.map((s) => ({ tool: s.tool, points: s.points })),
+    strokes: keep.map((x) => ({ tool: x.st.tool, points: x.st.points, ...(x.e.anchor_runs?.length ? { anchor_runs: x.e.anchor_runs } : {}) })), // 逐笔带各自的块锚（位置真相·多笔跨段各归各位·不塌缩）
+
     bbox, tool, color: tool === 'highlighter' ? 'rgba(212,207,202,0.85)' : '#1A1A1A',
     pointer_type: repr.pointer_type, device_id: repr.device_id, abs_timestamp: Date.now(),
     context_id: getActiveContext().id,
@@ -194,6 +195,7 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
     scored_type: markScored.type, scored_score: markScored.score,
     hmp: cap.hmp ? { ...cap.hmp, crop_ref: undefined, vector_ref: undefined } : null,
     marked_text: cap.markedText, raw_ref, is_tombstone: false,
+    ...(repr.anchor_runs?.length ? { reflow_anchor_runs: repr.anchor_runs } : {}), // 重排落笔的位置真相锚（原版落笔无此字段·退近似）
   });
   gtrace({ page_id: pid, strokes: diagOf(realScored), ...(droppedTaps ? { droppedTaps } : {}), feature: feature.type, conf: Number(feature.confidence.toFixed(2)), shape: markScored.type, marked: cap.markedText.slice(0, 40), ...(raw_ref ? { raw_ref } : {}), resolved: `mark·${feature.type}（累积静默）`, flush: flushInfo });
 

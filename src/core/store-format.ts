@@ -38,6 +38,7 @@ export interface PersistedPdfBlob {
 export interface PersistedStroke {
   tool: 'pen' | 'highlighter' | 'eraser' | 'hand';
   points: StrokePoint[];
+  anchor_runs?: string[];           // 位置真相锚（逐笔）：该笔落笔时命中重排块的 source run ids → 重投影时各笔认各自的块（多笔手写跨段不被拉拢/塌缩·恒等）。仅重排落笔有；原版/老条目缺=undefined
 }
 
 /** docs 的页缓存：只剩重排结构 + 图解（派生缓存）。strokes/overlays 已迁出到 marks/ai_turns 账本。 */
@@ -94,6 +95,7 @@ export interface PersistedMark extends BaseEntry {
   hmp: HMP | null;                 // 取证（落库前剥掉 crop_ref/vector_ref，存料不存图）
   marked_text: string;             // 落笔当时解析好的"所标内容"
   raw_ref?: RawRef;                // → 基岩录像的对应段+seq 区间（仅 features/settings.bedrock 开时有；老条目缺=undefined）
+  reflow_anchor_runs?: string[];   // 位置真相锚：重排面落笔时所在重排块的 source run ids → 重投影时认它定段（恒等·不靠坐标猜）。仅重排落笔有；原版落笔/老条目缺=undefined（退 nearestBlockByBbox 近似）
   is_tombstone: boolean;           // true = 本条擦除 mark_id（append-only，不就地删）
 }
 
