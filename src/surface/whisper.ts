@@ -163,7 +163,7 @@ export function initWhisper(whisperLayer: HTMLElement): void {
   bus.on('whisper:reveal', (overlayId) => {
     const el = els.get(overlayId as string);
     if (!el || el.style.display === 'none') return;
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.scrollIntoView({ block: 'center', behavior: document.body.classList.contains('eink-shell') ? 'auto' : 'smooth' }); // 电纸屏壳禁平滑滚动（残影）·CSS scroll-behavior 管不到 scrollIntoView 的 behavior 选项故在此判；桌面无 eink-shell 行为不变
     el.classList.add('reveal');
     setTimeout(() => el.classList.remove('reveal'), 1000);
   });

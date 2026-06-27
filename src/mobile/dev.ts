@@ -21,6 +21,8 @@ let captureSeg: 'hmp' | 'obj' = 'hmp';
 let preprocessText = '未运行';
 let openChat: string | null = null; // 抽屉式单开：当前展开的 turn entry_id（e-ink 零滑动·只渲展开项）
 let openHmp: string | null = null;  // 同上·当前展开的 HMP 卡 key
+let chatRenderSeq = 0;    // 代际守卫：异步 re-fetch 期间快速点表头/切书/bus 刷新交错 → 旧 render 晚返回会覆盖新 DOM（电纸屏延迟更高更易触发）
+let captureRenderSeq = 0;
 
 const TRIGGER_CN: Record<string, string> = { idle: '长停顿综合', handwriting: '手写定向', discussion: '段落讨论' };
 const HMP_MODE: Record<string, [string, boolean]> = { anchored: ['锚定原文', true], self_content: ['自身内容', false], mixed: ['混合', false], unknown: ['未命中', false] };
@@ -40,9 +42,12 @@ function markChipLabel(feature: string, marked: string): string {
   const t = (marked || '').replace(/\s+/g, ' ').slice(0, 10);
   return `${HMP_FEAT[feature] ?? feature}${t ? `「${t}」` : ''}`;
 }
+/** page_id 形如 pg_{hash8}_{idx} → 取末段页号（与 annotation-loop.pageIdxOf 同约定）。 */
+const pageIdxOfSurface = (surfaceId: string): number => { const m = surfaceId.match(/_(\d+)$/); return m ? Number(m[1]) : state.pageIndex; };
 async function buildHmpRows(book: string): Promise<HmpRow[]> {
   const persisted = (await getFoldedMarks(book)).filter((m) => m.hmp);
-  const liveById = new Map(state.lastHmps.map((h) => [h.hmp_id, h]));
+  const liveHmps = book === state.documentId ? state.lastHmps : []; // live crop/vector 只属当前打开的书 → 看别本时不混入（避免 hmp_id 偶撞带错图/错页）
+  const liveById = new Map(liveHmps.map((h) => [h.hmp_id, h]));
   const seen = new Set<string>();
   const rows: HmpRow[] = persisted.map((m) => {
     const live = liveById.get(m.hmp!.hmp_id);
@@ -50,9 +55,9 @@ async function buildHmpRows(book: string): Promise<HmpRow[]> {
     const hmp = live && (live.crop_ref || live.vector_ref) ? { ...m.hmp!, crop_ref: live.crop_ref, vector_ref: live.vector_ref } : m.hmp!; // 持久剥了图 → 本会话 live 补回
     return { key: m.mark_id, hmp, marked: m.marked_text, feature: m.feature_type, page_index: m.page_index, page_id: m.page_id, seq: m.seq, created_at: m.created_at, live: !!live, unsaved: false };
   });
-  if (book === state.documentId) for (const h of state.lastHmps) { // 本会话还没落库的 HMP（取证图最全）
+  for (const h of liveHmps) { // 本会话还没落库的 HMP（取证图最全）
     if (seen.has(h.hmp_id)) continue;
-    rows.push({ key: h.hmp_id, hmp: h, marked: h.text_hint || '', feature: featureFromAction(h.action), page_index: state.pageIndex, page_id: h.surface_id, seq: Number.MAX_SAFE_INTEGER, created_at: '', live: true, unsaved: true });
+    rows.push({ key: h.hmp_id, hmp: h, marked: h.text_hint || '', feature: featureFromAction(h.action), page_index: pageIdxOfSurface(h.surface_id), page_id: h.surface_id, seq: Number.MAX_SAFE_INTEGER, created_at: '', live: true, unsaved: true }); // 页号取自 surface_id·非当前 state.pageIndex（翻页后旧 live HMP 不再错挂当前页）
   }
   return rows.sort((a, b) => b.seq - a.seq);
 }
@@ -80,12 +85,15 @@ function bindBookSel(id: string, rerender: () => void): void {
 
 // ════ AI 会话 ════
 export async function renderChat(): Promise<void> {
+  const seq = ++chatRenderSeq;
   const books = await listBooks();
+  if (seq !== chatRenderSeq) return; // 期间又触发了一次 render → 本次作废，别拿旧数据覆盖新 DOM
   if (!devBook) devBook = state.documentId || books[0]?.document_id || null; // 默认当前书 / 第一本
   let body: string;
   if (!devBook) body = `<p class="dnote">选一本书（或先在「阅读」里打开一本）查看它的 AI 会话记录。</p>`;
   else {
     const [turns, marks] = await Promise.all([getBookAiTurns(devBook), getFoldedMarks(devBook)]);
+    if (seq !== chatRenderSeq) return;
     const markMap = new Map(marks.map((m) => [m.mark_id, m]));
     const live = turns.filter((t) => t.overlay_state !== 'dismissed');
     if (openChat && !live.some((t) => t.entry_id === openChat)) openChat = null; // 展开项已不在 → 复位
@@ -130,13 +138,16 @@ function turnBlock(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): str
 
 // ════ 采集取证 ════
 export async function renderCapture(): Promise<void> {
+  const seq = ++captureRenderSeq;
   const books = await listBooks();
+  if (seq !== captureRenderSeq) return; // 期间又触发了一次 render → 本次作废
   if (!devBook) devBook = state.documentId || books[0]?.document_id || null; // 默认当前书 / 第一本
   const seg = `<div class="seg"><button class="${captureSeg === 'hmp' ? 'on' : ''}" data-seg="hmp">HMP 取证</button><button class="${captureSeg === 'obj' ? 'on' : ''}" data-seg="obj">对象</button></div>`;
   let inner: string;
   if (!devBook) inner = `<p class="dnote">选一本书查看它的逐笔 HMP 取证 + SurfaceIndex 对象表。</p>`;
   else {
     const rows = await buildHmpRows(devBook);
+    if (seq !== captureRenderSeq) return;
     if (captureSeg === 'hmp') {
       if (openHmp && !rows.some((r) => r.key === openHmp)) openHmp = null; // 展开项已不在 → 复位
       const si = state.surfaceIndex;

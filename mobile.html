@@ -15,6 +15,8 @@
     --hand:"Bradley Hand","Segoe Print","Noteworthy","Comic Sans MS",cursive;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  /* 电纸屏壳：全局掐掉过渡/动画/平滑滚动 —— 任何渐变在 e-ink 上都拖残影。导航脊/画布/会议侧栏/sheet/洞察抽屉/anchor-layer 等位移与淡入一律改瞬时（无 transitionend/animationend 依赖故安全）。 */
+  body.eink-shell *,body.eink-shell *::before,body.eink-shell *::after{transition:none!important;animation:none!important;scroll-behavior:auto!important;}
   html,body{height:100%;margin:0;}
   body{font:14px/1.5 var(--sans);color:var(--ink);background:var(--page);overflow:hidden;-webkit-font-smoothing:antialiased;}
   #m-app{height:100%;display:flex;}
@@ -319,7 +321,7 @@
   .turn{padding:0;border-bottom:1px solid var(--hair);}
   .turn:last-child{border-bottom:none;}
   /* 抽屉式表头（e-ink 零滑动·点触单开·▸/▾） */
-  .drawer-head{width:100%;min-height:44px;box-sizing:border-box;border:0;background:var(--page);color:var(--ink);display:flex;align-items:center;gap:6px;padding:10px 11px;font:12.5px var(--sans);text-align:left;cursor:pointer;white-space:nowrap;}
+  .drawer-head{width:100%;min-height:44px;box-sizing:border-box;border:0;background:var(--page);color:var(--ink);display:flex;align-items:center;gap:6px;padding:10px 11px;font:12.5px var(--sans);text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;}
   .drawer-head .di{font:12px var(--mono);color:var(--mut);width:12px;flex:0 0 12px;}
   .drawer-head .sep{font:11px var(--mono);color:var(--mut2);flex:0 0 auto;}
   .drawer-body{border-top:1px solid var(--hair);}
