@@ -63,13 +63,15 @@ function turnBlock(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): str
   const userText = t.inference_view?.question || t.inference_view?.marked
     || t.anchor?.mark_ids.map((id) => markMap.get(id)?.marked_text).filter(Boolean).join(' ') || '（标注）';
   const folded = !t.ai_reply && t.diag?.classify && t.diag.classify.respond === false;
+  const reason = t.diag?.classify?.reason;
   const result = folded
-    ? `<div class="turn folded">🚫 折叠为「写给自己的笔记」——这处手写没有指向性、不触发回复，留作下次综合。</div>`
+    ? `<div class="turn folded">🚫 折叠为「写给自己的笔记」——这处手写没有指向性、不触发回复，留作下次综合。`
+      + (reason ? `<div class="ameta">分类器：${esc(reason)}</div>` : '') + `</div>`
     : `<div class="abub">${esc(t.ai_reply || '（无回复）')}`
       + (t.thinking ? `<details class="think"><summary>思考过程</summary><div>${esc(t.thinking)}</div></details>` : '')
       + `<div class="ameta">${esc(t.model || '')}${t.supersedes ? ' · 改写' : ''}</div></div>`;
   return `<div class="turn"><div class="tlab">发送给 AI 的内容 · 第 ${t.page_index + 1} 页 <span class="${trgCls}">${trg}</span><span class="tt">${fmtTime(t.created_at)}</span></div>`
-    + (folded ? '' : `<div class="ucard">${esc(userText)}</div>`) + result + (folded ? result : '') + `</div>`;
+    + `<div class="ucard">${esc(userText)}</div>` + result + `</div>`; // 用户卡常显；result 只拼一次（旧版 folded 重复渲染 + 丢用户卡）
 }
 
 // ════ 采集取证 ════
