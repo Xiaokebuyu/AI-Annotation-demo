@@ -331,6 +331,25 @@
   .think>div{font:12px/1.55 var(--sans);color:var(--whisper);margin-top:6px;padding-left:10px;border-left:2px solid var(--hair);}
   .ameta{margin-top:8px;font:10.5px var(--mono);color:var(--mut2);}
   .turn.folded{font:12.5px/1.5 var(--mono);color:var(--mut);border:1px dashed var(--hair2);border-radius:8px;padding:12px;background:#fafafa;}
+  /* anchor-layer + dev-overlay（黑白电纸屏版·元素由 TS 动态创建） */
+  #anchor-layer .anchor-note{font:12px/1.5 var(--sans);color:var(--ink);background:var(--page);border:1px solid var(--hair2);border-left:3px solid var(--ink);border-radius:6px;padding:7px 9px;box-shadow:0 1px 4px rgba(0,0,0,.06);cursor:pointer;}
+  #anchor-layer .anchor-note[data-kind="margin"]{border-left-style:double;}
+  #anchor-layer .anchor-note[data-kind="link"]{font-style:italic;color:var(--whisper);}
+  #anchor-layer .anchor-flash{background:rgba(0,0,0,.10)!important;outline-color:var(--ink)!important;}
+  #bbox-overlay{position:absolute;left:0;top:0;pointer-events:none;z-index:6;}
+  .bbox-rect{position:absolute;border:1px dashed var(--mut2);box-sizing:border-box;}
+  .bbox-rect.hit{border:2px solid var(--ink);background:rgba(0,0,0,.08);}
+  .bbox-rect .bbox-tag{position:absolute;top:0;left:0;font:9px/1.2 var(--mono);color:var(--ink);background:rgba(255,255,255,.82);padding:0 2px;display:none;white-space:nowrap;}
+  .bbox-rect.hit .bbox-tag{display:block;}
+  .bbox-mark{position:absolute;border:2px dashed var(--ink);box-sizing:border-box;pointer-events:none;}
+  #region-overlay>div{border-color:var(--ink)!important;background:rgba(0,0,0,.06)!important;}
+  #relation-overlay line,#relation-overlay rect{stroke:var(--ink)!important;fill:rgba(0,0,0,.05)!important;}
+  #hmp-float{position:fixed;top:54px;right:12px;width:min(300px,calc(100vw - 72px));z-index:9999;display:none;background:var(--page);color:var(--ink);border:1px solid var(--hair2);border-radius:8px;padding:8px 10px;font:10.5px/1.55 var(--mono);box-shadow:0 2px 10px rgba(0,0,0,.10);}
+  #hmp-float .hf-head{font-size:11px;border-bottom:1px solid var(--hair2);padding-bottom:4px;margin-bottom:5px;}
+  #hmp-float .hf-row{display:flex;gap:8px;align-items:baseline;}
+  #hmp-float .hf-row>span{color:var(--mut);min-width:72px;flex:0 0 auto;}
+  #hmp-float .hf-row>b{word-break:break-all;font-weight:600;}
+  #hmp-float .hf-empty{color:var(--mut2);}
   /* HMP 卡 */
   .hcard{border:1px solid var(--hair);border-radius:10px;margin-bottom:12px;overflow:hidden;}
   .hch{display:flex;align-items:center;gap:7px;padding:9px 11px;border-bottom:1px solid var(--hair);flex-wrap:wrap;}

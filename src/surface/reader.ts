@@ -980,12 +980,13 @@ export function readerFlip(dir: number): 'moved' | 'boundary' {
 /** 翻回上一 PDF 页前置：下次重排落地后停在其最后一张虚拟页。 */
 export function readerArmBackward(): void { landAtEnd = true; }
 
-export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'margin' | 'inline'; restoreStrokes?: boolean; paginate?: boolean }): void {
+export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'margin' | 'inline'; restoreStrokes?: boolean; replyMode?: boolean; paginate?: boolean }): void {
   el = readerEl;
   notePlacement = opts?.notePlacement ?? 'margin';
   restoreStrokes = opts?.restoreStrokes ?? false;
   paginate = opts?.paginate ?? false;
-  replyMode = restoreStrokes; // 移动版重排面：AI 回复折叠成点触浮层（桌面/原版仍走 renderNote/whisper-layer）
+  replyMode = opts?.replyMode ?? restoreStrokes; // 移动版重排面：AI 回复折叠成点触浮层（桌面/原版仍走 renderNote/whisper-layer）。显式 opts.replyMode 解耦"恢复笔迹"与"回复样式"
+
   if (paginate) el.style.overflowY = 'hidden'; // 分页：禁自由滚（电纸屏靠 ‹ › 翻虚拟页；programmatic scrollTop 仍可步进）
   if (replyMode) document.addEventListener('pointerdown', (e) => { const t = e.target; if (popoverEl && !(t instanceof Element && t.closest('.reader-reply-pop,.reader-reply-mark,.reader-fig'))) closePopover(); }, true); // 点别处（非浮层/标记/图）关浮层
   inkCv = document.createElement('canvas');

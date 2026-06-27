@@ -5,8 +5,10 @@ import './core/polyfills'; // 必须最先：设备 WebView 109 补 Promise.with
 import { initRenderer, renderBlankSurface, renderBlankPage, loadFile, reopenBook, gotoPage, renderPage } from './surface/renderer';
 import type { SurfaceContext } from './app/surface-context';
 import { initWhisper } from './surface/whisper';
+import { initAnchorLayer } from './surface/anchor-layer';
 import { initInsightPanel } from './surface/insight-panel';
 import { initReader, readerFlip, readerArmBackward, readerVInfo } from './surface/reader';
+import { initDevOverlay } from './dev/dev-overlay';
 import { wireAnnotationLoop, flushRegion } from './app/annotation-loop';
 import { setTool, getActiveContext, state, settings, saveSettings, bus, type Tool } from './app/state';
 import { shortId } from './core/ids';
@@ -31,8 +33,10 @@ initRenderer({
 });
 wireAnnotationLoop(el<HTMLCanvasElement>('ink-layer'));
 initWhisper(el('whisper-layer'));
-initReader(el('reader'), { notePlacement: 'inline', restoreStrokes: true, paginate: true }); // 重排阅读视图（书籍态·AI 注内联段落下方·重画旧 mark 真笔触·电纸屏分页翻虚拟页·复用桌面 reader.ts 行为层）
+initAnchorLayer(el('stage')); // 流式 anchor:place 锚点预览（原版/canvas 视图·重排时 #stage hidden 自然不显）——与桌面对齐
+initReader(el('reader'), { notePlacement: 'inline', restoreStrokes: true, replyMode: true, paginate: true }); // 重排阅读视图（书籍态·AI 注内联段落下方·重画旧 mark 真笔触·电纸屏分页翻虚拟页·复用桌面 reader.ts 行为层）
 initInsightPanel({ cards: el('m-cards'), foot: el('m-panel-foot'), count: el('m-insight-count') }); // 本页洞察历史（复用桌面同款）
+initDevOverlay(); // dev 叠层（bbox/region/relation/HMP 浮窗·设置页 devOverlay/showRegion/showRelations 控·默认关）——接真桌面同款
 if (features.einkBridge) initEinkMirror(); // 电纸屏镜像：套壳内容变化 → 推 IT8951（web/dev 无桥则 no-op）
 
 // AI 洞察抽屉开关（rail 💡）
