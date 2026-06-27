@@ -117,6 +117,25 @@
   /* 被标注块不再加左竖线：圈画本体已真重画在段落上、竖线冗余且与「AI=无竖线」语言一致（用户定）。class 仍由 reader 加、此处不绘。 */
   .reader-fig{margin:1.3em 0;}
   .reader-fig img{display:block;max-width:100%;height:auto;border:1px solid var(--hair);border-radius:6px;}
+  /* ── AI 回复折叠成点触浮层（移动版重排面·被回复内容上留特殊标记·点开浮层·点别处消失）── */
+  .reader-reply-mark{position:absolute;z-index:5;pointer-events:auto;cursor:pointer;}
+  .reader-reply-mark.dot-underline{border-top:2px dotted var(--whisper);}           /* 圈/划/高亮的文字下方·点状下划线 */
+  .reader-reply-mark.dash-box{border:1.4px dashed var(--whisper);border-radius:3px;} /* 手写/画·虚线框 */
+  .reader-reply-mark.edge-star{background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235a5a5a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z'/%3E%3C/svg%3E") no-repeat center/contain;} /* 长停顿综合·边缘 ☆ */
+  .reader-fig.has-reply{position:relative;cursor:pointer;}                            /* 图·有图解→可点 */
+  .reader-fig.has-reply .reader-figcap{display:none;}                                /* 图解收进浮层·不再内联 */
+  .reader-fig.has-reply::after{content:"";position:absolute;inset:-4px;pointer-events:none;background:  /* 四角括角（非整图框） */
+    linear-gradient(var(--whisper),var(--whisper)) left top/13px 1.5px no-repeat, linear-gradient(var(--whisper),var(--whisper)) left top/1.5px 13px no-repeat,
+    linear-gradient(var(--whisper),var(--whisper)) right top/13px 1.5px no-repeat, linear-gradient(var(--whisper),var(--whisper)) right top/1.5px 13px no-repeat,
+    linear-gradient(var(--whisper),var(--whisper)) left bottom/13px 1.5px no-repeat, linear-gradient(var(--whisper),var(--whisper)) left bottom/1.5px 13px no-repeat,
+    linear-gradient(var(--whisper),var(--whisper)) right bottom/13px 1.5px no-repeat, linear-gradient(var(--whisper),var(--whisper)) right bottom/1.5px 13px no-repeat;}
+  .reader-reply-mark.st-accepted,.reader-reply-mark.st-edited{opacity:.4;}            /* 已收下/改写→淡掉（vs 未处理） */
+  .reader-reply-pop{position:absolute;z-index:7;max-width:300px;background:var(--page);border:1px solid var(--hair2);border-radius:6px;box-shadow:0 1px 6px rgba(0,0,0,.08);padding:12px 13px 10px;pointer-events:auto;}
+  .reader-reply-text{font:12.5px/1.62 var(--mono);font-style:italic;color:var(--whisper);letter-spacing:.1px;}
+  .reader-reply-text::before{content:"";display:inline-block;width:11px;height:11px;margin-right:5px;vertical-align:-1px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235a5a5a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z'/%3E%3C/svg%3E") no-repeat center/contain;}
+  .reader-reply-acts{display:flex;gap:16px;margin-top:10px;}
+  .reader-reply-acts button{font:11px var(--sans);color:var(--mut2);background:none;border:none;padding:0;cursor:pointer;}
+  .reader-reply-acts button:active{color:var(--ink);}
   .reader-figcap{margin:.5em 0 0;font:12.5px/1.6 var(--mono);color:var(--mut);}
   .reader-figcap[data-pending="1"]{color:var(--mut2);}
   .reader-empty{max-width:560px;margin:48px auto;color:var(--mut2);font:14px/1.8 var(--serif);text-align:center;}

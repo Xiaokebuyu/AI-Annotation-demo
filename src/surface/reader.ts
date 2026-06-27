@@ -1,6 +1,6 @@
-import type { AnnotationEvent, EventType, NormBBox, ScreenOverlay, StrokePoint, SurfaceObject } from '../core/contracts';
+import type { AnnotationEvent, EventType, NormBBox, OverlayState, ScreenOverlay, StrokePoint, SurfaceObject } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
-import type { PersistedMark, PersistedStroke } from '../core/store-format';
+import type { PersistedAiTurn, PersistedMark, PersistedStroke } from '../core/store-format';
 import type { ReflowBlock } from './reflow';
 import { bus, settings, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
 import { recordInkSample } from '../local/bedrock-recorder';
@@ -10,7 +10,7 @@ import { reflowLocal } from './reflow';
 import { extractPageBlocks } from './renderer';
 import { grabRegion } from '../evidence/ocr';
 import { postJson } from '../core/api';
-import { getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
+import { getBookAiTurns, getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
 import { bboxOf, classifyScored } from '../capture/classify';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
 import { pageCss } from '../core/transform';
@@ -117,6 +117,7 @@ function render(items: RenderItem[], warn: string = ''): void {
   pageWrap = null;
   inkStrokes.length = 0;
   restoredStrokes.length = 0; restoredMarkIds.clear(); // 旧页 restored 先清，免 syncRestoredMarks 异步重填前闪上一页笔触
+  if (replyMode) { el.querySelectorAll('.reader-reply-mark').forEach((n) => n.remove()); closePopover(); } // 旧页 AI 回复标记/浮层
   if (warn) {
     const w = document.createElement('p');
     w.className = 'reader-warn';
@@ -151,8 +152,10 @@ function render(items: RenderItem[], warn: string = ''): void {
       cap.className = 'reader-figcap';
       cap.dataset.pending = '1';
       cap.textContent = '正在解读这张图…';
+      if (replyMode) cap.style.display = 'none'; // 折叠：生成中也不内联（explainFigure 仍写 cap·finish 读 textContent 存进 fig.dataset.explain·CSS 隐）
       fig.appendChild(img);
       fig.appendChild(cap);
+      if (replyMode) fig.addEventListener('pointerdown', (e) => { const t = fig.dataset.explain; if (t) { e.stopPropagation(); e.preventDefault(); openFigurePopover(fig, t); } }); // 图解折叠：点图弹浮层
       col.appendChild(fig);
       void explainFigure(cap, it.source, crop);
       continue;
@@ -181,9 +184,14 @@ function nearbyText(bb: NormBBox): string {
 
 /** 让 Kimi 看图，结合「图附近正文 + 前页总结」给一句解读，填进 figcaption。 */
 async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string): Promise<void> {
-  if (!image) { cap.textContent = '（无法截取此图）'; delete cap.dataset.pending; return; }
+  const finish = (): void => {
+    delete cap.dataset.pending;
+    if (replyMode) { const fig = cap.closest('.reader-fig') as HTMLElement | null; if (fig) { fig.dataset.explain = cap.textContent ?? ''; fig.classList.add('has-reply'); } } // 图解收进点触浮层（caption 由 CSS 隐藏·点图弹）
+    if (cap.isConnected) repaginate();
+  };
+  if (!image) { cap.textContent = '（无法截取此图）'; finish(); return; }
   const cached = getImageExplain(state.pageIndex, source); // 已解读过 → 直接用，不再调模型
-  if (cached) { cap.textContent = `图：${cached}`; delete cap.dataset.pending; return; }
+  if (cached) { cap.textContent = `图：${cached}`; finish(); return; }
   const nearby = nearbyText(source);
   const prevSummary = ''; // 跨页记忆撤除（押后）：图解不再带前页摘要
   try {
@@ -193,9 +201,7 @@ async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string)
   } catch {
     cap.textContent = '（解读失败）';
   }
-
-  delete cap.dataset.pending;
-  if (cap.isConnected) repaginate(); // 图解文字到达改了 caption 高度（异步·在首次 settleV 之后）→ 重排页
+  finish(); // 删 pending + replyMode 存图解到 fig + 图解文字到达改了高度→重排页
 }
 
 let reflowKey = '';   // 上次重排的输入键（页 + 引擎 + 模型）——只在它变了才重排
@@ -228,9 +234,9 @@ function renderFinal(blocks: ReflowBlock[], provisional = false): void {
     : (blocks.length && blocks.every((b) => b.anchorUnsafe) ? 'VLM 看图重写：bbox 为估算，标注跨视图映射按就近兜底（不精确），需精确请用「AI 结构重建」。' : unreliableWarn());
   render(items, warn);
   buildIndex(blocks); // 重建 字符对象→块 映射（跨视图锚）
-  state.overlays.filter((o) => o.page_id === state.pageId).forEach(renderNote); // 本页旁注按 ref 贴回（buildIndex 后；内联会改后续块位）
+  if (!replyMode) state.overlays.filter((o) => o.page_id === state.pageId).forEach(renderNote); // 桌面/原版：内联/右栏旁注。移动版重排走点触浮层标记（syncRestoredMarks 末尾·不进文档流、不扰分页）
   settleV(provisional ? 'relayout' : 'render'); // 先真分页排版（插 spacer 推块到屏顶·块位变）；占位渲染只保位、终渲才落目标虚拟页
-  void syncRestoredMarks(); // 再按分页后的最终块位重画旧 mark 真笔触 + 高亮被标注块
+  void syncRestoredMarks(); // 再按分页后的最终块位重画旧 mark 真笔触 + 高亮被标注块（+replyMode 末尾画 AI 回复标记）
 }
 
 /** #reader 内容坐标系里某块的左上角（与 contentPoint/hitBlock 同系：减容器 rect、加 scrollTop）。 */
@@ -412,6 +418,14 @@ async function syncRestoredMarks(): Promise<void> {
     if (segs.some((s) => s.points.length >= 2)) restoredMarkIds.add(m.mark_id); // 只有真画出可绘 restored 才标记（否则去重会误跳该 mark 的 live inkStroke）
   }
   if (restoreStrokes) resizeInk(); // 重画（restored 笔此刻才就位）；桌面 restoreStrokes=false 不多画一次
+  if (replyMode && state.documentId === docId && state.pageId === pageId && seq === reflowSeq) { // AI 回复点触标记（用上面已加载的 marks + 现取 ai_turns join 判类型；restored 已就位故 box 取得到手写包围盒）
+    const turns = await getBookAiTurns(docId);
+    if (state.documentId === docId && state.pageId === pageId && seq === reflowSeq && settings.viewMode === 'reader') { // 第二 await 后补 documentId 守卫·两表都在守卫内赋值（免 stale 覆盖）
+      markByIdR = new Map(marks.map((m) => [m.mark_id, m]));
+      turnByOverlay = new Map(turns.map((t) => [t.overlay_id, t]));
+      renderReplyMarkers();
+    }
+  }
 }
 
 let syncScheduled = false;
@@ -429,6 +443,7 @@ function streamStart(): void {
   el.querySelectorAll('.reader-page, .reader-empty, .reader-warn').forEach((n) => n.remove());
   pageWrap = null; inkStrokes.length = 0; blockRefs = [];
   restoredStrokes.length = 0; restoredMarkIds.clear(); // 同 render：流式重渲先清旧页 restored
+  if (replyMode) { el.querySelectorAll('.reader-reply-mark').forEach((n) => n.remove()); closePopover(); } // 旧页 AI 回复标记/浮层（否则浮在空列/半成品流上）
   const wrap = document.createElement('div'); wrap.className = 'reader-page';
   const col = document.createElement('article'); col.className = 'reader-col';
   wrap.appendChild(col);
@@ -551,6 +566,135 @@ function layoutNotes(): void {
     n.style.top = `${y}px`;
     cursor = y + n.offsetHeight + 12;
   }
+}
+
+// ── AI 回复折叠成点触浮层（仅移动版重排面 replyMode；桌面/原版仍走 renderNote/whisper-layer）──
+// 被回复内容上留特殊标记（圈/划/高亮=点状下划线·手写/画=虚线框·图=虚线框·idle综合=边缘☆），点标记弹浮层显回复+动作，点别处消失。
+let replyMode = false;
+let popoverEl: HTMLElement | null = null;
+let turnByOverlay = new Map<string, PersistedAiTurn>();   // overlay_id → ai_turn（判类型用·join 而来）
+let markByIdR = new Map<string, PersistedMark>();          // mark_id → mark
+/** 加载 ai_turns + marks 建 join 表（判"被回复内容类型"用·和 M10 同款异步）。 */
+async function refreshReplyMeta(): Promise<boolean> {
+  const docId = state.documentId, pageId = state.pageId, seq = reflowSeq;
+  if (!docId) { turnByOverlay = new Map(); markByIdR = new Map(); return false; }
+  const [turns, marks] = await Promise.all([getBookAiTurns(docId), getFoldedMarks(docId)]);
+  if (state.documentId !== docId || state.pageId !== pageId || seq !== reflowSeq) return false; // await 期间翻页/切书/重排 → 别用 stale 表覆盖当前页
+  turnByOverlay = new Map(turns.map((t) => [t.overlay_id, t]));
+  markByIdR = new Map(marks.map((m) => [m.mark_id, m]));
+  return true;
+}
+type ReplyMeta = { kind: 'text'; refs: string[] } | { kind: 'box'; markId?: string } | { kind: 'idle' };
+/** overlay → 被回复内容类型（join ai_turn→触发 mark 的 action/feature；join 不到则按 object_refs 粗分兜底）。 */
+function classifyOverlay(o: ScreenOverlay): ReplyMeta {
+  const turn = turnByOverlay.get(o.overlay_id);
+  const ab = turn?.inference_view?.anchor_bbox ?? o.geometry.anchor_bbox; // 触发/锚 mark：本页 mark_ids 里 bbox 最贴 anchor_bbox 的（无显式 anchor_mark_id）
+  let mark: PersistedMark | undefined;
+  if (turn) { let bd = Infinity;
+    for (const mid of turn.anchor?.mark_ids ?? []) { const m = markByIdR.get(mid); if (!m || m.page_id !== state.pageId) continue;
+      const d = Math.hypot((m.bbox[0] + m.bbox[2] / 2) - (ab[0] + ab[2] / 2), (m.bbox[1] + m.bbox[3] / 2) - (ab[1] + ab[3] / 2));
+      if (d < bd) { bd = d; mark = m; } } }
+  const act = mark?.hmp?.action;
+  if (mark) { // 按内容定：标记反映被标注的内容（不管是不是 idle 触发·用户定）
+    if (mark.feature_type === 'markup' && (act === 'enclosure' || act === 'underline' || act === 'highlight')) return { kind: 'text', refs: mark.hmp?.target_object_refs ?? o.object_refs ?? [] };
+    if (mark.feature_type === 'handwriting' || mark.feature_type === 'drawing' || mark.hmp?.mode === 'self_content' || act === 'sketch' || act === 'handwriting') return { kind: 'box', markId: mark.mark_id };
+  }
+  if ((o.object_refs?.length ?? 0) > 0) return { kind: 'text', refs: o.object_refs ?? [] }; // 无可定位锚 mark·但有文字 refs（页面级综合也常锚文字）
+  if (turn?.trigger === 'idle') return { kind: 'idle' }; // 真·无单一内容锚的纯页面级综合 → 边缘 ☆
+  return { kind: 'box', markId: mark?.mark_id };
+}
+/** 字符对象群 → 多行 union 矩形（点状下划线按行画·跨行多段）。 */
+function lineRectsForRefs(refs: string[]): CRect[] {
+  const rects = refs.flatMap((id) => rectsForObject(id)).sort((a, b) => a.top - b.top);
+  const lines: CRect[] = [];
+  for (const r of rects) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(r.top - last.top) < 8) { const right = Math.max(last.left + last.width, r.left + r.width); last.left = Math.min(last.left, r.left); last.width = right - last.left; last.top = Math.min(last.top, r.top); last.height = Math.max(last.height, r.height); }
+    else lines.push({ ...r });
+  }
+  return lines;
+}
+/** 手写/画 mark 在重排里的包围盒（取它已重画的 restoredStrokes·= 真实位置）；无则就近文本对象。 */
+function markBox(markId: string | undefined, anchorBbox: NormBBox): CRect | null {
+  const pts = markId ? restoredStrokes.filter((s) => s.markId === markId).flatMap((s) => s.points) : [];
+  if (pts.length) { const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y); return { left: Math.min(...xs), top: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) }; }
+  return nearestObjectRect(anchorBbox)?.rect ?? null;
+}
+const padBox = (b: CRect): CRect => ({ left: b.left - 4, top: b.top - 3, width: b.width + 8, height: b.height + 6 });
+function addReplyMark(cls: string, box: CRect, o: ScreenOverlay): void {
+  const m = document.createElement('div');
+  m.className = `reader-reply-mark ${cls} st-${o.state}`; // st-accepted/edited 给视觉状态（已处理 vs 未处理）
+  m.dataset.for = o.overlay_id;
+  m.style.cssText = `left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px;`;
+  m.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); openPopover(m, o); }); // 阻断 reader 落笔
+  el.appendChild(m); // 直接挂 #reader（滚动容器·随内容滚·像 ink 画布）
+}
+/** 重排里画出所有 AI 回复的标记（替代常驻内联低语）。 */
+function renderReplyMarkers(): void {
+  if (!replyMode) return;
+  el.querySelectorAll('.reader-reply-mark').forEach((n) => n.remove()); closePopover();
+  for (const o of state.overlays) {
+    if (o.page_id !== state.pageId || o.state === 'dismissed') continue;
+    const meta = classifyOverlay(o);
+    let drawn = false;
+    if (meta.kind === 'text') {
+      for (const r of lineRectsForRefs(meta.refs)) { addReplyMark('dot-underline', { left: r.left, top: r.top + r.height + 1, width: r.width, height: 3 }, o); drawn = true; }
+    }
+    if (!drawn && meta.kind !== 'idle') {
+      const b = markBox(meta.kind === 'box' ? meta.markId : undefined, o.geometry.anchor_bbox);
+      if (b) { addReplyMark('dash-box', padBox(b), o); drawn = true; }
+    }
+    if (!drawn) { // idle·或 text/box 定位全失败 → 边缘☆兜底：**回复永不无声消失**（定位不到也给个可点入口·移动重排已撤内联 note/whisper、没这条就彻底看不见）
+      const r = nearestObjectRect(o.geometry.anchor_bbox)?.rect;
+      addReplyMark('edge-star', { left: 1, top: (r?.top ?? el.scrollTop) + 1, width: 16, height: 16 }, o);
+    }
+  }
+}
+function closePopover(): void { popoverEl?.remove(); popoverEl = null; }
+/** 点标记 → 弹浮层（☆回复 + 收下/改写/散去）·定位标记下方夹进视口。 */
+function openPopover(trigger: HTMLElement, o: ScreenOverlay): void {
+  closePopover();
+  const pop = document.createElement('div'); pop.className = 'reader-reply-pop';
+  pop.addEventListener('pointerdown', (e) => e.stopPropagation()); // 拦冒泡到 #reader（否则点浮层正文会在笔/橡皮模式下落笔/擦）·**不** preventDefault（保 contentEditable 光标/选区）
+  pop.style.maxHeight = `${Math.max(80, el.clientHeight - 24)}px`; pop.style.overflowY = 'auto'; // 长回复在分页 hidden overflow 下可滚到动作按钮
+  const body = document.createElement('div'); body.className = 'reader-reply-text'; body.textContent = o.display_text;
+  pop.appendChild(body); pop.appendChild(replyActions(o, body));
+  el.appendChild(pop); popoverEl = pop;
+  const er = el.getBoundingClientRect(), tr = trigger.getBoundingClientRect();
+  let left = tr.left - er.left + el.scrollLeft, top = tr.bottom - er.top + el.scrollTop + 6;
+  requestAnimationFrame(() => {
+    if (popoverEl !== pop) return;
+    left = Math.max(el.scrollLeft + 8, Math.min(left, el.scrollLeft + el.clientWidth - pop.offsetWidth - 8));
+    if (top + pop.offsetHeight > el.scrollTop + el.clientHeight - 8) top = (tr.top - er.top + el.scrollTop) - pop.offsetHeight - 6;
+    pop.style.left = `${left}px`; pop.style.top = `${Math.max(el.scrollTop + 8, top)}px`;
+  });
+}
+/** 收下/改写/散去（复用 whisper 同款小状态机：改 state[+改写改 display_text] → emit overlay:state → annotation-loop 落账）。 */
+function replyActions(o: ScreenOverlay, body: HTMLElement): HTMLElement {
+  const acts = document.createElement('div'); acts.className = 'reader-reply-acts';
+  const setState = (next: OverlayState): void => { if (o.state !== 'shown' && !(o.state === 'accepted' && next === 'edited')) return; o.state = next; bus.emit('overlay:state', o); closePopover(); renderReplyMarkers(); };
+  const mk = (label: string, fn: () => void): void => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); fn(); }); acts.appendChild(b); };
+  mk('收下', () => setState('accepted'));
+  mk('改写', () => { if (body.isContentEditable) { body.contentEditable = 'false'; o.display_text = body.textContent ?? ''; setState('edited'); } else { body.contentEditable = 'true'; body.focus(); } });
+  mk('散去', () => setState('dismissed'));
+  return acts;
+}
+/** 图解浮层（只看·无动作·图不是 overlay）。 */
+function openFigurePopover(trigger: HTMLElement, text: string): void {
+  closePopover();
+  const pop = document.createElement('div'); pop.className = 'reader-reply-pop';
+  pop.addEventListener('pointerdown', (e) => e.stopPropagation());
+  pop.style.maxHeight = `${Math.max(80, el.clientHeight - 24)}px`; pop.style.overflowY = 'auto';
+  const body = document.createElement('div'); body.className = 'reader-reply-text'; body.textContent = text;
+  pop.appendChild(body); el.appendChild(pop); popoverEl = pop;
+  const er = el.getBoundingClientRect(), tr = trigger.getBoundingClientRect();
+  let left = tr.left - er.left + el.scrollLeft, top = tr.bottom - er.top + el.scrollTop + 6;
+  requestAnimationFrame(() => {
+    if (popoverEl !== pop) return;
+    left = Math.max(el.scrollLeft + 8, Math.min(left, el.scrollLeft + el.clientWidth - pop.offsetWidth - 8));
+    if (top + pop.offsetHeight > el.scrollTop + el.clientHeight - 8) top = (tr.top - er.top + el.scrollTop) - pop.offsetHeight - 6;
+    pop.style.left = `${left}px`; pop.style.top = `${Math.max(el.scrollTop + 8, top)}px`;
+  });
 }
 
 // ── 圈画采集 ──
@@ -810,7 +954,9 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
   notePlacement = opts?.notePlacement ?? 'margin';
   restoreStrokes = opts?.restoreStrokes ?? false;
   paginate = opts?.paginate ?? false;
+  replyMode = restoreStrokes; // 移动版重排面：AI 回复折叠成点触浮层（桌面/原版仍走 renderNote/whisper-layer）
   if (paginate) el.style.overflowY = 'hidden'; // 分页：禁自由滚（电纸屏靠 ‹ › 翻虚拟页；programmatic scrollTop 仍可步进）
+  if (replyMode) document.addEventListener('pointerdown', (e) => { const t = e.target; if (popoverEl && !(t instanceof Element && t.closest('.reader-reply-pop,.reader-reply-mark,.reader-fig'))) closePopover(); }, true); // 点别处（非浮层/标记/图）关浮层
   inkCv = document.createElement('canvas');
   inkCv.className = 'reader-ink';
   el.appendChild(inkCv);
@@ -862,9 +1008,13 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
   bus.on('page:rendered', rebuild);
   bus.on('settings:changed', rebuild);
   setReaderTouchAction();                          // 初始就位
-  bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode === 'reader' && ov.page_id === state.pageId) { renderNote(ov); scheduleSyncRestoredMarks(); } });
-  bus.on('overlay:remove', (id) => { el.querySelector(`.reader-note[data-for="${id as string}"]`)?.remove(); scheduleSyncRestoredMarks(); });
-  bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode === 'reader' && ov.page_id === state.pageId) { renderNote(ov); scheduleSyncRestoredMarks(); } });
+  // AI 回复变动：移动版重排=只刷新点触标记（marker 是绝对定位·不改文档流→**不再** scheduleSyncRestoredMarks/重分页·这就是去掉的"内联 note 推内容"那套）；桌面/原版仍走 renderNote。
+  const refreshReplyMarkers = (): void => { if (replyMode && settings.viewMode === 'reader') void refreshReplyMeta().then((ok) => { if (ok) renderReplyMarkers(); }); };
+  bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode !== 'reader' || ov.page_id !== state.pageId) return; if (replyMode) refreshReplyMarkers(); else { renderNote(ov); scheduleSyncRestoredMarks(); } });
+  bus.on('overlay:remove', (id) => { if (replyMode) { if (settings.viewMode === 'reader') renderReplyMarkers(); } else { el.querySelector(`.reader-note[data-for="${id as string}"]`)?.remove(); scheduleSyncRestoredMarks(); } });
+  bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode !== 'reader' || ov.page_id !== state.pageId) return; if (replyMode) refreshReplyMarkers(); else { renderNote(ov); scheduleSyncRestoredMarks(); } });
+  bus.on('aiturn:appended', () => refreshReplyMarkers()); // 回复落账(overlay:add 早于它)→重 join 刷新·修首帧粗分错标记一直留着
+
   // 重排里落的笔收口成 mark 后 → 重投影（把那条仍是内容px的 live inkStroke 升级成锚到块的 restored·不然旁注插入致内容移位它不跟随）。scheduleSyncRestoredMarks 内部已 gate 移动版+重排态。
   bus.on('mark:resolved', () => scheduleSyncRestoredMarks());
   window.addEventListener('resize', () => { if (settings.viewMode === 'reader') { resizeInk(); layoutNotes(); settleV('relayout'); scheduleSyncRestoredMarks(); } }); // 补 resync：resize 改了块位、restored 需按新位重投影（否则与正文错位）
