@@ -239,6 +239,14 @@ export type MarkEdgeKind = 'spatial' | 'temporal' | 'semantic';
 /** 时间×空间四象限：近/近=一口气、近时远空=扫读、远时近空=回访、远/远=另起。 */
 export type QuadrantLabel = 'one_action' | 'sweep' | 'revisit' | 'separate';
 
+/** 运笔方式（Slice A）：从笔迹点确定性提取的"怎么画的"。只在信号明显时带 adverb；retraced 仅 markup。 */
+export interface MarkManner {
+  adverb?: 'hesitant' | 'decisive' | 'careful'; // 主导语气：迟疑/果断/仔细
+  retraced?: boolean;                            // 在同一处来回叠（重描）
+  hesitationMs?: number;                         // DEV/trace：落笔迟疑
+  speed?: number;                                // DEV/trace：归一化速度（对角线/秒）
+}
+
 /** 标注图节点 = 一个 mark（1.2s 组装出的一次手势）的取证摘要。 */
 export interface MarkNode {
   mark_id: string;
@@ -253,6 +261,7 @@ export interface MarkNode {
   target_object_refs: string[];
   text_hint?: string;
   text?: string;                    // 落笔当时解析好的"所标内容"（结构原文+转写）；跨页 session 提交时不再依赖 live index
+  manner?: MarkManner;              // 运笔方式（Slice A）：果断/迟疑/仔细/重描，喂进 inference-view 叙事
 }
 
 /** 标注图的边：两 mark 之间的关联（语义边可带方向）。 */

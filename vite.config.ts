@@ -102,6 +102,8 @@ export default defineConfig(({ mode }) => {
     build: {
       target: 'es2022',
       rollupOptions: {
+        // 多页：桌面 web=index.html（浏览器）；电纸屏移动版=mobile.html（安卓壳加载这个）。两页共享 pdfjs 等 chunk。
+        input: { main: 'index.html', mobile: 'mobile.html' },
         output: {
           // pdfjs-dist 本体(~数百KB)拆出主包，否则 index.js 触发 >500KB 警告。
           // worker(.mjs)本就独立加载，这里拆的是主线程那半。

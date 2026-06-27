@@ -70,6 +70,8 @@ export interface Settings {
   showRegion: boolean;
   // dev：会话提交后，把"内容关联的标注"（标注图里空间/语义相连的一组）用紫色虚框圈起来。看哪些标注被当成一组。
   showRelations: boolean;
+  // dev：基岩录制（Tier 1 原始笔迹流·影子）。开后死区前的运动逐帧录进 ink_samples；不碰标注/AI。默认关。
+  bedrock: boolean;
 }
 
 export const settings: Settings = {
@@ -88,6 +90,7 @@ export const settings: Settings = {
   devOverlay: false,    // dev bbox 叠层默认关。
   showRegion: true,     // dev 组装区域实时可视：默认开（手写时看受影响区域）。
   showRelations: true,  // dev 关联框：默认开（提交后看哪些标注被判为内容关联的一组）。
+  bedrock: false,       // 基岩录制默认关（影子·实验）。
 };
 
 /**
@@ -102,7 +105,7 @@ const PRODUCT_KEY = 'inkloop.prefs.v1';
 const DEV_KEY = 'inkloop.devflags.v1';
 const LEGACY_KEY = 'inkloop.settings.v1';
 const PRODUCT_FIELDS = ['placement', 'viewMode', 'reflowProvider', 'gesture'] as const;
-export const DEV_FIELDS = ['reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations'] as const;
+export const DEV_FIELDS = ['reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations', 'bedrock'] as const;
 
 type SettingsRec = Record<string, unknown>;
 

@@ -1,7 +1,9 @@
 import type { AnnotationEvent, EventType, NormBBox, ScreenOverlay, StrokePoint } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
 import type { ReflowBlock } from './reflow';
-import { bus, settings, state } from '../app/state';
+import { bus, settings, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
+import { recordInkSample } from '../local/bedrock-recorder';
+import { styleFor } from '../capture/stroke-style';
 import { reflowProviders, reflowAiStream } from './reflow-provider';
 import { reflowLocal } from './reflow';
 import { extractPageBlocks } from './renderer';
@@ -63,9 +65,15 @@ function nearestBlockByBbox(bb: NormBBox): BlockRef | null {
   return best;
 }
 
-const inkStrokes: { x: number; y: number }[][] = []; // 已落的笔迹（内容坐标）
-let live: { x: number; y: number }[] | null = null;
+/** 重排面一笔：内容坐标 px + 每点真实压感/时间（喂 styleFor 压感线宽、喂 Tier2 运笔方式），tool 随笔走（钢笔/荧光笔）。 */
+interface RPoint { x: number; y: number; pressure: number; t: number }
+/** committed = onPenUp 发往 reader:gesture 的那条页坐标笔（strokeMarkIds 的 key）；橡皮据此回查整 mark。 */
+interface ReaderStroke { tool: Tool; points: RPoint[]; committed?: Stroke }
+const inkStrokes: ReaderStroke[] = []; // 已落的笔迹（内容坐标）
+let live: { tool: Tool; t0: number; points: RPoint[] } | null = null;
 const READER_DEADZONE_PX = 1.3; // 死区(内容 px)：丢相邻 < 此值的抖动点；对齐原版页 ink.ts，避免合并采点产生大量重复点
+const MAX_CANVAS_PX = 16000;    // 画布高度封顶（防撞浏览器 canvas 维度上限~16384px，超则整画布失效）；极长重排页超出部分墨不渲染
+let lastCanvasW = 0, lastCanvasH = 0, lastDpr = 0; // 上次画布尺寸+DPR：只在真变了才重建位图（避免流式逐块重建大缓冲=卡顿源；纳入 DPR 防换屏/缩放后比例错）
 
 // ── 渲染 ──
 /** 把一个重排文本块建成 DOM 节点（标题/段落/列表）。流式追加与整页渲染共用，保证两条路样式一致。 */
@@ -177,6 +185,7 @@ async function explainFigure(cap: HTMLElement, source: NormBBox, image?: string)
 let reflowKey = '';   // 上次重排的输入键（页 + 引擎 + 模型）——只在它变了才重排
 let reflowSeq = 0;    // 防并发：快速翻页/切引擎时只让最新一次结果落地
 let reflowAbort: AbortController | null = null; // 取消上一次未完的流式请求（快速翻页）
+let reflowSettling = false; // 重排进行中（占位/流式/算块）→ 内容与画布尺寸不稳，期间不接落笔（避免画的墨随终渲被清空/错位）
 
 /** 缓存/重排身份键：ai 引擎把模型并入（换重排模型 → 独立缓存、可 A/B），其余引擎用引擎名。 */
 export function engineKey(provider: string): string {
@@ -236,7 +245,7 @@ function streamAppend(b: ReflowBlock): void {
   const node = makeBlockNode(b);
   streamCol.appendChild(node);
   blockRefs.push({ id: b.id, el: node, source: b.source });
-  resizeInk();
+  // 流式期间不 resizeInk（用户不在画、墨画布无需逐块长高）——renderFinal 末尾统一重排一次，去掉逐块大位图重建。
 }
 
 async function rebuild(): Promise<void> {
@@ -251,6 +260,7 @@ async function rebuild(): Promise<void> {
   const seq = ++reflowSeq;
   reflowAbort?.abort(); reflowAbort = null;       // 翻得快 → 砍掉上一次未完的流
   const stale = () => seq !== reflowSeq || settings.viewMode !== 'reader';
+  reflowSettling = true; // 重排开始：期间挡落笔（内容/画布尺寸不稳，避免画的墨随终渲被清/错位）
   try {
     // 1) 命中持久化缓存（翻回 / 已预热）→ 直接终渲，零请求
     const cached = getReflow(state.pageIndex, ekey);
@@ -296,6 +306,8 @@ async function rebuild(): Promise<void> {
     err.className = 'reader-empty';
     err.textContent = `重排失败：${(e as Error).message}`;
     el.insertBefore(err, inkCv);
+  } finally {
+    if (seq === reflowSeq) reflowSettling = false; // 本次重排结束（未被更新一次取代）→ 恢复落笔
   }
 }
 
@@ -348,24 +360,36 @@ function resizeInk(): void {
   if (!inkCtx) return;
   const dpr = window.devicePixelRatio || 1;
   const w = el.clientWidth;
-  const h = Math.max(el.scrollHeight, el.clientHeight);
-  inkCv.width = w * dpr; inkCv.height = h * dpr;
-  inkCv.style.width = w + 'px'; inkCv.style.height = h + 'px';
+  const h = Math.min(Math.max(el.scrollHeight, el.clientHeight), MAX_CANVAS_PX);
+  // 只在尺寸真变了才重建位图（赋 canvas.width 总会重分配+清空大缓冲）——流式逐块 append 时尺寸基本不变即跳过，去掉重建风暴。
+  if (w !== lastCanvasW || h !== lastCanvasH || dpr !== lastDpr) {
+    inkCv.width = w * dpr; inkCv.height = h * dpr;
+    inkCv.style.width = w + 'px'; inkCv.style.height = h + 'px';
+    lastCanvasW = w; lastCanvasH = h; lastDpr = dpr;
+  }
   inkCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   inkCtx.clearRect(0, 0, w, h);
-  inkCtx.strokeStyle = '#1A1A1A';
-  inkCtx.lineWidth = 1.6;
-  inkCtx.lineCap = 'round';
   for (const s of inkStrokes) drawStroke(s);
   if (live) drawStroke(live);
 }
 
-function drawStroke(pts: { x: number; y: number }[]): void {
-  if (!inkCtx || pts.length < 2) return;
+/** 画一段线段（内容 px）：样式走共享 styleFor（压感线宽 + 荧光笔 multiply），与原版页同一画法。 */
+function drawSegR(a: RPoint, b: RPoint, tool: Tool): void {
+  if (!inkCtx) return;
+  const s = styleFor(tool, b.pressure);
+  inkCtx.globalCompositeOperation = s.composite;
+  inkCtx.strokeStyle = s.stroke;
+  inkCtx.lineCap = s.cap;
+  inkCtx.lineWidth = s.width;
   inkCtx.beginPath();
-  inkCtx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) inkCtx.lineTo(pts[i].x, pts[i].y);
+  inkCtx.moveTo(a.x, a.y);
+  inkCtx.lineTo(b.x, b.y);
   inkCtx.stroke();
+  inkCtx.globalCompositeOperation = 'source-over';
+}
+
+function drawStroke(st: ReaderStroke): void {
+  for (let i = 1; i < st.points.length; i++) drawSegR(st.points[i - 1], st.points[i], st.tool);
 }
 
 function contentPoint(e: PointerEvent): { x: number; y: number } {
@@ -399,8 +423,9 @@ function makeEvent(kind: EventType, pts: StrokePoint[]): AnnotationEvent {
   };
 }
 
-function onPenUp(raw: { x: number; y: number }[]): void {
+function onPenUp(st: ReaderStroke): void {
   // 保留单点笔（中文的点/顿快写只落一个点）：孤立点按仍由下游 tap 过滤滤掉，多笔手写里的点靠 keepShortStrokes 存活。
+  const raw = st.points;
   if (!raw.length) return;
   const hit = hitBlock(raw);
   if (!hit) return; // 没画在任何段上 → 不入
@@ -412,14 +437,74 @@ function onPenUp(raw: { x: number; y: number }[]): void {
   //   · 永不塌缩（与块宽窄/退化无关）；· 不夹值，落块上/下/旁都按真实相对位移映射；
   //   · #ink-layer 据此画出真实尺寸笔迹 → grabLayers 裁出的识别图即真实形状（识别图自动修好，无需改取图链路）。
   const w = pageCss.w || 1, h = pageCss.h || 1;
-  const pts: StrokePoint[] = raw.map((p, i) => ({
+  const pts: StrokePoint[] = raw.map((p) => ({
     x: ref.source[0] + (p.x - left) / w,
     y: ref.source[1] + (p.y - top) / h,
-    t: i, pressure: 0.5,
+    t: p.t, pressure: p.pressure,   // 真实时间/压感（喂 Tier2 运笔方式 / 未来压感），不再合成 t:i / 0.5
   }));
   const scored = classifyScored(pts, bboxOf(pts));
+  const stroke: Stroke = { tool: st.tool, points: pts };
+  st.committed = stroke; // 橡皮用：命中此重排笔 → strokeMarkIds.get(committed) 拿整 mark
   // 当正常 page-ledger mark：发 bus 给 main 走 ingestStroke（组装 + 跨视图 + 持久 + 同享 session/idle）
-  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts), stroke: { tool: 'pen', points: pts } });
+  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts), stroke });
+}
+
+/** 落笔意图（仅重排面）：tool 决定——hand=滚动浏览、pen/highlighter=落笔(笔与手指都画)。
+ *  eraser 在 pointerdown 单独处理（擦不画也不滚）。与原版页 resolveIntent 同精神，区别：重排面"导航"=原生滚动、非翻页。 */
+function readerIntent(): 'annotate' | 'navigate' {
+  return state.tool === 'hand' ? 'navigate' : 'annotate';
+}
+
+/** 橡皮命中：内容 px 半径内命中哪一条重排笔 → 擦它（连带整 mark）。点按命中最上面一条即返回。 */
+function eraseAt(e: PointerEvent): void {
+  const p = contentPoint(e);
+  const R = 12; // 命中半径（内容 px）
+  for (let i = inkStrokes.length - 1; i >= 0; i--) {
+    if (inkStrokes[i].points.some((pt) => Math.hypot(pt.x - p.x, pt.y - p.y) < R)) { eraseReaderStroke(inkStrokes[i]); return; }
+  }
+}
+
+/** 擦一笔重排墨：已成 mark（committed 有 markId）→ 擦掉该 mark 的全部重排笔 + 页坐标副本 + 发 mark:erase 落 tombstone；
+ *  尚未组装（无 markId·罕见的 6s 内擦）→ 只移这条视觉笔。 */
+function eraseReaderStroke(st: ReaderStroke): void {
+  const mid = st.committed ? strokeMarkIds.get(st.committed) : undefined;
+  if (mid) {
+    const pageArr = state.pageId ? state.strokesByPage.get(state.pageId) : undefined;
+    for (let k = inkStrokes.length - 1; k >= 0; k--) {
+      const c = inkStrokes[k].committed;
+      if (c && strokeMarkIds.get(c) === mid) {
+        if (pageArr) { const j = pageArr.indexOf(c); if (j >= 0) pageArr.splice(j, 1); } // 同步移页坐标副本→切回原版页不残留
+        inkStrokes.splice(k, 1);
+      }
+    }
+    bus.emit('mark:erase', mid); // → annotation-loop：落 tombstone + 从 session 移除
+  } else {
+    // 尚未组装（无 markId·6s 内擦/识别异步期）：撤在途笔——通知 annotation-loop 从 pending 组装队列 + strokesByPage + #ink-layer 移除
+    // （否则 6s 后仍 assemble 成 mark 落账本、切原版页/reload 复活），再移本面视觉笔。
+    if (st.committed) bus.emit('stroke:cancel', st.committed);
+    const k = inkStrokes.indexOf(st);
+    if (k >= 0) inkStrokes.splice(k, 1);
+  }
+  resizeInk(); // 重画重排画布
+}
+
+/** 基岩录制 tap（Tier 1·影子·死区前·surface=reader）。坐标按重排内容画布尺寸归一化、记真实运动；关时零开销。 */
+function bedrockTapR(e: PointerEvent, phase: 'down' | 'move' | 'up'): void {
+  if (!settings.bedrock || !state.documentId) return;
+  const w = el.clientWidth || 1, h = Math.max(el.scrollHeight, el.clientHeight) || 1;
+  const p = contentPoint(e);
+  recordInkSample({
+    documentId: state.documentId, pageId: state.pageId ?? undefined,
+    x: p.x / w, y: p.y / h, phase, contactId: e.pointerId,
+    pressure: e.pressure, dims: { w, h },
+    penSource: e.pointerType === 'pen', surface: 'reader',
+  });
+}
+
+/** 按当前工具切 #reader 的 touch-action：pen/highlighter/eraser 禁原生滚动→手指落笔即画/擦；仅 hand 放行纵向滚动。 */
+function setReaderTouchAction(): void {
+  if (!el) return;
+  el.style.touchAction = settings.viewMode === 'reader' && readerIntent() === 'annotate' ? 'none' : 'pan-y';
 }
 
 export function initReader(readerEl: HTMLElement): void {
@@ -431,36 +516,47 @@ export function initReader(readerEl: HTMLElement): void {
 
   el.addEventListener('pointerdown', (e) => {
     if (settings.viewMode !== 'reader' || !state.pageId) return;
-    if (state.tool === 'eraser' || state.tool === 'hand') return; // hand 工具/手指不在重排面画
-    if (e.pointerType === 'touch') return;                        // 触屏手指留给滚动导航
-    live = [contentPoint(e)];
+    if (state.tool === 'hand') return;                    // 让出给 #reader 原生滚动
+    if (reflowSettling) return;                           // 重排未稳：让出原生滚动、不落笔/不擦（内容与画布尺寸不稳）
+    e.preventDefault();
+    if (state.tool === 'eraser') { eraseAt(e); return; }  // 橡皮：擦命中的笔/整 mark，不落 live、不滚
+    try { el.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    live = { tool: state.tool, t0: performance.now(), points: [{ ...contentPoint(e), pressure: e.pressure || 0, t: 0 }] };
+    bedrockTapR(e, 'down');
   });
   el.addEventListener('pointermove', (e) => {
+    if (state.tool === 'eraser' && e.buttons) { eraseAt(e); return; } // 按住拖动连擦（对齐原版页）
     if (!live) return;
+    e.preventDefault();
     // 无损采点：优先取合并事件（快写时一次 move 携多个采样点）——对齐原版页 ink.ts，治中文快写笔点稀疏/毛糙。
     const coalesced = e.getCoalescedEvents ? (e.getCoalescedEvents() as PointerEvent[]) : [];
     const list = coalesced.length ? coalesced : [e];
     for (const ce of list) {
       const p = contentPoint(ce);
-      const last = live[live.length - 1];
+      bedrockTapR(ce, 'move'); // 死区前：连手抖也录进基岩
+      const last = live.points[live.points.length - 1];
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < READER_DEADZONE_PX) continue; // 死区：丢 sub-px 抖动
-      live.push(p);
-      drawStroke(live.slice(-2));
+      const pt: RPoint = { x: p.x, y: p.y, pressure: ce.pressure || 0, t: Math.round(performance.now() - live.t0) };
+      drawSegR(last, pt, live.tool); // 增量画新线段（压感线宽，无须全量重画）
+      live.points.push(pt);
     }
   });
   const finish = (e: PointerEvent) => {
     if (!live) return;
-    const pts = live; live = null;
-    inkStrokes.push(pts);
-    onPenUp(pts);
-    void e;
+    bedrockTapR(e, 'up');
+    const st = live; live = null;
+    inkStrokes.push(st);
+    onPenUp(st);
   };
   el.addEventListener('pointerup', finish);
-  el.addEventListener('pointercancel', () => { live = null; });
+  el.addEventListener('pointercancel', () => { live = null; resizeInk(); }); // 清掉已增量画上的 live 线段，否则留视觉幽灵墨
 
   bus.on('view:changed', rebuild);
+  bus.on('view:changed', setReaderTouchAction); // 进/出重排 → touch-action 跟随
+  bus.on('tool', setReaderTouchAction);          // 切工具 → 重排面滚动/落笔切换
   bus.on('page:rendered', rebuild);
   bus.on('settings:changed', rebuild);
+  setReaderTouchAction();                          // 初始就位
   bus.on('overlay:add', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode === 'reader' && ov.page_id === state.pageId) renderNote(ov); });
   bus.on('overlay:remove', (id) => el.querySelector(`.reader-note[data-for="${id as string}"]`)?.remove());
   bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode === 'reader' && ov.page_id === state.pageId) renderNote(ov); });

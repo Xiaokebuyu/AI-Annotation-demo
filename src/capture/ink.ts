@@ -1,7 +1,9 @@
 import type { StrokePoint } from '../core/contracts';
 import { normToPx, pxToNorm, pageCss } from '../core/transform';
 import { trace } from '../core/trace';
-import { bus, currentStrokes, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
+import { bus, currentStrokes, settings, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
+import { recordInkSample } from '../local/bedrock-recorder';
+import { styleFor } from './stroke-style';
 
 let cv: HTMLCanvasElement;
 let ctx: CanvasRenderingContext2D;
@@ -17,29 +19,13 @@ const SWIPE_MIN_PX = 60; // 横滑超过此距离且以横向为主 → 翻页
 
 /**
  * 输入意图分流 —— 笔 / 手指的「硬件接口」，policy 只在这一处：
- *  - pointerType 'pen'   → 标注（触控笔 / iPad Apple Pencil）
- *  - pointerType 'touch' → 翻页·导航（手指 / 触屏）
- * 真机 / iPad 直接命中上面两支（搬过去零改）；桌面鼠标无 pen/touch，落到 hand 工具兜底。
+ *  - pointerType 'pen'          → 标注（触控笔 / iPad Apple Pencil）
+ *  - pointerType 'touch' / 鼠标 → 跟随当前工具：hand 工具翻页，其它(笔/荧光/擦)落笔
+ * 电纸屏电容触摸(WingCool HID)枚举为 'touch'，故手指默认能写、切 hand 工具才翻页。
  */
 function resolveIntent(pointerType: string): 'annotate' | 'navigate' {
   if (pointerType === 'pen') return 'annotate';
-  if (pointerType === 'touch') return 'navigate';
   return state.tool === 'hand' ? 'navigate' : 'annotate';
-}
-
-interface SegStyle {
-  stroke: string;
-  width: number;
-  cap: CanvasLineCap;
-  composite: GlobalCompositeOperation;
-}
-
-function styleFor(tool: Tool, pressure: number): SegStyle {
-  if (tool === 'highlighter') {
-    // 规范色 #D4CFCA（E-ink 友好浅灰高亮），multiply 让文字透出
-    return { stroke: 'rgba(212,207,202,0.85)', width: 16, cap: 'butt', composite: 'multiply' };
-  }
-  return { stroke: '#1A1A1A', width: 1.2 + 2.2 * (pressure || 0.45), cap: 'round', composite: 'source-over' };
 }
 
 function drawSeg(a: StrokePoint, b: StrokePoint, tool: Tool): void {
@@ -74,6 +60,17 @@ function evtNorm(e: { clientX: number; clientY: number }): { x: number; y: numbe
   return pxToNorm(e.clientX - r.left, e.clientY - r.top);
 }
 
+/** 基岩录制 tap（Tier 1·影子·死区前）。features.bedrock 关时立即返回、零开销。 */
+function bedrockTap(e: PointerEvent, p: { x: number; y: number }, phase: 'down' | 'move' | 'up'): void {
+  if (!settings.bedrock || !state.documentId) return;
+  recordInkSample({
+    documentId: state.documentId, pageId: state.pageId ?? undefined,
+    x: p.x, y: p.y, phase, contactId: e.pointerId,
+    pressure: e.pressure, dims: { w: pageCss.w, h: pageCss.h },
+    penSource: e.pointerType === 'pen', surface: 'article',
+  });
+}
+
 function eraseAt(e: PointerEvent): void {
   const p = evtNorm(e);
   const strokes = currentStrokes();
@@ -97,6 +94,7 @@ function eraseStroke(stroke: Stroke, reason: 'erase' | 'undo'): void {
   } else {
     const k = strokes.indexOf(stroke);
     if (k >= 0) strokes.splice(k, 1);
+    bus.emit('stroke:cancel', stroke); // 撤 pending 组装：否则 6s 内擦的在途笔仍 assemble 成 mark、reload 复活（两面共有的老洞）
   }
   trace(reason === 'undo' ? 'StrokeUndone' : 'StrokeErased', { page_id: state.pageId ?? '', mark_id: mid ?? '' });
   redrawInk();
@@ -135,6 +133,7 @@ export function initInk(
       pointerType: e.pointerType,
       points: [{ x: p.x, y: p.y, t: 0, pressure: e.pressure || 0 }],
     };
+    bedrockTap(e, p, 'down');
   });
 
   cv.addEventListener('pointermove', (e) => {
@@ -146,6 +145,7 @@ export function initInk(
     if (!raw.length) raw = [e];
     for (const ce of raw) {
       const p = evtNorm(ce);
+      bedrockTap(ce, p, 'move'); // 死区前：连手抖也录下来
       const last = live.points[live.points.length - 1];
       // 死区：与上一点相距 < DEADZONE_PX(CSS px) 的 sub-px 抖动直接丢，稳 tap 判定（页面未渲染时 pageCss=0，跳过死区）
       if (pageCss.w && pageCss.h && Math.hypot((p.x - last.x) * pageCss.w, (p.y - last.y) * pageCss.h) < DEADZONE_PX) continue;
@@ -177,7 +177,7 @@ export function initInk(
     if (Math.abs(dx) > SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy)) bus.emit('nav:flip', dx < 0 ? 1 : -1);
   };
 
-  cv.addEventListener('pointerup', (e) => { if (nav) finishNav(e); else finish(); });
+  cv.addEventListener('pointerup', (e) => { if (nav) finishNav(e); else { bedrockTap(e, evtNorm(e), 'up'); finish(); } });
   cv.addEventListener('pointercancel', () => { live = null; nav = null; });
 
   bus.on('page:rendered', () => redrawInk());

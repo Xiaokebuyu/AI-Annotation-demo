@@ -25,7 +25,8 @@ export type DevEventKind =
   | 'intent_ab'  // 端侧 intent A/B 影子：云端 respond/fold vs 端侧规则 IntentClassifier 预测 + 一致否
   | 'inference'  // 主模型一轮：真实 system/task、focus、回复、计时、当前设置快照
   | 'pageocr'    // 图片版/扫描页 OCR 文本层：phase(layer位置层/flat纯文本/none)、blocks/chars、source、延迟、样本文字
-  | 'relviz';    // 关系图可视化（dev 叠层）调试
+  | 'relviz'     // 关系图可视化（dev 叠层）调试
+  | 'bedrock';   // 基岩录制（Tier 1 影子）：起段(profile/锚) + 每次 flush 的采样块摘要(帧数/seq区间/首末帧)
 
 const DEV = (import.meta as { env?: { DEV?: boolean } }).env?.DEV === true;
 

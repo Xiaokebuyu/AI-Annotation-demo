@@ -205,7 +205,7 @@ export async function openPdfFromUrl(documentId: string, filename: string, pdfUr
  * context（主阅读的书/态）来达到「独立实例」的体验。**方案 B**=把阅读器重构成可实例化的「可标注 surface
  * 组件」（底座层，阅读+每会议各持独立实例）记为后面做，别在阅读上板前动引擎结构。
  */
-export function renderBlankSurface(documentId: string, title = '空白页'): void {
+export function renderBlankSurface(documentId: string, title = '空白页', opts: { ruledLines?: boolean; width?: number; height?: number } = {}): void {
   cancelActiveRender(); // 先取消在途 PDF 渲染：否则旧页像素会继续写进下面要画白纸的同一 pageCv（B3）
   getActiveContext().pdf = null; // 脱离上一份 PDF（防 zoom/翻页误渲旧页）
   getActiveContext().storeDoc = null; setActiveDoc(null); // 白板无持久化文档：store.current 置空，页缓存/阅读位置写操作变 no-op（P0-4）
@@ -220,8 +220,10 @@ export function renderBlankSurface(documentId: string, title = '空白页'): voi
   state.outline = null;
 
   const dpr = window.devicePixelRatio || 1;
-  const { fit: W, gutter: gut } = pageMetrics();
-  const H = Math.round(W * 1.32); // 一张竖向「纸」
+  const pm = pageMetrics();
+  const W = opts.width ?? pm.fit;                 // 移动版日记传可写区实宽（满铺到边）；否则按页面 fit
+  const gut = opts.width != null ? 0 : pm.gutter; // 满铺时无右侧留白
+  const H = opts.height ?? Math.round(W * 1.32); // 移动版传可写区实高（填满）；否则一张竖向「纸」
   for (const cv of [pageCv, inkCv]) {
     cv.width = W * dpr; cv.height = H * dpr;
     cv.style.width = W + 'px'; cv.style.height = H + 'px';
@@ -234,8 +236,10 @@ export function renderBlankSurface(documentId: string, title = '空白页'): voi
   const ctx = pageCv.getContext('2d')!;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1; // 极淡稿纸线（纯装饰，不进 SurfaceIndex）
-  for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+  if (opts.ruledLines !== false) { // 极淡稿纸线（纯装饰，不进 SurfaceIndex）；移动版日记把线格交给可开关的 CSS 叠层、故传 false
+    ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1;
+    for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+  }
 
   const pageId = pageIdFor(documentId, 0); // 全 id 哈希，与 PDF 页一致、免会议白板 id 碰撞（B5）
   state.pageId = pageId;
@@ -246,6 +250,32 @@ export function renderBlankSurface(documentId: string, title = '空白页'): voi
   state.surfaceIndex = blankSurfaceIndex(pageId);
 
   bus.emit('document:loaded'); // → restoreFromLedger() 自动重绘本白板已存的笔
+  bus.emit('page:rendered');
+  bus.emit('surface:indexed', state.surfaceIndex);
+}
+
+/**
+ * 空白文档内翻到某页（日记多页）：换 pageId/surfaceIndex、按现画布尺寸重画白底，**不清其它页内存笔迹**。
+ * 翻页后调用方应调 redrawInk() 把该页笔迹画回 #ink-layer。同步执行、无 await，无账本竞态。
+ */
+export function renderBlankPage(pageIndex: number, opts: { ruledLines?: boolean } = {}): void {
+  if (!state.documentId) return;
+  cancelActiveRender(); // 取消在途 PDF 渲染（防旧像素写进白底）
+  state.pageIndex = pageIndex;
+  const pageId = pageIdFor(state.documentId, pageIndex);
+  state.pageId = pageId;
+  if (state.pageRecord) state.pageRecord = { ...state.pageRecord, page_id: pageId, page_index: pageIndex };
+  state.overlays = [];
+  state.surfaceIndex = blankSurfaceIndex(pageId);
+  const dpr = window.devicePixelRatio || 1;
+  const W = pageCv.width / dpr, H = pageCv.height / dpr; // 复用当前画布尺寸（满铺写区）
+  const ctx = pageCv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  if (opts.ruledLines !== false) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1;
+    for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+  }
   bus.emit('page:rendered');
   bus.emit('surface:indexed', state.surfaceIndex);
 }
@@ -324,7 +354,9 @@ export async function preprocess(reflowCap: number): Promise<void> {
  * 铺满可用宽、无 gutter、下限降到 300，让正文页填满竖向面板（消除 480 桌面下限造成的横向溢出）。
  */
 function pageMetrics(): { fit: number; gutter: number } {
-  const narrow = window.matchMedia('(max-width: 640px)').matches;
+  // 窄屏=满铺无 gutter。移动版/电纸屏壳（body.eink-shell）恒走窄屏：设备 WebView 视口可能 >640（如 684），
+  // 不靠 media query 否则被当桌面渲成「窄页+300 留白」溢出视口。
+  const narrow = window.matchMedia('(max-width: 640px)').matches || document.body.classList.contains('eink-shell');
   if (narrow) {
     const avail = stageWrap.clientWidth - 24;            // 竖屏 stage-wrap padding 较小
     return { fit: Math.min(900, Math.max(300, avail)), gutter: 0 };

@@ -84,6 +84,23 @@ export function signalInkArea(bbox: [number, number, number, number]): void {
   }, 150);
 }
 
+// ── 通用 UI 变化刷新（电纸屏设备形态：点按钮/切工具/开菜单也要看到反馈）──
+// 语义事件只覆盖重内容（翻页/视图/文档/旁注）；工具高亮、菜单展开、按钮态这类轻量 UI 变化
+// 不发任何 bus 事件 → 电纸屏不刷 = 手指点了看不到反馈。用 MutationObserver 兜底：任何 DOM 变动
+// 触发一次带上限的去抖整屏刷。带 maxwait 防连续动画把纯尾去抖饿死/导致狂闪。
+const UI_DEBOUNCE = 200;   // 变动静默 200ms 后刷
+const UI_MAXWAIT = 1000;   // 但连续变动最多每 1s 刷一帧（防动画狂闪/饿死）
+let uiTimer = 0;
+let uiFirstAt = 0;
+function signalUiChanged(): void {
+  if (!enabled || !channel()) return;
+  const now = Date.now();
+  if (!uiFirstAt) uiFirstAt = now;
+  if (uiTimer) clearTimeout(uiTimer);
+  const delay = Math.min(UI_DEBOUNCE, Math.max(0, UI_MAXWAIT - (now - uiFirstAt)));
+  uiTimer = window.setTimeout(() => { uiTimer = 0; uiFirstAt = 0; signalPageReady(); }, delay);
+}
+
 let installed = false;
 /** 安装电纸屏镜像钩子：画板内容变化时推整屏。main.ts 启动时调一次（无桥环境直接跳过）。 */
 export function initEinkMirror(): void {
@@ -95,6 +112,22 @@ export function initEinkMirror(): void {
   bus.on('document:loaded', () => signalPageReady());  // 文档载入
   bus.on('overlay:add', () => signalPageReady());      // AI 旁注出现
   bus.on('overlay:remove', () => signalPageReady());   // AI 旁注移除
+  // 通用兜底：任何 UI DOM 变动（工具高亮/菜单/按钮态…）→ 去抖整屏刷，保证触摸反馈可见。
+  // 笔迹画布走 A2 局部快刷(signalInkArea)，不应被这里的整屏 GC16 抢；故排除 #ink-layer 子树的变动。
+  try {
+    const inkLayer = document.getElementById('ink-layer');
+    const mo = new MutationObserver((records) => {
+      for (const r of records) {
+        if (inkLayer && (inkLayer === r.target || inkLayer.contains(r.target as Node))) continue;
+        signalUiChanged();
+        return;
+      }
+    });
+    mo.observe(document.body, {
+      childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-pressed', 'aria-expanded', 'aria-selected', 'data-active', 'open', 'value'],
+    });
+  } catch { /* 老 WebView 无 MutationObserver 时静默 */ }
   // 首帧：首屏渲染稳定后镜像一次当前 UI（含导航壳空态）
   setTimeout(() => signalPageReady(), 600);
 }

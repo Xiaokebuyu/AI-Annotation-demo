@@ -32,12 +32,23 @@ function isWriting(node: MarkNode): boolean {
   return node.feature_type === 'handwriting' || node.mode === 'self_content' || node.shape === 'handwriting';
 }
 
+/** 运笔方式 → 副词前缀 / 重描后缀（Slice A）。只在 manner 明显时点缀，否则保持中性。 */
+const MANNER_ADVERB: Record<string, string> = { hesitant: '迟疑地', decisive: '果断地', careful: '仔细地' };
+function withManner(node: MarkNode, phrase: string): string {
+  const m = node.manner;
+  if (!m) return phrase;
+  let out = phrase;
+  if (m.adverb && MANNER_ADVERB[m.adverb]) out = MANNER_ADVERB[m.adverb] + out;
+  if (m.retraced) out += '（反复描了几次）';
+  return out;
+}
+
 function phraseFor(node: MarkNode, text: string): string {
   // 画优先于写：画也是 self_content，但它是"画"不是"写"——text 是粗描述（一张笑脸…），让模型知道这是图。
-  if (isDrawing(node)) return text ? `画「${text}」` : '画了一处';
-  if (isWriting(node)) return text ? `写下「${text}」` : '写了一段';
-  const verb = VERB[node.shape] ?? '标注';
-  return text ? `${verb}「${text}」` : `${verb}了一处`;
+  const base = isDrawing(node) ? (text ? `画「${text}」` : '画了一处')
+    : isWriting(node) ? (text ? `写下「${text}」` : '写了一段')
+      : text ? `${VERB[node.shape] ?? '标注'}「${text}」` : `${VERB[node.shape] ?? '标注'}了一处`;
+  return withManner(node, base);
 }
 
 /** 空间子句里对一个 mark 的简短指代：有字用「字」，无字退回动词短语。 */

@@ -12,6 +12,7 @@ import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, Persi
 import { DB_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
 import { vectorStore } from './vector';
+import type { PersistedInkChunk, PersistedInkSegment } from '../core/bedrock';
 
 const DB_NAME = 'inkloop';
 const STORE = 'docs';
@@ -20,6 +21,8 @@ const MARKS = 'marks';           // 页账本条目
 const TURNS = 'ai_turns';        // 书日志条目
 const WORKSPACES = 'workspaces'; // 会议工作区（≈群聊）
 const MEETINGS = 'meetings';     // 会议（属某 workspace）
+const INK_SEGMENTS = 'ink_segments'; // 基岩：录制段头（profile + 时间锚）
+const INK_SAMPLES = 'ink_samples';   // 基岩：采样块（批量 flush）
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 /** 幂等建 store（连同建表时的初始 index）。已存在则跳过——自愈"版本到位却缺表"。 */
@@ -53,10 +56,13 @@ function openDB(): Promise<IDBDatabase | null> {
         ensureStore(db, TURNS, 'entry_id', ['by_doc', 'document_id']);
         ensureStore(db, WORKSPACES, 'workspace_id');
         ensureStore(db, MEETINGS, 'meeting_id', ['by_ws', 'workspace_id']);
+        ensureStore(db, INK_SEGMENTS, 'segment_id', ['by_doc', 'document_id']); // 基岩段头
+        ensureStore(db, INK_SAMPLES, 'chunk_id', ['by_doc', 'document_id']);     // 基岩采样块
 
         // ② 阶梯迁移：每次 DB_VERSION 升级追加一块 if (oldV < N) {...}——给已存在 store 加 index /
         //    字段级 backfill（须恰好跑一次的数据迁移放这）。
         if (oldV < 6) ensureIndex(tx, MARKS, 'by_context', 'context_id'); // v6 时间脊（C2）
+        // v7：基岩 ink_segments/ink_samples 由上方 ① 基线幂等建，无需额外迁移步。
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -185,6 +191,56 @@ export async function listBooks(): Promise<PersistedDoc[]> {
     .sort((a, b) => (b.saved_at || '').localeCompare(a.saved_at || ''));
 }
 
+/**
+ * 建/取一份「日记」文档（无 PDF 字节·空白可写）并立即落库——点新日记=先有文件、再写内容。
+ * 幂等：已存在（重开日记）则取回。不碰 current；调用方渲染后 setActiveDoc(doc) 挂为当前（R6 双真相）。
+ */
+export async function createDiaryDoc(documentId: string, title: string, pageCount = 1): Promise<PersistedDoc> {
+  const existing = await idbGet(documentId);
+  if (existing) return existing;
+  const doc: PersistedDoc = {
+    document_id: documentId, file_hash: documentId, filename: title,
+    page_count: pageCount, saved_at: new Date().toISOString(),
+    version: STORE_VERSION, pages: {},
+  };
+  await idbPut(doc); // 立即落库：文件先存在
+  return doc;
+}
+
+/** 改日记标题并落库（手写变标题/手动改标题都走它）。同步更新内存 current（若正是当前文档）。 */
+export async function renameDiary(documentId: string, title: string): Promise<void> {
+  const doc = await idbGet(documentId);
+  if (!doc) return;
+  doc.filename = title;
+  await idbPut(doc);
+  if (current?.document_id === documentId) current.filename = title;
+}
+
+/** 列出已存的日记（无 PDF 字节 + id 以 diary 打头，避开会议白板 mtgboard_），按最近倒序。 */
+export async function listDiaries(): Promise<PersistedDoc[]> {
+  const db = await openDB();
+  if (!db) return [];
+  const [docs, blobIds] = await Promise.all([
+    new Promise<PersistedDoc[]>((resolve) => {
+      try {
+        const r = db.transaction(STORE, 'readonly').objectStore(STORE).getAll();
+        r.onsuccess = () => resolve((r.result as PersistedDoc[]) ?? []);
+        r.onerror = () => resolve([]);
+      } catch { resolve([]); }
+    }),
+    new Promise<Set<string>>((resolve) => {
+      try {
+        const r = db.transaction(PDF_STORE, 'readonly').objectStore(PDF_STORE).getAllKeys();
+        r.onsuccess = () => resolve(new Set((r.result as string[]) ?? []));
+        r.onerror = () => resolve(new Set());
+      } catch { resolve(new Set()); }
+    }),
+  ]);
+  return docs
+    .filter((d) => !blobIds.has(d.document_id) && d.document_id.startsWith('diary'))
+    .sort((a, b) => (b.saved_at || '').localeCompare(a.saved_at || ''));
+}
+
 /** 记阅读位置（去抖落盘）。 */
 export function setLastReadPage(page: number): void {
   if (!current || current.last_read_page === page) return;
@@ -226,6 +282,20 @@ function entriesByDoc<T extends { seq: number }>(storeName: string, documentId: 
   });
 }
 
+/** 同 entriesByDoc，但走 by_context 索引（C2 时间脊：按落笔时活跃 surface 实例聚合，跨 document）。 */
+function entriesByContext<T extends { seq: number }>(storeName: string, contextId: string): Promise<T[]> {
+  return openDB().then((db) => {
+    if (!db) return [] as T[];
+    return new Promise<T[]>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).index('by_context').getAll(IDBKeyRange.only(contextId));
+        r.onsuccess = () => resolve(((r.result as T[]) ?? []).sort((a, b) => a.seq - b.seq));
+        r.onerror = () => resolve([] as T[]);
+      } catch { resolve([] as T[]); }
+    });
+  });
+}
+
 /** 追加一条 mark 条目（含 tombstone）。store 填 entry_id/seq/created_at。 */
 export function appendMarkEntry(m: Omit<PersistedMark, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
   const rec: PersistedMark = { ...m, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
@@ -236,6 +306,63 @@ export function appendMarkEntry(m: Omit<PersistedMark, 'entry_id' | 'seq' | 'cre
   return appendEntry(MARKS, rec);
 }
 
+/** 基岩：写一段录制头（每段一次）。 */
+export function appendInkSegment(seg: PersistedInkSegment): Promise<void> {
+  return appendEntry(INK_SEGMENTS, seg);
+}
+
+/** 基岩：写一块采样（批量 flush）。 */
+export function appendInkChunk(chunk: PersistedInkChunk): Promise<void> {
+  return appendEntry(INK_SAMPLES, chunk);
+}
+
+/** 基岩：按书读段头 / 采样块（块按 seq 升序）——供回放、调试、测试。 */
+function allByDoc<T>(storeName: string, documentId: string): Promise<T[]> {
+  return openDB().then((db) => {
+    if (!db) return [] as T[];
+    return new Promise<T[]>((resolve) => {
+      try {
+        const r = db.transaction(storeName, 'readonly').objectStore(storeName).index('by_doc').getAll(IDBKeyRange.only(documentId));
+        r.onsuccess = () => resolve((r.result as T[]) ?? []);
+        r.onerror = () => resolve([] as T[]);
+      } catch { resolve([] as T[]); }
+    });
+  });
+}
+export function getInkSegments(documentId: string): Promise<PersistedInkSegment[]> {
+  return allByDoc<PersistedInkSegment>(INK_SEGMENTS, documentId);
+}
+export function getInkChunks(documentId: string): Promise<PersistedInkChunk[]> {
+  return allByDoc<PersistedInkChunk>(INK_SAMPLES, documentId).then((cs) => cs.sort((a, b) => a.seq_from - b.seq_from));
+}
+
+/** 基岩保留：删掉 created_at 早于 maxAgeMs 的段+块（默认 14 天）。基岩是档案、可裁——
+ *  不像 marks/ai_turns 是不可删的真相账本。录像机起新段时顺手跑一次（每 app 会话一次）。 */
+export async function pruneBedrock(maxAgeMs = 14 * 24 * 3600_000): Promise<{ removed: number }> {
+  const db = await openDB();
+  if (!db) return { removed: 0 };
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  let removed = 0;
+  for (const storeName of [INK_SEGMENTS, INK_SAMPLES]) {
+    const key = storeName === INK_SEGMENTS ? 'segment_id' : 'chunk_id';
+    await new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(storeName, 'readwrite');
+        const os = tx.objectStore(storeName);
+        const r = os.getAll();
+        r.onsuccess = () => {
+          for (const rec of (r.result ?? []) as Array<Record<string, string>>) {
+            if (rec.created_at && rec.created_at < cutoff) { os.delete(rec[key]); removed++; }
+          }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch { resolve(); }
+    });
+  }
+  return { removed };
+}
+
 /** 追加一条 ai_turn 条目。 */
 export function appendAiTurnEntry(t: Omit<PersistedAiTurn, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
   const rec: PersistedAiTurn = { ...t, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
@@ -243,8 +370,7 @@ export function appendAiTurnEntry(t: Omit<PersistedAiTurn, 'entry_id' | 'seq' | 
 }
 
 /** 折叠 mark：去掉被 tombstone 的 mark_id，每 mark_id 取最新非墓碑条目。 */
-export async function getFoldedMarks(documentId: string): Promise<PersistedMark[]> {
-  const all = await entriesByDoc<PersistedMark>(MARKS, documentId);
+function foldMarks(all: PersistedMark[]): PersistedMark[] {
   const dead = new Set<string>();
   for (const e of all) if (e.is_tombstone) dead.add(e.mark_id);
   const live = new Map<string, PersistedMark>();
@@ -252,10 +378,26 @@ export async function getFoldedMarks(documentId: string): Promise<PersistedMark[
   return [...live.values()].sort((a, b) => a.seq - b.seq);
 }
 
+/** 折叠 mark（按 document）：单个 surface 的标注。 */
+export async function getFoldedMarks(documentId: string): Promise<PersistedMark[]> {
+  return foldMarks(await entriesByDoc<PersistedMark>(MARKS, documentId));
+}
+
+/** 折叠 mark（按 context_id，走 by_context 索引）：会议时间脊用——把一场会议里跨 surface（白板 + 各资料）
+ *  的所有标注按「落笔时活跃实例」聚合。会中保持 meetingCtx 活跃 → 白板与资料上的笔都带 context_id='mtg_<id>'。 */
+export async function getFoldedMarksByContext(contextId: string): Promise<PersistedMark[]> {
+  return foldMarks(await entriesByContext<PersistedMark>(MARKS, contextId));
+}
+
 /** 未综合的 mark（seq > 当前书水位线）：reload 重建 pending session。 */
 export async function getPendingMarks(documentId: string): Promise<PersistedMark[]> {
   const wm = current?.synthesis_watermark_seq ?? -1;
   return (await getFoldedMarks(documentId)).filter((m) => m.seq > wm);
+}
+
+/** 按 id 取一本书的记录（只读，不挂 current）。KnowledgeBuilder 等派生投影按 documentId 取书目元（如 filename 当标题）。 */
+export function getDoc(documentId: string): Promise<PersistedDoc | null> {
+  return getOneFrom<PersistedDoc>(STORE, documentId);
 }
 
 /** 折叠 ai_turn：每 overlay_id 取最新（最高 seq）条目（含 dismissed，由调用方决定显示）。 */

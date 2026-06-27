@@ -577,6 +577,7 @@ function setSections(): SetSection[] {
       { kind: 'select', label: '重排引擎', badge: B_LIVE, opts: [['ai', 'AI 结构重建（主线·保 bbox）'], ['local', '仅启发式'], ['hybrid', '启发式+模型精修'], ['vision', '启发式+视觉重排'], ['rewrite', 'VLM 看图重写']], get: () => settings.reflowProvider, set: (v) => { settings.reflowProvider = v; }, effect: 'changed' },
       { kind: 'select', label: '重排模型', badge: B_LIVE, opts: [['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite（默认·快）'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['kimi-k2.6', 'kimi-k2.6（慢·对照）'], ['claude-sonnet-4-6', 'claude-sonnet-4-6（准·对照）']], get: () => settings.reflowModel, set: (v) => { settings.reflowModel = v; }, effect: 'changed' },
       { kind: 'check', label: '重排前置（渲染即后台急算）', hint: '每次翻页后台预排当前页·烧 token；默认关', badge: B_LIVE, get: () => settings.reflowEager, set: (v) => { settings.reflowEager = v; }, effect: 'save' },
+      { kind: 'check', label: '基岩录制（原始笔迹流 · 影子）', hint: '把死区前的原始运动逐帧录进独立库 ink_samples；影子运行·不碰标注/AI/老功能；默认关。开后画几笔即录，查 IndexedDB 的 ink_samples', badge: B_LIVE, get: () => settings.bedrock, set: (v) => { settings.bedrock = v; }, effect: 'save' },
     ] },
     { title: '调试叠层 · 只影响可视化、不碰推理', rows: [
       { kind: 'check', label: '显示 bbox 叠层（对象框+命中高亮+HMP 浮窗）', badge: B_DEV, get: () => settings.devOverlay, set: (v) => { settings.devOverlay = v; }, effect: 'changed' },

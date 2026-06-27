@@ -13,9 +13,10 @@
  */
 import type { HMP, InferenceView, MarkFeatureType, NormBBox, OverlayState, PipelineStage, ScreenOverlay, StrokePoint } from './contracts';
 import type { ReflowBlock } from '../surface/reflow';
+import type { RawRef } from './bedrock';
 
 export const STORE_VERSION = '2'; // 1→2：strokes/overlays 出 docs 进 marks/ai_turns 账本（干净断裂，旧 docs 弃）
-export const DB_VERSION = 6;      // v5→v6：marks 加 context_id + by_context 索引（C2 时间脊：按 surface 会话取笔）。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
+export const DB_VERSION = 7;      // v6→v7：基岩 ink_segments/ink_samples（影子录制·上方 store.ts ① 基线幂等建）。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
 
 /** 一张图的解读：图本身可从 PDF 重渲，故只存 bbox + 文字解读。 */
 export interface PersistedImage {
@@ -92,6 +93,7 @@ export interface PersistedMark extends BaseEntry {
   scored_score: number;
   hmp: HMP | null;                 // 取证（落库前剥掉 crop_ref/vector_ref，存料不存图）
   marked_text: string;             // 落笔当时解析好的"所标内容"
+  raw_ref?: RawRef;                // → 基岩录像的对应段+seq 区间（仅 features/settings.bedrock 开时有；老条目缺=undefined）
   is_tombstone: boolean;           // true = 本条擦除 mark_id（append-only，不就地删）
 }
 
