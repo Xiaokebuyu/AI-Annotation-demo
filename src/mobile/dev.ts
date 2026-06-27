@@ -10,16 +10,50 @@ import { listBooks, getBookAiTurns, getFoldedMarks } from '../local/store';
 import { esc } from '../core/escape';
 import { selfTest } from '../core/transform';
 import { traceCount, downloadTrace } from '../core/trace';
+import { snapshot } from '../core/metrics';
+import { pipelineSection, legacySection } from '../dev/pipeline-view'; // dev 流水线/旧轮渲染（与桌面 console.ts 共用·不引 console.css）
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
-import type { SurfaceObject } from '../core/contracts';
+import type { HMP, SurfaceObject } from '../core/contracts';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 let devBook: string | null = null;
 let captureSeg: 'hmp' | 'obj' = 'hmp';
+let preprocessText = '未运行';
 
 const TRIGGER_CN: Record<string, string> = { idle: '长停顿综合', handwriting: '手写定向', discussion: '段落讨论' };
 const HMP_MODE: Record<string, [string, boolean]> = { anchored: ['锚定原文', true], self_content: ['自身内容', false], mixed: ['混合', false], unknown: ['未命中', false] };
 const HMP_ACTION: Record<string, string> = { enclosure: '圈', underline: '划线', cross: '叉', arrow: '箭头', handwriting: '手写', sketch: '草图', highlight: '高亮', unknown: '未知' };
+const HMP_FEAT: Record<string, string> = { markup: '标记', handwriting: '手写', drawing: '画' };
+
+/** 取证行：持久 mark 的取证骨架 + 本会话 state.lastHmps 的 live crop/vector（落库已剥 crop_ref/vector_ref，唯 live 有图）。 */
+interface HmpRow { key: string; hmp: HMP; marked: string; feature: string; page_index: number; page_id: string; seq: number; created_at: string; live: boolean; unsaved: boolean }
+let pendingFlash: { seg: 'hmp' | 'obj'; selector: string } | null = null; // HMP↔对象互跳：切段后高亮目标
+
+function featureFromAction(action: string): string {
+  if (action === 'handwriting') return 'handwriting';
+  if (action === 'sketch') return 'drawing';
+  return 'markup';
+}
+function markChipLabel(feature: string, marked: string): string {
+  const t = (marked || '').replace(/\s+/g, ' ').slice(0, 10);
+  return `${HMP_FEAT[feature] ?? feature}${t ? `「${t}」` : ''}`;
+}
+async function buildHmpRows(book: string): Promise<HmpRow[]> {
+  const persisted = (await getFoldedMarks(book)).filter((m) => m.hmp);
+  const liveById = new Map(state.lastHmps.map((h) => [h.hmp_id, h]));
+  const seen = new Set<string>();
+  const rows: HmpRow[] = persisted.map((m) => {
+    const live = liveById.get(m.hmp!.hmp_id);
+    seen.add(m.hmp!.hmp_id);
+    const hmp = live && (live.crop_ref || live.vector_ref) ? { ...m.hmp!, crop_ref: live.crop_ref, vector_ref: live.vector_ref } : m.hmp!; // 持久剥了图 → 本会话 live 补回
+    return { key: m.mark_id, hmp, marked: m.marked_text, feature: m.feature_type, page_index: m.page_index, page_id: m.page_id, seq: m.seq, created_at: m.created_at, live: !!live, unsaved: false };
+  });
+  if (book === state.documentId) for (const h of state.lastHmps) { // 本会话还没落库的 HMP（取证图最全）
+    if (seen.has(h.hmp_id)) continue;
+    rows.push({ key: h.hmp_id, hmp: h, marked: h.text_hint || '', feature: featureFromAction(h.action), page_index: state.pageIndex, page_id: h.surface_id, seq: Number.MAX_SAFE_INTEGER, created_at: '', live: true, unsaved: true });
+  }
+  return rows.sort((a, b) => b.seq - a.seq);
+}
 const fmtTime = (iso: string): string => { try { return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }); } catch { return ''; } };
 
 /** 书目选择器（chat / capture 共用）。 */
@@ -60,8 +94,7 @@ export async function renderChat(): Promise<void> {
 function turnBlock(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): string {
   const trg = TRIGGER_CN[t.trigger] || t.trigger;
   const trgCls = t.trigger === 'handwriting' ? 'trg hw' : 'trg';
-  const userText = t.inference_view?.question || t.inference_view?.marked
-    || t.anchor?.mark_ids.map((id) => markMap.get(id)?.marked_text).filter(Boolean).join(' ') || '（标注）';
+  const userInner = (t.pipeline && t.pipeline.length) ? pipelineSection(t.pipeline) : legacySection(t, markMap); // 有 pipeline 快照→逐组件复盘；否则旧轮兜底（与桌面对齐）
   const folded = !t.ai_reply && t.diag?.classify && t.diag.classify.respond === false;
   const reason = t.diag?.classify?.reason;
   const result = folded
@@ -71,7 +104,7 @@ function turnBlock(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): str
       + (t.thinking ? `<details class="think"><summary>思考过程</summary><div>${esc(t.thinking)}</div></details>` : '')
       + `<div class="ameta">${esc(t.model || '')}${t.supersedes ? ' · 改写' : ''}</div></div>`;
   return `<div class="turn"><div class="tlab">发送给 AI 的内容 · 第 ${t.page_index + 1} 页 <span class="${trgCls}">${trg}</span><span class="tt">${fmtTime(t.created_at)}</span></div>`
-    + `<div class="ucard">${esc(userText)}</div>` + result + `</div>`; // 用户卡常显；result 只拼一次（旧版 folded 重复渲染 + 丢用户卡）
+    + `<div class="ucard">${userInner}</div>` + result + `</div>`; // 用户卡=pipeline 复盘/旧轮兜底（HTML·不 esc）；result 只拼一次（旧版 folded 重复渲染）
 }
 
 // ════ 采集取证 ════
@@ -81,44 +114,76 @@ export async function renderCapture(): Promise<void> {
   const seg = `<div class="seg"><button class="${captureSeg === 'hmp' ? 'on' : ''}" data-seg="hmp">HMP 取证</button><button class="${captureSeg === 'obj' ? 'on' : ''}" data-seg="obj">对象</button></div>`;
   let inner: string;
   if (!devBook) inner = `<p class="dnote">选一本书查看它的逐笔 HMP 取证 + SurfaceIndex 对象表。</p>`;
-  else if (captureSeg === 'hmp') {
-    const marks = (await getFoldedMarks(devBook)).filter((m) => m.hmp).sort((a, b) => b.seq - a.seq);
-    inner = `<p class="dnote">逐笔 HMP 取证 —— 最新在上。共 ${marks.length} 笔。</p>` + (marks.map(hmpCard).join('') || `<p class="dnote">这本书还没有带取证的标注。</p>`);
-  } else {
-    inner = objTable();
+  else {
+    const rows = await buildHmpRows(devBook);
+    if (captureSeg === 'hmp') {
+      const si = state.surfaceIndex;
+      const objMap = si ? new Map(si.objects.map((o) => [o.id, o])) : null;
+      inner = `<p class="dnote">逐笔 HMP 取证 —— 最新在上。共 ${rows.length} 笔。历史标注落库剥了 crop/vector，唯本会话 state.lastHmps 还有取证图。</p>`
+        + (rows.map((r) => hmpCard(r, objMap && si && r.page_id === si.surface_id ? objMap : null)).join('') || `<p class="dnote">这本书还没有带取证的标注。</p>`);
+    } else inner = objTable(rows);
   }
   el('dv-hmp').innerHTML =
     `<div class="dhead"><h1>采集取证</h1>${seg}<span class="sp"></span>${bookSel('dv-bk-hmp', books)}</div><div class="dbody">${inner}</div>`;
   el('dv-hmp').querySelectorAll<HTMLElement>('.seg [data-seg]').forEach((b) => b.addEventListener('click', () => { captureSeg = b.dataset.seg as 'hmp' | 'obj'; void renderCapture(); }));
   bindBookSel('dv-bk-hmp', () => void renderCapture());
+  applyPendingFlash();
 }
-function hmpCard(m: PersistedMark): string {
-  const h = m.hmp!;
+/** 取证图：本会话 live 的 crop/vector dataURL（持久落库已剥·历史无图如实标注）。 */
+function hmpShots(row: HmpRow): string {
+  const imgs = [
+    row.hmp.crop_ref ? ['合成', row.hmp.crop_ref] : null,
+    row.hmp.vector_ref ? ['笔迹', row.hmp.vector_ref] : null,
+  ].filter((x): x is [string, string] => !!x && /^data:image\//.test(x[1]));
+  if (!imgs.length) return `<div class="himg hnone">${row.live ? '本会话无图' : '历史标注<br>无图'}</div>`;
+  return `<div class="himg hshots">${imgs.map(([cap, src]) => `<span><img src="${esc(src)}" alt=""><em>${esc(cap)}</em></span>`).join('')}</div>`;
+}
+/** 命中对象：可点 → 切对象表 + 高亮该行（互跳）。本页才解析得到对象文字。 */
+function hmpTargetRow(row: HmpRow, objMap: Map<string, SurfaceObject> | null): string {
+  const refs = row.hmp.target_object_refs;
+  if (!refs.length) return row.hmp.mode === 'self_content' ? '空（自身内容）' : '空';
+  if (!objMap) return `${refs.length} 个（第 ${row.page_index + 1} 页；切到该页可解析/互跳）`;
+  return refs.map((id) => {
+    const o = objMap.get(id);
+    return o ? `<span class="cap-link" data-ref="${esc(id)}">${esc(id)}「${esc((o.text || '·' + o.type).slice(0, 18))}」</span>` : `${esc(id)}(缺)`;
+  }).join('　');
+}
+function hmpCard(row: HmpRow, objMap: Map<string, SurfaceObject> | null): string {
+  const h = row.hmp;
   const [modeLabel, anchor] = HMP_MODE[h.mode] || ['未知', false];
   const region = `[${h.target_region.map((n) => n.toFixed(2)).join(', ')}]`;
-  const refs = h.target_object_refs.length ? h.target_object_refs.join(', ') : (h.mode === 'self_content' ? '空（自身内容）' : '空');
-  return `<div class="hcard"><div class="hch"><span class="mode${anchor ? ' anchor' : ''}">${esc(modeLabel)}</span>`
-    + `<span class="act">${esc(HMP_ACTION[h.action] || h.action)}</span><span class="feat">${esc(m.feature_type)}</span>`
-    + `<span class="hm">${esc(h.object_hint)} · ${h.confidence.toFixed(2)} · ${esc(h.version)} · 第${m.page_index + 1}页</span></div>`
-    + `<div class="hcb"><div class="himg">合成图</div><div class="hf">`
-    + `<div><b>所标内容</b>${esc(m.marked_text || '—')}</div>`
-    + `<div><b>命中对象</b>${esc(refs)}</div>`
+  return `<div class="hcard" data-mark="${esc(row.key)}"><div class="hch"><span class="mode${anchor ? ' anchor' : ''}">${esc(modeLabel)}</span>`
+    + `<span class="act">${esc(HMP_ACTION[h.action] || h.action)}</span><span class="feat">${esc(HMP_FEAT[row.feature] || row.feature)}</span>`
+    + `${row.unsaved ? '<span class="live">未落库</span>' : row.live ? '<span class="live">本会话</span>' : ''}`
+    + `<span class="hm">${esc(h.object_hint)} · ${h.confidence.toFixed(2)} · ${esc(h.version)} · 第${row.page_index + 1}页</span></div>`
+    + `<div class="hcb">${hmpShots(row)}<div class="hf">`
+    + `<div><b>所标内容</b>${esc(row.marked || '—')}</div>`
+    + `<div><b>命中对象</b>${hmpTargetRow(row, objMap)}</div>`
     + `<div><b>读出</b>${esc(h.text_hint || '—')}</div>`
     + `<div><b>区域</b>${esc(region)}</div></div></div></div>`;
 }
-function objTable(): string {
+function objTable(rows: HmpRow[] = []): string {
   const si = state.surfaceIndex;
   if (!si || !si.objects.length) return `<p class="dnote">当前没有 SurfaceIndex（打开一本书 / 一页后这里列出本页对象）。</p>`;
-  const hitSet = new Set<string>();
-  for (const m of state.lastHmps) for (const r of m.target_object_refs) hitSet.add(r);
+  const objMarks = new Map<string, Array<{ id: string; label: string }>>();
+  for (const r of rows) {
+    if (r.page_id !== si.surface_id) continue;
+    for (const ref of r.hmp.target_object_refs) {
+      const arr = objMarks.get(ref) ?? [];
+      arr.push({ id: r.key, label: markChipLabel(r.feature, r.marked) });
+      objMarks.set(ref, arr);
+    }
+  }
   const types = new Map<string, number>();
   for (const o of si.objects) types.set(o.type, (types.get(o.type) ?? 0) + 1);
   const dist = [...types.entries()].map(([t, n]) => `${t} ${n}`).join(' · ');
-  const rows = si.objects.slice(0, 150).map((o: SurfaceObject) =>
-    `<tr><td>${esc(o.id)}</td><td>${esc(o.type)}</td><td>${o.bbox[0].toFixed(2)},${o.bbox[1].toFixed(2)}</td><td>${esc((o.text || '—').slice(0, 24))}</td><td>${hitSet.has(o.id) ? '<span class="mc">命中</span>' : ''}</td></tr>`
-  ).join('');
-  return `<p class="dnote">本页 SurfaceIndex · surface=${esc(si.surface_type)} · 共 ${si.objects.length} 个 · ${esc(dist)}</p>`
-    + `<table class="otbl"><thead><tr><th>id</th><th>type</th><th>bbox</th><th>text</th><th>命中</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const rowsHtml = si.objects.slice(0, 150).map((o: SurfaceObject) => {
+    const hits = objMarks.get(o.id) ?? [];
+    const chips = hits.length ? hits.map((h) => `<span class="cap-markchip" data-mark="${esc(h.id)}">${esc(h.label)}</span>`).join('') : '';
+    return `<tr data-objid="${esc(o.id)}"><td>${esc(o.id)}</td><td>${esc(o.type)}</td><td>${o.bbox[0].toFixed(2)},${o.bbox[1].toFixed(2)}</td><td>${esc((o.text || '—').slice(0, 24))}</td><td>${chips}</td></tr>`;
+  }).join('');
+  return `<p class="dnote">本页 SurfaceIndex · surface=${esc(si.surface_type)} · 共 ${si.objects.length} 个 · ${esc(dist)}。命中 chip 可点回 HMP 卡。</p>`
+    + `<table class="otbl"><thead><tr><th>id</th><th>type</th><th>bbox</th><th>text</th><th>被命中</th></tr></thead><tbody>${rowsHtml}</tbody></table>`;
 }
 
 // ════ 设置（每控件真绑 settings.*）════
@@ -207,8 +272,33 @@ export function renderSettings(): void {
 function diagHtml(): string {
   const st = selfTest();
   const coord = st.samples ? `${st.ok ? '✓' : '✗'} ${st.samples} 点 · maxErr ${st.maxErr.toFixed(2)}` : '— 未打开页面';
+  const metrics = snapshot().map((r) => `<tr><td>${esc(r.label)}</td><td>${r.last == null ? '—' : r.last + 'ms'}</td><td>${r.p50 == null ? '—' : r.p50 + 'ms'}</td></tr>`).join('')
+    || '<tr><td colspan="3">暂无计时</td></tr>';
   return `<div class="dl"><b>坐标自测</b><span>${coord} · zoom ${Math.round(state.zoom * 100)}%</span></div>`
+    + `<div class="dl"><b>预处理进度</b><span>${esc(preprocessText)}</span></div>`
+    + `<div class="dl stack"><b>Metrics</b><table class="mtbl"><thead><tr><th>阶段</th><th>last</th><th>P50</th></tr></thead><tbody>${metrics}</tbody></table></div>`
     + `<div class="dl"><b>Trace</b><span>本会话 ${traceCount()} 条 · <a id="dv-trace-dl">下载 JSONL</a></span></div>`;
+}
+/** 设置页诊断块原地刷新（metrics/预处理是 live 流，不整页重渲）。 */
+function fillDiag(): void {
+  const box = document.querySelector<HTMLElement>('#dv-set .diag');
+  if (box) box.innerHTML = diagHtml();
+}
+
+// ── 取证页 HMP↔对象互跳：切段后滚动到目标 + 闪一下 ──
+const attrSel = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+function flashTarget(selector: string): void {
+  const n = el('dv-hmp').querySelector<HTMLElement>(selector);
+  if (!n) return;
+  n.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  n.classList.remove('cap-flash'); void n.offsetWidth; n.classList.add('cap-flash');
+  window.setTimeout(() => n.classList.remove('cap-flash'), 1400);
+}
+function applyPendingFlash(): void {
+  if (!pendingFlash || captureSeg !== pendingFlash.seg) return;
+  const sel = pendingFlash.selector;
+  pendingFlash = null;
+  requestAnimationFrame(() => flashTarget(sel));
 }
 
 /** 入口：mobile-main boot 调一次。绑 dev 子导航 → 渲染对应页；监听账本/索引 bus 刷新当前页。 */
@@ -228,10 +318,24 @@ export function initMobileDev(): void {
   // 进 dev 面（rail）→ 渲染当前子页
   document.querySelector('.nav [data-mode="dev"]')?.addEventListener('click', () => renderActive());
   // Trace 下载（事件委托：设置页诊断里的链接）
-  document.getElementById('surf-dev')?.addEventListener('click', (e) => { if ((e.target as HTMLElement).id === 'dv-trace-dl') downloadTrace(); });
+  // 事件委托：Trace 下载 + 取证页 HMP↔对象互跳（cap-link 点对象 / cap-markchip 点回 HMP 卡）
+  document.getElementById('surf-dev')?.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.id === 'dv-trace-dl') { downloadTrace(); return; }
+    const ref = target.closest('.cap-link') as HTMLElement | null;
+    if (ref?.dataset.ref) { captureSeg = 'obj'; pendingFlash = { seg: 'obj', selector: `tr[data-objid="${attrSel(ref.dataset.ref)}"]` }; void renderCapture(); return; }
+    const mark = target.closest('.cap-markchip') as HTMLElement | null;
+    if (mark?.dataset.mark) { captureSeg = 'hmp'; pendingFlash = { seg: 'hmp', selector: `.hcard[data-mark="${attrSel(mark.dataset.mark)}"]` }; void renderCapture(); }
+  });
   // 账本/索引变化 → 刷新当前 dev 页（仅 dev 面激活时）
   const live = (): void => { if (document.body.dataset.mode === 'dev') renderActive(); };
   bus.on('aiturn:appended', live);
   bus.on('hmp:updated', live);
   bus.on('surface:indexed', live);
+  // 设置页诊断 live 流（metrics/预处理·只刷诊断块、不整页重渲）
+  const liveDiag = (): void => { if (document.body.dataset.mode === 'dev' && active() === 'set') fillDiag(); };
+  bus.on('metrics', liveDiag);
+  bus.on('page:rendered', liveDiag);
+  bus.on('preprocess:progress', (i, n) => { preprocessText = `预处理中 ${Number(i)}/${Number(n)} 页…`; liveDiag(); });
+  bus.on('preprocess:done', () => { preprocessText = '预处理完成'; liveDiag(); });
 }

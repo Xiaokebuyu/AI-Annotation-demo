@@ -350,6 +350,41 @@
   #hmp-float .hf-row>span{color:var(--mut);min-width:72px;flex:0 0 auto;}
   #hmp-float .hf-row>b{word-break:break-all;font-weight:600;}
   #hmp-float .hf-empty{color:var(--mut2);}
+  /* dev 流水线复盘（与桌面 console 共用 markup·黑白版） */
+  .cns-sec{font:600 11px var(--sans);color:var(--mut);margin:10px 0 5px;}
+  .cns-kv{font:12px/1.6 var(--sans);margin:3px 0;word-break:break-word;}
+  .cns-kv .k,.cns-ctx-prev{color:var(--mut);}
+  .cns-chip{display:inline-block;font:11px var(--sans);border:1px solid var(--hair2);border-radius:6px;padding:1px 6px;margin:2px 4px 2px 0;background:var(--page);}
+  .cns-yes,.cns-no{font-weight:600;color:var(--ink);}
+  .cns-ctx{margin-top:7px;border:1px solid var(--hair);border-radius:8px;background:var(--page);}
+  .cns-ctx summary{cursor:pointer;list-style:none;padding:7px 9px;font:11.5px var(--sans);display:flex;gap:7px;}
+  .cns-ctx summary::-webkit-details-marker{display:none;}
+  .cns-ctx summary::before{content:"▸";color:var(--mut2);}
+  .cns-ctx[open] summary::before{content:"▾";}
+  .cns-ctx-body{border-top:1px dashed var(--hair);padding:7px 9px;font:11.5px/1.55 var(--mono);white-space:pre-wrap;max-height:220px;overflow:auto;}
+  .cns-pl{margin-top:4px;position:relative;padding-left:13px;}
+  .cns-pl::before{content:"";position:absolute;left:4px;top:6px;bottom:6px;width:1px;background:var(--hair2);}
+  .cns-pl-stage{position:relative;border:1px solid var(--hair);border-radius:8px;margin:7px 0;background:var(--page);}
+  .cns-pl-stage::before{content:"";position:absolute;left:-12px;top:12px;width:7px;height:7px;border-radius:50%;background:var(--ink);}
+  .cns-pl-stage.skipped{opacity:.72;border-style:dashed;}
+  .cns-pl-sum{cursor:pointer;padding:7px 9px;font:11.5px var(--sans);display:flex;gap:6px;align-items:baseline;list-style:none;flex-wrap:wrap;}
+  .cns-pl-sum::-webkit-details-marker{display:none;}
+  .cns-pl-sum::before{content:"▸";color:var(--mut2);}
+  .cns-pl-stage[open] .cns-pl-sum::before{content:"▾";}
+  .cns-pl-name{font-weight:600;}
+  .cns-pl-note{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;}
+  .cns-pl-mark,.cns-pl-tag{font:10px var(--sans);border:1px solid var(--hair2);border-radius:5px;padding:1px 5px;color:var(--mut);}
+  .cns-pl-body{padding:3px 10px 10px;border-top:1px dashed var(--hair);}
+  .cns-pl-io{margin-top:8px;}
+  .cns-pl-io-h{font:600 10px var(--sans);color:var(--mut);margin-bottom:3px;}
+  .cns-pl-kv{font:11.5px/1.55 var(--mono);word-break:break-word;}
+  .cns-pl-kv .k{color:var(--mut);}
+  .cns-pl-kv .v{white-space:pre-wrap;}
+  .cns-pl-kv .v.long{display:block;margin-top:3px;max-height:180px;overflow:auto;background:#f8f8f8;border-radius:6px;padding:6px 7px;}
+  .cns-pl-imgs{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
+  .cns-pl-img{display:flex;flex-direction:column;gap:3px;align-items:center;}
+  .cns-pl-img img{max-height:86px;max-width:124px;border:1px solid var(--hair);border-radius:6px;background:#fff;}
+  .cns-pl-img span{font:10px var(--mono);color:var(--mut);max-width:124px;text-align:center;}
   /* HMP 卡 */
   .hcard{border:1px solid var(--hair);border-radius:10px;margin-bottom:12px;overflow:hidden;}
   .hch{display:flex;align-items:center;gap:7px;padding:9px 11px;border-bottom:1px solid var(--hair);flex-wrap:wrap;}
@@ -367,6 +402,17 @@
   .otbl th{text-align:left;color:var(--mut);font-weight:600;border-bottom:1px solid var(--hair2);padding:6px 6px;}
   .otbl td{border-bottom:1px solid var(--hair);padding:7px 6px;color:var(--ink);vertical-align:top;}
   .otbl .mc{font:10px var(--sans);border:1px solid var(--hair2);border-radius:4px;padding:0 5px;}
+  /* 取证升级：本会话标 + 取证图 + HMP↔对象互跳 */
+  .hch .live{font:10px var(--sans);border:1px solid var(--hair2);border-radius:5px;padding:1px 6px;color:var(--ink);}
+  .himg.hshots{display:flex;flex-direction:column;gap:5px;width:92px;height:auto;min-height:74px;padding:5px;}
+  .himg.hshots span{display:flex;flex-direction:column;align-items:center;gap:2px;}
+  .himg.hshots img{max-width:78px;max-height:58px;border:1px solid var(--hair);background:#fff;}
+  .himg.hshots em{font:9px var(--mono);color:var(--mut);font-style:normal;}
+  .himg.hnone{line-height:1.35;text-align:center;}
+  .cap-link{color:var(--ink);text-decoration:underline dotted;text-underline-offset:2px;cursor:pointer;}
+  .cap-markchip{display:inline-block;font:10px var(--sans);border:1px solid var(--hair2);border-radius:5px;padding:0 5px;margin:1px 3px 1px 0;cursor:pointer;color:var(--ink);}
+  .otbl tr.cap-flash,.hcard.cap-flash{animation:capflash 1.4s ease;}
+  @keyframes capflash{0%,30%{background:#eeeeee;}100%{background:transparent;}}
   /* 设置 */
   .sgrp-h{font:600 12px var(--sans);color:var(--mut);letter-spacing:.4px;margin:18px 0 2px;padding-bottom:7px;border-bottom:1px solid var(--hair2);}
   .sgrp-h:first-child{margin-top:0;}
@@ -388,6 +434,10 @@
   .diag .dl{display:flex;justify-content:space-between;gap:10px;font:11.5px var(--mono);color:var(--whisper);padding:7px 0;border-bottom:1px solid var(--hair);}
   .diag .dl b{color:var(--mut);font-weight:600;}
   .diag .dl a{color:var(--ink);}
+  .diag .dl.stack{display:block;}
+  .diag .mtbl{width:100%;border-collapse:collapse;margin-top:6px;font:10.5px var(--mono);}
+  .diag .mtbl th,.diag .mtbl td{border-bottom:1px solid var(--hair);padding:5px 4px;text-align:left;}
+  .diag .mtbl th{color:var(--mut);font-weight:600;}
 
   /* 应用内浮层 sheet（替原生 prompt/alert，src/mobile/sheet.ts 动态挂载）*/
   .msheet-scrim{position:fixed;inset:0;background:rgba(20,20,20,.16);z-index:40;display:flex;align-items:flex-end;justify-content:center;opacity:0;transition:opacity .16s ease;}
