@@ -6,7 +6,7 @@ import { initRenderer, renderBlankSurface, renderBlankPage, loadFile, reopenBook
 import type { SurfaceContext } from './app/surface-context';
 import { initWhisper } from './surface/whisper';
 import { initInsightPanel } from './surface/insight-panel';
-import { initReader } from './surface/reader';
+import { initReader, readerFlip, readerArmBackward, readerVInfo } from './surface/reader';
 import { wireAnnotationLoop, flushRegion } from './app/annotation-loop';
 import { setTool, getActiveContext, state, settings, saveSettings, bus, type Tool } from './app/state';
 import { shortId } from './core/ids';
@@ -31,7 +31,7 @@ initRenderer({
 });
 wireAnnotationLoop(el<HTMLCanvasElement>('ink-layer'));
 initWhisper(el('whisper-layer'));
-initReader(el('reader'), { notePlacement: 'inline' }); // 重排阅读视图（书籍态·AI 注内联段落下方·复用桌面 reader.ts 行为层）
+initReader(el('reader'), { notePlacement: 'inline', restoreStrokes: true, paginate: true }); // 重排阅读视图（书籍态·AI 注内联段落下方·重画旧 mark 真笔触·电纸屏分页翻虚拟页·复用桌面 reader.ts 行为层）
 initInsightPanel({ cards: el('m-cards'), foot: el('m-panel-foot'), count: el('m-insight-count') }); // 本页洞察历史（复用桌面同款）
 if (features.einkBridge) initEinkMirror(); // 电纸屏镜像：套壳内容变化 → 推 IT8951（web/dev 无桥则 no-op）
 
@@ -75,6 +75,14 @@ const dim = (W = 0, H = 0) => ({ width: W || wrap.clientWidth, height: H || wrap
 // 日记可无限向前翻（空白新页不落盘），故"总页数"取已落盘页数与当前页的较大值——
 // 翻到空白新页时显 N/N（不显 N>M），真写了才把 page_count 抬上去、退回去也不缩。书籍 pageIndex 不越界、行为不变。
 function updatePageInd(): void {
+  // 重排态（书籍）：显 PDF 页 + 虚拟页（一个 PDF 页按屏高分多张虚拟页时）。单屏则只显 PDF 页。
+  if (state.surfaceType === 'article' && settings.viewMode === 'reader') {
+    const v = readerVInfo();
+    pgInd.textContent = v.count > 1
+      ? `${state.pageIndex + 1}/${state.pageCount} · ${v.index + 1}/${v.count}`
+      : `${state.pageIndex + 1}/${state.pageCount}`;
+    return;
+  }
   const total = Math.max(state.pageCount, state.pageIndex + 1);
   pgInd.textContent = `${state.pageIndex + 1}/${total}`;
 }
@@ -279,10 +287,22 @@ function gotoDiaryPage(idx: number): void {
   setLastReadPage(idx);   // 记阅读位置（空白新页也记，当书签）
   updatePageInd();
 }
-/** 翻页：书籍（article）走 renderer.gotoPage；日记（whiteboard）走 gotoDiaryPage。 */
+/** 翻页：书籍（article）走 renderer.gotoPage；日记（whiteboard）走 gotoDiaryPage。
+ *  重排态：先翻 PDF 页内的虚拟页（屏高翻页），到该 PDF 页边界再翻 PDF 页（翻回则落在上一页末屏）。 */
 function pageNav(delta: number): void {
-  if (state.surfaceType === 'article') gotoPage(delta);
-  else gotoDiaryPage(state.pageIndex + delta);
+  if (state.surfaceType === 'article') {
+    if (settings.viewMode === 'reader') {
+      const r = readerFlip(delta);
+      if (r === 'moved') { updatePageInd(); return; }   // 在 PDF 页内翻了一张虚拟页
+      // 到 PDF 页边界 → 翻 PDF 页，但仅当真有目标页（否则首/末页 readerArmBackward+gotoPage 空转、landAtEnd 残留污染下次翻页落位）
+      const hasTarget = delta < 0 ? state.pageIndex > 0 : state.pageIndex < state.pageCount - 1;
+      if (!hasTarget) return;
+      if (delta < 0) readerArmBackward();               // 翻回上一 PDF 页 → 落其末屏
+      gotoPage(delta);                                  // page:rendered → 重排 → settleV → reader:vpage → updatePageInd
+      return;
+    }
+    gotoPage(delta);
+  } else gotoDiaryPage(state.pageIndex + delta);
 }
 el('pg-prev').addEventListener('click', () => pageNav(-1));
 el('pg-next').addEventListener('click', () => pageNav(1)); // 日记：下一页可无限向前（空白新页·写了才落盘），取代原手动加页
@@ -308,6 +328,7 @@ el('view-toggle').addEventListener('click', () => {
 bus.on('nav:flip', (dir) => pageNav(Number(dir) || 0));
 // 书籍 gotoPage 渲染后更新页码（日记 gotoDiaryPage 自带；重复调用幂等）。
 bus.on('page:rendered', updatePageInd);
+bus.on('reader:vpage', updatePageInd); // 重排虚拟页翻动/重排落地 → 刷新页码（N/M · v/n）
 
 // ════ 日记列表（真数据） ════
 const WK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
