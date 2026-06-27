@@ -1,6 +1,6 @@
-import type { AnnotationEvent, EventType, NormBBox, ScreenOverlay, StrokePoint } from '../core/contracts';
+import type { AnnotationEvent, EventType, NormBBox, ScreenOverlay, StrokePoint, SurfaceObject } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
-import type { PersistedStroke } from '../core/store-format';
+import type { PersistedMark, PersistedStroke } from '../core/store-format';
 import type { ReflowBlock } from './reflow';
 import { bus, settings, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
 import { recordInkSample } from '../local/bedrock-recorder';
@@ -32,7 +32,7 @@ let inkCtx: CanvasRenderingContext2D | null = null;
 // AI 旁注摆放：'margin'=桌面右栏绝对定位；'inline'=移动版段落下方内联低语（贴电纸屏 AI 语言）。
 let notePlacement: 'margin' | 'inline' = 'margin';
 
-interface BlockRef { id: string; el: HTMLElement; source: NormBBox; }
+interface BlockRef { id: string; el: HTMLElement; source: NormBBox; runIds: string[]; }
 let blockRefs: BlockRef[] = [];
 
 // 字符对象 id → 所属重排块 id（跨视图锚：标注锚在字符对象上 → 解析到当前重排布局的块）。renderFinal 时重建。
@@ -160,7 +160,7 @@ function render(items: RenderItem[], warn: string = ''): void {
     const b = it;
     const node = makeBlockNode(b);
     col.appendChild(node);
-    blockRefs.push({ id: b.id, el: node, source: b.source });
+    blockRefs.push({ id: b.id, el: node, source: b.source, runIds: b.sourceRunIds ?? [] });
   }
   wrap.appendChild(col);
   el.insertBefore(wrap, inkCv);
@@ -252,6 +252,143 @@ function projectPersistedStroke(ps: PersistedStroke, ref: BlockRef): ReaderStrok
   };
 }
 
+// ── 标注锚到文本对象（重排锚定重做）：标注跟着它所标的「字」走，而非按原页坐标硬摆进块 ──
+// 字符对象（SurfaceObject.id=`${runId}_${charIdx}`）在重排 DOM 里的真实位置由 Range 定位；按标注类型投影（下划线/高亮切段跟随换行·圈/符号整笔平移）。
+type CRect = { left: number; top: number; width: number; height: number };
+type Col = { b: NormBBox; r: CRect };
+let objectById = new Map<string, SurfaceObject>();
+let anchorObjs: SurfaceObject[] = [];                                                      // 有文字的对象（就近锚扫描用·每 sync 建一次）
+const blockOffsetCache = new Map<string, Map<string, { start: number; len: number }>>(); // blockId → (objId → DOM UTF-16 [start,len])
+const objRectCache = new Map<string, CRect[]>();                                          // objId → content 矩形（一次 sync 内复用）
+function anchorCachesReset(): void {
+  objectById = new Map((state.surfaceIndex?.objects ?? []).map((o) => [o.id, o]));
+  anchorObjs = [...objectById.values()].filter((o) => !!o.text && !!o.text.trim());
+  blockOffsetCache.clear(); objRectCache.clear();
+}
+const runIdOf = (id: string): string => id.slice(0, id.lastIndexOf('_'));
+const charIdxOf = (id: string): number => Number(id.slice(id.lastIndexOf('_') + 1));
+const W = (): number => pageCss.w || 1, Hn = (): number => pageCss.h || 1;
+
+/** 本块「字符对象 id → DOM 文本节点 UTF-16 [start,len]」：源字符（按 run 序+charIdx=阅读序）逐个对齐 DOM 文本的
+ *  非空白码点（两边都跳空白·1:1，故不必精确复刻 joinRuns 的插空格/trim）。仅单文本节点块（.reader-p/.reader-h）；
+ *  列表/多节点返回空 → 退块级。 */
+function blockCharOffsets(ref: BlockRef): Map<string, { start: number; len: number }> {
+  const hit = blockOffsetCache.get(ref.id); if (hit) return hit;
+  const map = new Map<string, { start: number; len: number }>();
+  const tn = ref.el.firstChild;
+  if (ref.el.childNodes.length === 1 && tn && tn.nodeType === 3) {
+    const runOrder = new Map(ref.runIds.map((id, i) => [id, i] as const));
+    const chars = [...objectById.values()]
+      .filter((o) => runOrder.has(runIdOf(o.id)) && !!o.text && !!o.text.trim())
+      .sort((a, b) => ((runOrder.get(runIdOf(a.id)) ?? 0) - (runOrder.get(runIdOf(b.id)) ?? 0)) || (charIdxOf(a.id) - charIdxOf(b.id)));
+    const text = tn.textContent ?? '';
+    const dom: Array<{ off: number; len: number; cp: string }> = [];
+    let off = 0;
+    for (const cp of text) { if (cp.trim()) dom.push({ off, len: cp.length, cp }); off += cp.length; }
+    // 一致性校验：源非空白字符串 === DOM 非空白字符串 才做字符级锚定。否则（AI/hybrid/rewrite 改写文字·列表剥符号致字符数/内容不符）
+    // 按序号硬对齐会整体贴错字 → 留空 map、退块级兜底（宁可粗、不贴错）。
+    if (chars.map((c) => c.text).join('') === dom.map((d) => d.cp).join('')) {
+      for (let i = 0; i < chars.length; i++) map.set(chars[i].id, { start: dom[i].off, len: dom[i].len });
+    }
+  }
+  blockOffsetCache.set(ref.id, map);
+  return map;
+}
+/** 字符对象 → 它在重排 DOM 里的真实矩形（content 坐标·跨行返回多段）；定位不到 []。 */
+function rectsForObject(objId: string): CRect[] {
+  const hit = objRectCache.get(objId); if (hit) return hit;
+  let out: CRect[] = [];
+  const bid = charToBlock.get(objId);
+  const ref = bid ? blockRefs.find((b) => b.id === bid) : undefined;
+  const tn = ref?.el.firstChild;
+  const e = ref ? blockCharOffsets(ref).get(objId) : undefined;
+  if (ref && tn && e) {
+    try {
+      const range = document.createRange();
+      range.setStart(tn, e.start); range.setEnd(tn, e.start + e.len);
+      const er = el.getBoundingClientRect();
+      out = [...range.getClientRects()].map((r) => ({ left: r.left - er.left, top: r.top - er.top + el.scrollTop, width: r.width, height: r.height }));
+    } catch { out = []; }
+  }
+  objRectCache.set(objId, out);
+  return out;
+}
+/** 整笔平移：保形保真迹（pageCss 等比）·把源锚点(页归一)摆到目标 content 矩形左上。符号/箭头/手写/圈用。 */
+function translateWhole(strokes: PersistedStroke[], srcX: number, srcY: number, dst: CRect): ReaderStroke[] {
+  return strokes.map((ps) => ({ tool: (ps.tool === 'highlighter' ? 'highlighter' : 'pen') as Tool,
+    points: ps.points.map((p) => ({ x: dst.left + (p.x - srcX) * W(), y: dst.top + (p.y - srcY) * Hn(), pressure: p.pressure, t: p.t })) }));
+}
+/** 最近文本对象 + 其重排矩形（refs 空的手写符号 why/? 靠这条就近锚·= 用户说的"空间线"）。取最近 8 个里第一个能定位的。 */
+function nearestObjectRect(bb: NormBBox): { obj: SurfaceObject; rect: CRect } | null {
+  const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+  const top: Array<{ o: SurfaceObject; d: number }> = []; // 单遍维护最近 6（避免每条 mark 全量 sort）
+  for (const o of anchorObjs) {
+    const d = Math.hypot(o.bbox[0] + o.bbox[2] / 2 - cx, o.bbox[1] + o.bbox[3] / 2 - cy);
+    if (top.length < 6) { top.push({ o, d }); top.sort((a, b) => a.d - b.d); }
+    else if (d < top[5].d) { top[5] = { o, d }; top.sort((a, b) => a.d - b.d); }
+  }
+  for (const { o } of top) { const r = rectsForObject(o.id); if (r.length) return { obj: o, rect: r[0] }; } // 最近的若在不可定位块(列表/改写)→试次近·都不行返回 null→退块级
+  return null;
+}
+/** 跨度类（下划线/高亮）按字符切段：每命中字符一段·x 拉伸到重排字宽(无缝)·y 锚字底(下划线)/字框(高亮)+保原偏移。
+ *  字一换行各字矩形自然分到多行 → 段也跟着分行（**既保原笔 y 起伏，又跟随换行**）。 */
+function segmentByChars(strokes: PersistedStroke[], located: Array<{ obj: SurfaceObject; rects: CRect[] }>, action: string): ReaderStroke[] {
+  const cols: Col[] = located.map((l) => ({ b: l.obj.bbox, r: l.rects[0] })).sort((a, b) => (a.b[1] - b.b[1]) || (a.b[0] - b.b[0]));
+  if (!cols.length) return [];
+  const pick = (x: number, y: number): Col => { let best = cols[0], bd = Infinity; for (const c of cols) { const d = Math.hypot((c.b[0] + c.b[2] / 2) - x, (c.b[1] + c.b[3] / 2) - y); if (d < bd) { bd = d; best = c; } } return best; }; // 2D 最近（原标注跨多原文行也分对行）
+  const out: ReaderStroke[] = [];
+  for (const ps of strokes) {
+    const tool: Tool = ps.tool === 'highlighter' ? 'highlighter' : 'pen';
+    // 按「重排行」分组（非按单字）：同一重排行的连续点是一段（连得上·避免单点段画不出）；换到另一行才断 → 自然跟随换行拆段。
+    let cur: { lineTop: number; pts: RPoint[] } | null = null;
+    const flush = (): void => { if (cur && cur.pts.length >= 2) out.push({ tool, points: cur.pts }); cur = null; }; // <2 点 drawStroke 画不出 → 丢
+    for (const p of ps.points) {
+      const c = pick(p.x, p.y);
+      const [bx, by, bw, bh] = c.b; const r = c.r;
+      const mapped: RPoint = {
+        x: r.left + (bw ? (p.x - bx) / bw : 0) * r.width,                // x 拉伸到重排字宽（相邻字段无缝）
+        y: action === 'highlight'
+          ? r.top + (bh ? (p.y - by) / bh : 0) * r.height               // 高亮：y 拉到字框
+          : (r.top + r.height) + (p.y - (by + bh)) * Hn(),              // 下划线：y 锚字底 + 保原 px 偏移（与重排字号无关）
+        pressure: p.pressure, t: p.t,
+      };
+      if (cur && Math.abs(r.top - cur.lineTop) > 8) flush();            // 换到重排另一行 → 断段
+      if (!cur) cur = { lineTop: r.top, pts: [] };
+      cur.pts.push(mapped);
+    }
+    flush();
+  }
+  return out;
+}
+/** 圈/箭头/有 refs 的手写：整笔平移到 refs **首行**并集（跨行落首行·保形不切散弧）。src 锚点也取首行 refs（否则跨行第二行更靠左时水平偏）。 */
+function projectSpan(strokes: PersistedStroke[], located: Array<{ obj: SurfaceObject; rects: CRect[] }>): ReaderStroke[] {
+  const items = located.map((l) => ({ b: l.obj.bbox, r: l.rects[0] }));
+  const minTop = Math.min(...items.map((i) => i.r.top));
+  const line = items.filter((i) => i.r.top < minTop + 6); // 首行（重排）
+  const dst: CRect = { left: Math.min(...line.map((i) => i.r.left)), top: minTop,
+    width: Math.max(...line.map((i) => i.r.left + i.r.width)) - Math.min(...line.map((i) => i.r.left)),
+    height: Math.max(...line.map((i) => i.r.top + i.r.height)) - minTop };
+  return translateWhole(strokes, Math.min(...line.map((i) => i.b[0])), Math.min(...line.map((i) => i.b[1])), dst); // src 也取首行 refs
+}
+/** 一条 mark → restored 笔触：按 action/refs 分流。下划线·高亮=切段跟随换行；圈=整笔首行；符号/手写=就近整笔；都不行=旧块级兜底（不丢笔）。 */
+function projectPersistedMark(m: PersistedMark, fallback: BlockRef | null): ReaderStroke[] {
+  const action = m.hmp?.action ?? '';
+  const strokes = m.strokes ?? [];
+  const refs = m.hmp?.target_object_refs ?? [];
+  const located = refs.map((id) => ({ obj: objectById.get(id), rects: rectsForObject(id) }))
+    .filter((x): x is { obj: SurfaceObject; rects: CRect[] } => !!x.obj && x.rects.length > 0);
+  if (located.length) { // refs 命中 → 锚到那几个字
+    if (action === 'underline' || action === 'highlight') return segmentByChars(strokes, located, action);
+    return projectSpan(strokes, located); // 圈/箭头/有 refs 的手写：整笔锚首行并集（不误入切段·也不丢 refs 改用 nearest）
+  }
+  if (refs.length === 0) { // 真·无 refs（手写符号 why/?·self_content）→ 空间线就近文本对象整笔平移
+    const near = nearestObjectRect(m.bbox);
+    if (near) return translateWhole(strokes, near.obj.bbox[0], near.obj.bbox[1], near.rect);
+  }
+  // refs 非空但全定位失败（列表多节点 / rewrite / 改写文字致一致性校验不过）→ 退块级（保守·不乱锚到邻段）
+  return fallback ? strokes.map((ps) => projectPersistedStroke(ps, fallback)) : [];
+}
+
 /** 重排里同步旧标注：高亮被标注块；restoreStrokes 开时再把该 mark 的真笔触反投影进 restoredStrokes 重画。
  *  async（getFoldedMarks）→ 捕获 page/seq 守卫，await 后页/重排/视图已变则整次作废（防跨页串画）。 */
 async function syncRestoredMarks(): Promise<void> {
@@ -264,17 +401,15 @@ async function syncRestoredMarks(): Promise<void> {
   restoredStrokes.length = 0;
   restoredMarkIds.clear();
   el.querySelectorAll('.reader-mark-highlight').forEach((n) => n.classList.remove('reader-mark-highlight')); // 先清旧高亮：本函数会被 overlay/视图切换重复调（非只 render 后 DOM 已新建）→ 高亮始终反映当前活 mark
+  if (restoreStrokes) anchorCachesReset(); // 本次 sync 重建对象表 + 每块字符偏移 + 对象矩形缓存（一次 sync 内复用）
   for (const m of marks) {
     if (m.page_id !== pageId) continue;
-    const ref = resolveBlockForRefs(m.hmp?.target_object_refs ?? []) ?? nearestBlockByBbox(m.bbox);
-    if (!ref) continue;
-    ref.el.classList.add('reader-mark-highlight'); // 被标注块高亮（保留：用户只反对 AI 旁注竖线）
+    const block = resolveBlockForRefs(m.hmp?.target_object_refs ?? []) ?? nearestBlockByBbox(m.bbox);
+    if (block) block.el.classList.add('reader-mark-highlight'); // 被标注块高亮（桌面 styles.css 用·移动版 CSS 已去竖线不绘）
     if (!restoreStrokes) continue;
-    for (const ps of m.strokes ?? []) {
-      const rs = projectPersistedStroke(ps, ref);
-      if (rs.points.length) restoredStrokes.push({ ...rs, markId: m.mark_id });
-    }
-    restoredMarkIds.add(m.mark_id);
+    const segs = projectPersistedMark(m, block); // 标注锚到文本对象（按类型投影），非纯块级
+    for (const rs of segs) if (rs.points.length) restoredStrokes.push({ ...rs, markId: m.mark_id });
+    if (segs.some((s) => s.points.length >= 2)) restoredMarkIds.add(m.mark_id); // 只有真画出可绘 restored 才标记（否则去重会误跳该 mark 的 live inkStroke）
   }
   if (restoreStrokes) resizeInk(); // 重画（restored 笔此刻才就位）；桌面 restoreStrokes=false 不多画一次
 }
@@ -305,7 +440,7 @@ function streamAppend(b: ReflowBlock): void {
   if (!streamCol) return;
   const node = makeBlockNode(b);
   streamCol.appendChild(node);
-  blockRefs.push({ id: b.id, el: node, source: b.source });
+  blockRefs.push({ id: b.id, el: node, source: b.source, runIds: b.sourceRunIds ?? [] });
   // 流式期间不 resizeInk（用户不在画、墨画布无需逐块长高）——renderFinal 末尾统一重排一次，去掉逐块大位图重建。
 }
 
