@@ -10,6 +10,15 @@ import { buildDocumentProjectionExport } from './document-projection';
 import { buildRuntimeAndVisual } from './runtime-surface';
 import type { KnowledgeExportEnvelope, DocumentProjectionExportEnvelope, RuntimeSurfaceBlock, InkLoopVisualModel } from './contract';
 
+/** 导出"漏了什么"的结构化诊断——让调用方/UI 能展示哪些 KO/页/笔没进导出，杜绝"成功"假象。 */
+export interface L1Diagnostics {
+  skippedKos: { ko_id: string; kind: string; reason: string }[]; // 被隐私/状态/空正文闸挡掉的 KO
+  skippedPages: number[];      // 未重排·不进文档投影的页（0-based）
+  orphanInk: number;           // 无可导出 KO·按 visual-only 导出的笔数
+  unplacedInk: number;         // 未落到任何文档块·彻底没进导出的笔数（真·丢失）
+  exportableKoCount: number;
+}
+
 export interface L1Export {
   documentId: string;
   generatedAt: string;
@@ -18,6 +27,7 @@ export interface L1Export {
   runtimeSurfaceBlocks: { container: 'inkloop_internal.surface_blocks'; document_id: string; generated_at: string; blocks: RuntimeSurfaceBlock[] }; // 外层只是我们的打包容器（非对方契约）；每块自带 inkloop.surface_object.v1
   visualModel: InkLoopVisualModel;
   warnings: string[];
+  diagnostics: L1Diagnostics;
 }
 
 export async function buildL1Export(documentId: string, opts: ExportOpts = {}): Promise<L1Export> {
@@ -27,13 +37,14 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
   const doc = await getDoc(documentId);
   const documentTitle = doc?.filename || '(未命名)';
 
-  const { envelope: knowledgeExport, exportable } = await buildKnowledgeExport(documentId, o);
-  const { envelope: documentProjections, warnings: projWarn } = await buildDocumentProjectionExport(documentId, exportable, o);
+  const { envelope: knowledgeExport, exportable, skipped: skippedKos } = await buildKnowledgeExport(documentId, o);
+  const { envelope: documentProjections, warnings: projWarn, skippedPages } = await buildDocumentProjectionExport(documentId, exportable, o);
   const blocks = documentProjections.document_projections[0]?.blocks ?? [];
-  const { surfaceBlocks, visualModel, warnings: rtWarn } = await buildRuntimeAndVisual(documentId, documentTitle, blocks, exportable);
+  const { surfaceBlocks, visualModel, warnings: rtWarn, orphanInk, unplacedInk } = await buildRuntimeAndVisual(documentId, documentTitle, blocks, exportable);
 
   const warnings = [...projWarn, ...rtWarn];
   if (!exportable.length) warnings.push('没有可导出的 KnowledgeObject（这本书还没有可导出状态的标注/AI 笔记）');
+  if (skippedKos.length) warnings.push(`${skippedKos.length} 个 KnowledgeObject 被导出闸挡掉（隐私/状态/空正文·见 diagnostics.skippedKos）`);
 
   return {
     documentId,
@@ -43,6 +54,7 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
     runtimeSurfaceBlocks: { container: 'inkloop_internal.surface_blocks', document_id: documentId, generated_at: generatedAt, blocks: surfaceBlocks },
     visualModel,
     warnings,
+    diagnostics: { skippedKos, skippedPages, orphanInk, unplacedInk, exportableKoCount: exportable.length },
   };
 }
 

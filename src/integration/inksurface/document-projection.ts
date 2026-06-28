@@ -49,7 +49,13 @@ function koIdsForBlock(kos: KnowledgeObject[], pageIndex: number, block: ReflowB
   return [...new Set(ids)].sort();
 }
 
-export interface ProjectionResult { envelope: DocumentProjectionExportEnvelope; warnings: string[] }
+export interface ProjectionResult { envelope: DocumentProjectionExportEnvelope; warnings: string[]; skippedPages: number[] }
+
+/** bbox 是否会被 clampNormBBox 实质改动（页边距外/越界）。 */
+function bboxOutOfBounds(b?: NormBBox): boolean {
+  if (!b) return false;
+  return b[0] < 0 || b[1] < 0 || b[0] + b[2] > 1 + 1e-6 || b[1] + b[3] > 1 + 1e-6;
+}
 
 export async function buildDocumentProjectionExport(
   documentId: string,
@@ -59,17 +65,21 @@ export async function buildDocumentProjectionExport(
   const generated_at = opts.generatedAt ?? new Date().toISOString();
   const warnings: string[] = [];
   const doc = await getDoc(documentId);
-  if (!doc) return { envelope: emptyEnvelope(documentId, generated_at, opts.appVersion), warnings: [`doc ${documentId} 不存在`] };
+  if (!doc) return { envelope: emptyEnvelope(documentId, generated_at, opts.appVersion), warnings: [`doc ${documentId} 不存在`], skippedPages: [] };
 
   const blocks: ProjectionBlock[] = [];
   let offset = 0;
-  const pageIndexes = Object.keys(doc.pages).map(Number).sort((a, b) => a - b);
-  for (const pi of pageIndexes) {
+  let clampedCount = 0;
+  // 遍历全书每一页（按 page_count），非重排页记 skippedPages——不再只看已缓存的页、不再静默跳过。
+  const pageCount = doc.page_count ?? Object.keys(doc.pages).length;
+  const skippedPages: number[] = [];
+  for (let pi = 0; pi < pageCount; pi++) {
     const page = doc.pages[pi];
-    if (!page?.reflow?.length) { warnings.push(`第 ${pi + 1} 页未重排（无块结构）→ 跳过`); continue; }
+    if (!page?.reflow?.length) { skippedPages.push(pi); continue; }
     const pageId = pageIdFor(documentId, pi);
     for (const b of page.reflow) {
       const text_md = blockTextMd(b);
+      if (bboxOutOfBounds(b.source)) clampedCount++;
       const block: ProjectionBlock = {
         block_id: `blk_p${String(pi + 1).padStart(3, '0')}_${await stableToken(`${documentId}|${pi}|${b.id}`)}`,
         kind: KIND[b.type],
@@ -81,7 +91,7 @@ export async function buildDocumentProjectionExport(
           page_index: pi,
           object_refs: b.sourceRunIds ?? [],
           source_range: { start: offset, end: offset + text_md.length },
-          anchor_bbox: clampNormBBox(b.source),
+          anchor_bbox: clampNormBBox(b.source), // 越界夹回页内（renderer 需要落点）；夹动了的计入 clampedCount 警告，不静默
         },
         knowledge_object_ids: koIdsForBlock(exportableKos, pi, b),
       };
@@ -89,10 +99,12 @@ export async function buildDocumentProjectionExport(
       offset += text_md.length + 1;
     }
   }
+  if (skippedPages.length) warnings.push(`${skippedPages.length} 页未重排（无块结构·该页正文/标注/笔迹不进文档投影）：第 ${skippedPages.map((p) => p + 1).join('/')} 页`);
+  if (clampedCount) warnings.push(`${clampedCount} 个块锚点在页边距外被夹回页内（anchor_bbox_clamped·导出位置非真实落笔）`);
 
   if (!blocks.length) {
     warnings.push('全书没有重排过的页 → 无文档投影（对方 schema 要求 blocks≥1）');
-    return { envelope: emptyEnvelope(documentId, generated_at, opts.appVersion), warnings };
+    return { envelope: emptyEnvelope(documentId, generated_at, opts.appVersion), warnings, skippedPages };
   }
 
   const body_hash = await projectionBodyHash(blocks);
@@ -106,7 +118,8 @@ export async function buildDocumentProjectionExport(
     generated_at,
     source: { app: 'inkloop', app_version: opts.appVersion ?? '0.1.0' },
     privacy: 'export_allowed',
-    export_policy: { include_full_text: true, include_pdf_asset: false, include_raw_strokes: false, include_debug_evidence: false },
+    // include_full_text 诚实：有页没进投影时为 false，别让协作方误以为是完整文档
+    export_policy: { include_full_text: skippedPages.length === 0, include_pdf_asset: false, include_raw_strokes: false, include_debug_evidence: false },
     blocks,
     body_hash,
     created_at: generated_at,
@@ -124,6 +137,7 @@ export async function buildDocumentProjectionExport(
       external_edits: [],
     },
     warnings,
+    skippedPages,
   };
 }
 

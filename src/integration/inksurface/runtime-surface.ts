@@ -10,6 +10,7 @@
  * 扩展点（不在 L1）：会议 context_id / 妙记相对时刻将来挂在 annotation 上；基岩 raw_ref 走另谈的 raw-ink 契约。
  */
 import { getFoldedMarks } from '../../local/store';
+import { koId } from '../../knowledge/builder';
 import type { PersistedMark, PersistedStroke } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
 import {
@@ -70,7 +71,7 @@ function strokesToVisual(strokes: PersistedStroke[], color: string, blockBBox: N
     .filter((s) => s.points.length > 0);
 }
 
-export interface RuntimeResult { surfaceBlocks: RuntimeSurfaceBlock[]; visualModel: InkLoopVisualModel; warnings: string[] }
+export interface RuntimeResult { surfaceBlocks: RuntimeSurfaceBlock[]; visualModel: InkLoopVisualModel; warnings: string[]; orphanInk: number; unplacedInk: number }
 
 export async function buildRuntimeAndVisual(
   documentId: string,
@@ -93,15 +94,29 @@ export async function buildRuntimeAndVisual(
     (visualByBlock.get(blockId) ?? visualByBlock.set(blockId, []).get(blockId)!).push(vz);
   };
 
-  // ── 墨迹：逐笔按各自块落 stroke_only 标注（kind/title/status 取所属 KO）──
+  // ── 墨迹：逐笔按各自块落 stroke_only 标注 ──
+  // KO-backed 笔取所属 KO 的 kind/title/status；无 KO 的可见笔（纯图形/识别失败手写/被 dismiss 的笔）
+  // 也产 stroke_only（合成确定性 ko_id·visual-only），不再静默丢——否则 InkLoop 里看得到、导出后消失。
   const marks = (await getFoldedMarks(documentId)).filter((m) => !m.is_tombstone);
-  let unlinked = 0;
+  let orphanInk = 0;
   let unplaced = 0;
   for (const mark of marks) {
     const ko = markToKo.get(mark.mark_id);
-    if (!ko) { unlinked++; continue; }
     const samePage = byPage.get(pageIdxOf(mark.page_id)) ?? [];
     if (!samePage.length) { unplaced++; continue; }
+    // 标注元信息：有 KO 用 KO 的；无 KO 合成 visual-only
+    let meta: { ko_id: string; kind: string; title: string; status: string };
+    if (ko) {
+      meta = { ko_id: ko.ko_id, kind: ko.kind, title: ko.title, status: ko.status };
+    } else {
+      orphanInk++;
+      meta = {
+        ko_id: await koId(`visual-only|${mark.mark_id}`),
+        kind: mark.feature_type || 'stroke',
+        title: (mark.marked_text || '').trim().slice(0, 40) || '（手写/图形）',
+        status: 'export_ready',
+      };
+    }
     const fallback = resolveMarkBlock(mark, samePage);
     const groups = new Map<string, PersistedStroke[]>();
     for (const s of mark.strokes) {
@@ -117,12 +132,12 @@ export async function buildRuntimeAndVisual(
       const vs = strokesToVisual(strokes, mark.color, bb);
       if (!vs.length) continue;
       const visual_bbox = pageBBoxToBlock(mark.bbox, bb);
-      const rt: RuntimeAnnotation = { ko_id: ko.ko_id, kind: ko.kind, title: ko.title, status: ko.status, render_mode: 'stroke_only', visual_bbox, visual_strokes: vs, created_at: mark.created_at, updated_at: mark.created_at };
-      const vz: VisualModelAnnotation = { ko_id: ko.ko_id, kind: ko.kind, title: ko.title, status: ko.status, render_mode: 'stroke_only', anchor_bbox: visual_bbox, page_index: blk.source?.page_index, visual_bbox, visual_strokes: vs };
+      const rt: RuntimeAnnotation = { ...meta, render_mode: 'stroke_only', visual_bbox, visual_strokes: vs, created_at: mark.created_at, updated_at: mark.created_at };
+      const vz: VisualModelAnnotation = { ...meta, render_mode: 'stroke_only', anchor_bbox: visual_bbox, page_index: blk.source?.page_index, visual_bbox, visual_strokes: vs };
       push(blockId, rt, vz);
     }
   }
-  if (unlinked) warnings.push(`${unlinked} 笔未连到可导出 KO（跳过）`);
+  if (orphanInk) warnings.push(`${orphanInk} 笔无可导出 KO·按 visual-only 笔迹导出（合成 ko_id）`);
   if (unplaced) warnings.push(`${unplaced} 笔未落到任何文档块（页未重排/无重叠·跳过）`);
 
   // ── AI 笔记/手写注：每个 KO 一条 margin_note（带正文·只一次）；excerpt(高亮)只靠墨迹不另出旁注 ──
@@ -162,5 +177,5 @@ export async function buildRuntimeAndVisual(
     annotations: visualByBlock.get(b.block_id) ?? [],
   }));
 
-  return { surfaceBlocks, visualModel: { documentTitle, blocks: visualBlocks }, warnings };
+  return { surfaceBlocks, visualModel: { documentTitle, blocks: visualBlocks }, warnings, orphanInk, unplacedInk: unplaced };
 }

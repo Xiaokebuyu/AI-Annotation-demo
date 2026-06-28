@@ -81,7 +81,7 @@ const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford Base32（无 
 
 /** 稳定键 → 'ko_'+确定性 Crockford-Base32-26。同一源每次重建得同一 id（跨端稳定、可去重）。
  *  Crockford 大写 26 位满足协作方 InkSurface 契约 `^ko_[0-9A-HJKMNP-TV-Z]{26}$`——是**确定性派生**(非随机 ULID)，故保留跨端稳定身份。 */
-async function koId(stableKey: string): Promise<string> {
+export async function koId(stableKey: string): Promise<string> {
   const d = await sha256Bytes(`${KO_SCHEMA_VERSION}|${stableKey}`);
   let out = '';
   for (let i = 0; i < 26; i++) out += CROCKFORD[d[i] % 32];
