@@ -377,7 +377,11 @@ async function renderDiaryList(): Promise<void> {
 el('read-sub').querySelector<HTMLElement>('[data-read="diary"]')?.addEventListener('click', () => void renderDiaryList());
 
 // dev 调试钩子（同桌面 __inkloop）：preview/控制台里读状态、发 bus 事件、测书籍导入。
-(window as unknown as { __inkloop?: unknown }).__inkloop = { state, bus, getActiveContext, listBooks, loadFile, reopenBook, openBook };
+// exportInkSurfaceL1：WS3 L1 对接——把一本书产成协作方 InkSurface 契约 artifacts（KO/投影/runtime/visual model），dev-only。
+(window as unknown as { __inkloop?: unknown }).__inkloop = {
+  state, bus, getActiveContext, listBooks, loadFile, reopenBook, openBook,
+  exportInkSurfaceL1: (docId: string) => import('./integration/inksurface').then((m) => m.buildL1Export(docId)),
+};
 
 // ════ 线格开关 boot 态：复选框绑定移到 mobile/dev.ts（设置页重渲会重建该控件）════
 document.body.classList.toggle('lines-off', localStorage.getItem('inkloop.mobile.lines') === 'off');

@@ -120,7 +120,7 @@ describe('KnowledgeBuilder', () => {
     expect(ko.status).toBe('export_ready');
     expect(ko.privacy).toBe('export_allowed');
     expect(ko.render_hints?.markdown_callout).toBe('note');
-    expect(ko.ko_id).toMatch(/^ko_[0-9a-f]{26}$/);
+    expect(ko.ko_id).toMatch(/^ko_[0-9A-HJKMNP-TV-Z]{26}$/); // 确定性 Crockford-Base32-26（满足协作方 InkSurface 契约）
     expect(ko.content_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(ko.created_at).toBe(ko.updated_at); // 投影取源时刻，hash 稳定
   });

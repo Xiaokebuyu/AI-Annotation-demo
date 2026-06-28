@@ -4,6 +4,8 @@ import { runReflow, runReflowAi, reflowAiStream, chatStream, runOcrVlm, runExpla
 import { debugEvent, debugSnapshot } from './server/debug.mjs';
 import { runOcrLayout } from './server/ocr-layout-dev.mjs'; // dev-only：扫描页带坐标 OCR（mac_runner），不进生产代理
 import { runInterpretHwr } from './server/hwr-dev.mjs';     // dev-only：英文手写识别（OpenVINO 徐方案模型），不进生产代理
+import { writeFile, mkdir } from 'node:fs/promises';
+import { dirname, join, normalize } from 'node:path';
 
 /** dev-only AI 代理：浏览器 POST /api/* → 网关 → 各识别/重排/对话端点。Key 留服务端。 */
 function inferenceProxy(env: Record<string, string>): Plugin {
@@ -16,9 +18,10 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       const post = (path: string, fn: (body: unknown) => Promise<unknown>) =>
         server.middlewares.use(path, (req, res) => {
           if (req.method !== 'POST') { res.statusCode = 405; res.end('POST only'); return; }
-          let body = '';
-          req.on('data', (c) => (body += c));
+          const chunks: Buffer[] = [];
+          req.on('data', (c: Buffer) => chunks.push(c));
           req.on('end', async () => {
+            const body = Buffer.concat(chunks).toString('utf8'); // 一次性解码：别 `body += chunk`（多字节 UTF-8 跨 chunk 边界会被截断成 → 中文乱码）
             res.setHeader('content-type', 'application/json');
             try {
               res.end(JSON.stringify(await fn(JSON.parse(body))));
@@ -30,6 +33,16 @@ function inferenceProxy(env: Record<string, string>): Plugin {
         });
       // dev-only 调试通道：客户端镜像 inspect → JSONL + 内存环；GET 快照供外部读。
       post('/api/__debug/event', async (b) => debugEvent(b));
+      // dev-only：WS3 对接产物落盘——浏览器(IDB 真数据)产 InkSurface artifacts → 写进协作方 .inkloop-smoke-runs/（其 .gitignore 已忽略）供其 validator/demo 读。relName 限相对路径防穿越。
+      post('/api/__debug/dump', async (b) => {
+        const { relName, data } = b as { relName: string; data: unknown };
+        const baseDir = join(process.cwd(), 'ink-surface-sdk-main', '.inkloop-smoke-runs');
+        const target = normalize(join(baseDir, relName));
+        if (!target.startsWith(baseDir)) throw new Error('relName 越界');
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, JSON.stringify(data, null, 2), 'utf8');
+        return { ok: true, path: target };
+      });
       server.middlewares.use('/api/__debug/snapshot', (req, res) => {
         if (req.method !== 'GET') { res.statusCode = 405; res.end('GET only'); return; }
         res.setHeader('content-type', 'application/json');

@@ -69,24 +69,38 @@ function inkloopUri(docId: string, pageIndex: number | undefined, anchor: string
 
 /* ── 哈希（确定性 ko_id + content_hash）──────────────────────────────────── */
 
-async function sha256HexStr(s: string): Promise<string> {
-  const buf = new TextEncoder().encode(s);
-  const d = await crypto.subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+async function sha256Bytes(s: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+}
+export async function sha256HexStr(s: string): Promise<string> {
+  return [...await sha256Bytes(s)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** 稳定键 → 'ko_'+sha256[:26]。同一源每次重建得同一 id（跨端稳定、可去重）。 */
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford Base32（无 I/L/O/U）；协作方 ko_id zod 正则即此字符集
+
+/** 稳定键 → 'ko_'+确定性 Crockford-Base32-26。同一源每次重建得同一 id（跨端稳定、可去重）。
+ *  Crockford 大写 26 位满足协作方 InkSurface 契约 `^ko_[0-9A-HJKMNP-TV-Z]{26}$`——是**确定性派生**(非随机 ULID)，故保留跨端稳定身份。 */
 async function koId(stableKey: string): Promise<string> {
-  const hex = await sha256HexStr(`${KO_SCHEMA_VERSION}|${stableKey}`);
-  return `ko_${hex.slice(0, 26)}`;
+  const d = await sha256Bytes(`${KO_SCHEMA_VERSION}|${stableKey}`);
+  let out = '';
+  for (let i = 0; i < 26; i++) out += CROCKFORD[d[i] % 32];
+  return `ko_${out}`;
 }
 
-/** 确定性 JSON：键名递归排序、数组保序。用于 content_hash 与跨端判重。 */
-function canonicalJson(v: unknown): string {
+/** 夹到合法归一化框：x,y,w,h≥0 且 x+w≤1、y+h≤1（满足协作方 NormBBoxSchema refine）。
+ *  我们的页坐标允许越界到页边距（x 可 >1），导出当锚点 hint 时夹回页内。 */
+export function clampNormBBox(b: NormBBox): NormBBox {
+  const x = Math.min(1, Math.max(0, b[0]));
+  const y = Math.min(1, Math.max(0, b[1]));
+  return [x, y, Math.min(1 - x, Math.max(0, b[2])), Math.min(1 - y, Math.max(0, b[3]))];
+}
+
+/** 确定性 JSON：键名递归排序、数组保序、**剔除 undefined 键**（与协作方 canonicalize 一致 → content_hash 跨端可重算校验）。 */
+export function canonicalJson(v: unknown): string {
   if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';
   if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
   const obj = v as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
+  const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
   return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(',')}}`;
 }
 
@@ -129,7 +143,7 @@ async function finalize(d: Draft): Promise<KnowledgeObject> {
       ...(d.pageId ? { page_id: d.pageId } : {}),
       ...(d.pageIndex != null ? { page_index: d.pageIndex } : {}),
       object_refs: d.objectRefs,
-      ...(d.bbox ? { anchor_bbox: d.bbox } : {}),
+      ...(d.bbox ? { anchor_bbox: clampNormBBox(d.bbox) } : {}),
       ...(d.quote ? { quote: d.quote } : {}),
       inkloop_uri: inkloopUri(d.documentId, d.pageIndex, d.objectRefs[0]),
     },
