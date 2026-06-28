@@ -15,7 +15,7 @@ export interface L1Export {
   generatedAt: string;
   knowledgeExport: KnowledgeExportEnvelope;
   documentProjections: DocumentProjectionExportEnvelope;
-  runtimeSurfaceBlocks: { schema_version: 'inkloop.runtime_surface_blocks.v1'; document_id: string; generated_at: string; blocks: RuntimeSurfaceBlock[] };
+  runtimeSurfaceBlocks: { container: 'inkloop_internal.surface_blocks'; document_id: string; generated_at: string; blocks: RuntimeSurfaceBlock[] }; // 外层只是我们的打包容器（非对方契约）；每块自带 inkloop.surface_object.v1
   visualModel: InkLoopVisualModel;
   warnings: string[];
 }
@@ -40,7 +40,7 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
     generatedAt,
     knowledgeExport,
     documentProjections,
-    runtimeSurfaceBlocks: { schema_version: 'inkloop.runtime_surface_blocks.v1', document_id: documentId, generated_at: generatedAt, blocks: surfaceBlocks },
+    runtimeSurfaceBlocks: { container: 'inkloop_internal.surface_blocks', document_id: documentId, generated_at: generatedAt, blocks: surfaceBlocks },
     visualModel,
     warnings,
   };

@@ -62,9 +62,10 @@ function kindTag(k: KnowledgeKind): string {
 }
 
 function inkloopUri(docId: string, pageIndex: number | undefined, anchor: string | undefined): string {
-  if (pageIndex == null) return `inkloop://doc/${docId}`;
-  const base = `inkloop://doc/${docId}/page/${pageIndex}`;
-  return anchor ? `${base}?anchor=${anchor}` : base;
+  const d = encodeURIComponent(docId); // 对齐协作方 uri.ts：docId/anchor 都 encode
+  if (pageIndex == null) return `inkloop://doc/${d}`;
+  const base = `inkloop://doc/${d}/page/${pageIndex}`;
+  return anchor ? `${base}?anchor=${encodeURIComponent(anchor)}` : base;
 }
 
 /* ── 哈希（确定性 ko_id + content_hash）──────────────────────────────────── */

@@ -98,6 +98,7 @@ export async function projectionContentHash(p: Omit<DocumentProjection, 'content
 }
 
 // ════ ③ Runtime surface（inkloop.surface_object.v1·渲染/同步用·L1 不计算 hash）════
+export const SURFACE_OBJECT_SCHEMA_VERSION = 'inkloop.surface_object.v1';
 export interface RuntimeStrokePoint { x: number; y: number; t?: number; pressure?: number }
 export interface RuntimeVisualStroke { tool?: 'pen' | 'highlighter'; color?: string; opacity?: number; points: RuntimeStrokePoint[] }
 export interface RuntimeAnnotation {
@@ -113,6 +114,7 @@ export interface RuntimeAnnotation {
   updated_at?: string;
 }
 export interface RuntimeSurfaceBlock {
+  schema_version: typeof SURFACE_OBJECT_SCHEMA_VERSION; // 对方 runtime fixture 每块都带（per-object 版本）
   object_id: string;
   doc_id?: string;
   text?: string;

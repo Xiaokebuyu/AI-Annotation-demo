@@ -5,7 +5,7 @@ import { debugEvent, debugSnapshot } from './server/debug.mjs';
 import { runOcrLayout } from './server/ocr-layout-dev.mjs'; // dev-only：扫描页带坐标 OCR（mac_runner），不进生产代理
 import { runInterpretHwr } from './server/hwr-dev.mjs';     // dev-only：英文手写识别（OpenVINO 徐方案模型），不进生产代理
 import { writeFile, mkdir } from 'node:fs/promises';
-import { dirname, join, normalize } from 'node:path';
+import { dirname, join, relative, isAbsolute } from 'node:path';
 
 /** dev-only AI 代理：浏览器 POST /api/* → 网关 → 各识别/重排/对话端点。Key 留服务端。 */
 function inferenceProxy(env: Record<string, string>): Plugin {
@@ -37,8 +37,9 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       post('/api/__debug/dump', async (b) => {
         const { relName, data } = b as { relName: string; data: unknown };
         const baseDir = join(process.cwd(), 'ink-surface-sdk-main', '.inkloop-smoke-runs');
-        const target = normalize(join(baseDir, relName));
-        if (!target.startsWith(baseDir)) throw new Error('relName 越界');
+        const target = join(baseDir, relName);
+        const rel = relative(baseDir, target);
+        if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('relName 越界'); // 防 ../sibling 穿越（前缀判会被 baseDir-x 绕过）
         await mkdir(dirname(target), { recursive: true });
         await writeFile(target, JSON.stringify(data, null, 2), 'utf8');
         return { ok: true, path: target };
@@ -57,9 +58,10 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       // 流式重排：NDJSON chunked——边收模型分组边写回，前端按段渲染。非流式端点(/api/reflow-ai)留给预热/兜底。
       server.middlewares.use('/api/reflow-ai-stream', (req, res) => {
         if (req.method !== 'POST') { res.statusCode = 405; res.end('POST only'); return; }
-        let body = '';
-        req.on('data', (c) => (body += c));
+        const sChunks: Buffer[] = [];
+        req.on('data', (c: Buffer) => sChunks.push(c));
         req.on('end', async () => {
+          const body = Buffer.concat(sChunks).toString('utf8'); // 多字节 UTF-8 别 += chunk（中文乱码）
           res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
           res.setHeader('cache-control', 'no-cache');
           res.setHeader('x-accel-buffering', 'no'); // 禁中间层缓冲，保证逐块到达
@@ -86,9 +88,10 @@ function inferenceProxy(env: Record<string, string>): Plugin {
       // 服务端无状态、逐段 text/plain 增量写回。chat/ 面板（P4）消费它。
       server.middlewares.use('/api/chat', (req, res) => {
         if (req.method !== 'POST') { res.statusCode = 405; res.end('POST only'); return; }
-        let body = '';
-        req.on('data', (c) => (body += c));
+        const cChunks: Buffer[] = [];
+        req.on('data', (c: Buffer) => cChunks.push(c));
         req.on('end', async () => {
+          const body = Buffer.concat(cChunks).toString('utf8'); // 多字节 UTF-8 别 += chunk（中文乱码）
           res.setHeader('content-type', 'text/plain; charset=utf-8');
           res.setHeader('cache-control', 'no-cache');
           res.setHeader('x-accel-buffering', 'no');
