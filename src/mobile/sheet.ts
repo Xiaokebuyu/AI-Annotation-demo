@@ -142,3 +142,31 @@ export function pickSheet(opts: {
     wire(h, () => resolve(null), () => { resolve([...picked]); });
   });
 }
+
+/** 单选列表（radio 语义·替 pickSheet 多选）。默认选中 defaultId（如"推荐"项）。确认返回选中 id，取消/空返回 null。 */
+export function pickOneSheet(opts: {
+  title: string;
+  items: Array<{ id: string; label: string; sub?: string }>;
+  defaultId?: string;
+  confirm?: string;
+  empty?: string;
+}): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (!opts.items.length) {
+      const h = mountSheet(esc(opts.title), `<p class="msheet-msg">${esc(opts.empty ?? '没有可选项。')}</p>`, null);
+      h.scrim.querySelector('[data-ok]')?.addEventListener('click', () => { h.close(); resolve(null); });
+      h.scrim.addEventListener('mousedown', (e) => { if (e.target === h.scrim) { h.close(); resolve(null); } });
+      return;
+    }
+    const rows = opts.items.map((it) =>
+      `<div class="msheet-pick" data-id="${esc(it.id)}"><span class="msheet-box"></span>`
+      + `<span class="msheet-pl"><span class="msheet-pt">${esc(it.label)}</span>${it.sub ? `<span class="msheet-ps">${esc(it.sub)}</span>` : ''}</span></div>`
+    ).join('');
+    const h = mountSheet(esc(opts.title), `<div class="msheet-picks">${rows}</div>`, opts.confirm ?? '确认');
+    let sel = opts.defaultId && opts.items.some((i) => i.id === opts.defaultId) ? opts.defaultId : opts.items[0].id;
+    const paint = (): void => h.body.querySelectorAll<HTMLElement>('.msheet-pick').forEach((row) => row.classList.toggle('on', row.dataset.id === sel));
+    h.body.querySelectorAll<HTMLElement>('.msheet-pick').forEach((row) => row.addEventListener('click', () => { sel = row.dataset.id || sel; paint(); }));
+    paint();
+    wire(h, () => resolve(null), () => { resolve(sel); });
+  });
+}

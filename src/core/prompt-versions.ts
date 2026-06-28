@@ -13,6 +13,7 @@ export const PROMPT_VERSIONS = {
   reflow_refine: 'v3',      // /api/reflow 逐块精修
   reflow_structure: 'v3',   // /api/reflow-ai[-stream] 结构重建
   reflow_vlm: 'v3',         // /api/reflow-vlm 看图重排
+  meeting_summary: 'v1',    // /api/chat 会后思路总结（WS2-C·无状态·不进书 buffer）
 } as const;
 
 export type PromptRole = keyof typeof PROMPT_VERSIONS;

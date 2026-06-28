@@ -19,6 +19,7 @@ import {
 } from '../local/store';
 import { esc } from '../core/escape';
 import { infoSheet, promptSheet, formSheet, pickSheet } from './sheet';
+import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting } from './meeting-recap';
 import type { MeetingStatus, PersistedMeeting, PersistedWorkspace, PersistedDoc, PersistedMark } from '../core/store-format';
 
 // ── 飞书后端（feishu-service）+ 文档转换（convert-service）：同 web 默认端口；服务不在则静默退回纯本地 ──
@@ -103,7 +104,7 @@ let bedrockUserOverride = false;  // 本场会议里用户手动设过 bedrock �
 const RULED = { ruledLines: false } as const;            // 同日记：引擎不画线，稿纸线走 CSS 叠层 #diary-lines
 const noteIdOf = (mtgId: string): string => 'mtgboard_' + mtgId; // 会议手记 doc id = 既有白板 marks 的 document_id（零迁移·createDiaryDoc 幂等）
 
-function setMtg(view: 'home' | 'ws' | 'detail' | 'live'): void {
+function setMtg(view: 'home' | 'ws' | 'detail' | 'live' | 'recap'): void {
   document.body.dataset.mtg = view;
   document.body.classList.toggle('writable', view === 'live'); // 会中白板=可写（露工具格子）
 }
@@ -302,12 +303,30 @@ async function renderDetail(): Promise<void> {
     + `<section class="msec"><div class="msec-h"><span class="mt">可能有用的文件</span><span class="mb">${mats.length} 份</span></div>${filesHtml}</section>`
     + groupSec
     + `<section class="msec"><div class="msec-h"><span class="mt">你的手写档案</span></div>${archiveHtml}</section>`
+    + (m.status === 'ended' ? renderRecapCard(m) : '')
     + `<section class="msec"><div class="msec-h"><span class="mt">思路总结</span><span class="sp" style="flex:1"></span><button class="hbtn" id="md-sum"${m.status === 'ended' ? '' : ' disabled style="opacity:.45"'}>生成思路总结</button></div>${summaryHtml}</section>`
     + `</div>`;
 
+  if (m.status === 'ended') wireRecapCard(el('mv-detail'), m.meeting_id, () => void renderDetail(), () => void openRecap(m.meeting_id));
   el('mv-detail').querySelector('#md-enter')?.addEventListener('click', () => { void enterMeeting(m.meeting_id); });
   el('mv-detail').querySelector('#md-end')?.addEventListener('click', async () => { await updateMeeting(m.meeting_id, { status: 'ended', ended_at: new Date().toISOString() }); void renderDetail(); });
-  el('mv-detail').querySelector('#md-sum')?.addEventListener('click', () => void infoSheet({ title: '思路总结', message: '会后经 MCP 把手写档案 + 转写交外部 agent 综合——待接入。' }));
+  el('mv-detail').querySelector('#md-sum')?.addEventListener('click', () => void (async () => {
+    const btn = el<HTMLButtonElement>('md-sum');
+    if (btn.dataset.busy) return;
+    btn.dataset.busy = '1'; btn.textContent = '生成中…'; btn.disabled = true;
+    const sumEl = el('mv-detail').querySelector<HTMLElement>('.summary, .msec:last-child .empty');
+    let lastPaint = 0;
+    try {
+      const out = await summarizeMeeting(m.meeting_id, (full) => {
+        const now = Date.now();
+        if (now - lastPaint < 500) return; // 电纸屏 500ms 合并刷新·防残影
+        lastPaint = now;
+        if (sumEl) { sumEl.className = 'summary'; sumEl.textContent = full; }
+      });
+      if (out) void renderDetail(); // 完成后重渲染（summary 已落库）
+      else { btn.dataset.busy = ''; btn.textContent = '生成思路总结'; btn.disabled = false; }
+    } catch { btn.dataset.busy = ''; btn.textContent = '生成思路总结'; btn.disabled = false; }
+  })());
   el('mv-detail').querySelector('#md-add')?.addEventListener('click', async () => {
     const avail = books.filter((b) => !m.material_doc_ids.includes(b.document_id));
     const add = await pickSheet({
@@ -324,6 +343,13 @@ async function renderDetail(): Promise<void> {
   }));
   el('mv-detail').querySelector<HTMLElement>('.matcard[data-note]')?.addEventListener('click', () => { void enterMeeting(m.meeting_id); }); // 会议手记卡 → 进会议回到手记白板
   wireBack(el('mv-detail'));
+}
+
+/** WS2-C：进「会后记录」阅读视图（纯文本·转写 + 手写档案）。返回=回 detail。 */
+async function openRecap(mtgId: string): Promise<void> {
+  setMtg('recap');
+  el('recap-back').onclick = () => { setMtg('detail'); void renderDetail(); };
+  await loadRecapView(mtgId, el('recap-body'), el('recap-title'));
 }
 
 /** 会中打开资料：**不退出会议**。把 PDF 载进会中共享画布（loadIntoState 载入当前活跃 meetingCtx），
