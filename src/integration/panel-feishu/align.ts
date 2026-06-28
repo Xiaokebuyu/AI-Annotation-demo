@@ -39,14 +39,25 @@ export interface ProximityIndex {
 
 // ── SRT 解析 ──
 const BOM = /^﻿/;
-const TIME = /(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})/g;
+// 时间行：整行匹配 start --> end（不再用全局 \d:\d:\d 散扫·防把正文里的时间当 cue 边界）
+const TIME_LINE = /^\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})/;
 
 function tsToMs(h: string, m: string, s: string, ms: string): number {
   return ((Number(h) * 60 + Number(m)) * 60 + Number(s)) * 1000 + Number(ms.padEnd(3, '0').slice(0, 3));
 }
 
-// 说话人前缀：行首 "X:" / "X：" 且 X 不含换行、长度克制（防误删正文里的冒号）
-const SPEAKER = /^\s*([^\n:：]{1,20})\s*[:：]\s*/;
+// HTML 实体解码（飞书转写可能含 &amp; 等·别让它进 UI/summary）
+const ENT: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+function decodeHtmlEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (mm, k) => {
+    const key = String(k).toLowerCase();
+    if (key[0] === '#') { const n = key[1] === 'x' ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10); try { return String.fromCodePoint(n); } catch { return mm; } }
+    return ENT[key] ?? mm;
+  });
+}
+
+// 说话人前缀：「说话人 N」/「Speaker N」/ 纯字母名字（**名字体不含数字**·防把 "会议 08:00…"/"10:30 开始" 误判成说话人；排除 :// 链接）
+const SPEAKER = /^\s*((?:说话人|Speaker)\s*\d+|[\p{L}][\p{L}_ .·-]{0,39})\s*[:：](?!\/\/)\s*/u;
 
 function splitSpeaker(rawText: string): { speaker?: string; text: string } {
   const m = rawText.match(SPEAKER);
@@ -74,12 +85,12 @@ export function parseSrtTranscript(input: string): TranscriptCue[] {
     // 找含 --> 的时间行
     const timeLineIdx = lines.findIndex((l, i) => i >= li && l.includes('-->'));
     if (timeLineIdx < 0) continue;
-    const times = [...lines[timeLineIdx].matchAll(TIME)];
-    if (times.length < 2) continue;
-    const startMs = tsToMs(times[0][1], times[0][2], times[0][3], times[0][4]);
-    const endMs = tsToMs(times[1][1], times[1][2], times[1][3], times[1][4]);
+    const tm = lines[timeLineIdx].match(TIME_LINE);
+    if (!tm) continue;
+    const startMs = tsToMs(tm[1], tm[2], tm[3], tm[4]);
+    const endMs = tsToMs(tm[5], tm[6], tm[7], tm[8]);
     if (!(endMs > startMs)) continue;
-    const rawText = lines.slice(timeLineIdx + 1).join('\n').trim();
+    const rawText = decodeHtmlEntities(lines.slice(timeLineIdx + 1).join('\n').trim());
     if (!rawText) continue;
     if (index > auto) auto = index; // 显式序号推进 auto，避免后续混乱
     const { speaker, text } = splitSpeaker(rawText);
@@ -96,6 +107,7 @@ export function buildProximityIndex(input: ProximityInput): ProximityIndex {
   const cueAbs = input.cues
     .map((c) => ({ ...c, absStartMs: base + c.startMs, absEndMs: base + c.endMs }))
     .sort((a, b) => a.absStartMs - b.absStartMs);
+  const maxCueDurationMs = cueAbs.reduce((mx, c) => Math.max(mx, c.absEndMs - c.absStartMs), 0);
 
   const cueToNearbyMarkIds = new Map<number, string[]>();
   const markToNearbyCues = new Map<string, number[]>();
@@ -104,11 +116,14 @@ export function buildProximityIndex(input: ProximityInput): ProximityIndex {
 
   for (const mark of input.marks) {
     const t = mark.abs_timestamp;
-    // 命中：mark 时刻落在 [cueStart−window, cueEnd+window] 内（窗吸收 t0/落账延迟误差）
-    const hits = cueAbs
-      .filter((c) => t >= c.absStartMs - windowMs && t <= c.absEndMs + windowMs)
-      .map((c) => ({ index: c.index, gap: gapTo(t, c.absStartMs, c.absEndMs) }))
-      .sort((a, b) => a.gap - b.gap);
+    // 命中：mark 时刻落在 [cueStart−window, cueEnd+window] 内（窗吸收 t0/落账延迟误差）。
+    // 二分定起点后只扫窗口附近段（避免 marks*cues 全量·长会议 UI 阻塞）。
+    const hits: Array<{ index: number; gap: number }> = [];
+    for (let i = lowerBoundCueStart(cueAbs, t - windowMs - maxCueDurationMs); i < cueAbs.length && cueAbs[i].absStartMs <= t + windowMs; i++) {
+      const c = cueAbs[i];
+      if (t >= c.absStartMs - windowMs && t <= c.absEndMs + windowMs) hits.push({ index: c.index, gap: gapTo(t, c.absStartMs, c.absEndMs) });
+    }
+    hits.sort((a, b) => a.gap - b.gap);
     if (!hits.length) { orphanMarkIds.push(mark.mark_id); markToNearbyCues.set(mark.mark_id, []); continue; }
     markToNearbyCues.set(mark.mark_id, hits.map((h) => h.index));
     for (const h of hits) cueToNearbyMarkIds.get(h.index)!.push(mark.mark_id);
@@ -136,6 +151,12 @@ function gapTo(t: number, start: number, end: number): number {
   if (t < start) return start - t;
   if (t > end) return t - end;
   return 0;
+}
+// 第一个 absStartMs >= target 的下标（cueAbs 已按 absStartMs 升序）
+function lowerBoundCueStart(cues: Array<{ absStartMs: number }>, target: number): number {
+  let lo = 0, hi = cues.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].absStartMs < target) lo = mid + 1; else hi = mid; }
+  return lo;
 }
 
 // ── 初始 offset 推断（默认不自动确认·plan 风险2/可行#7）──

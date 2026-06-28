@@ -51,9 +51,10 @@ export function renderRecapCard(m: PersistedMeeting): string {
   const associated = !!m.feishu_minute_token;
   if (associated) {
     const state = m.align_state ? ALIGN_LABEL[m.align_state] : '约对齐';
+    const linked = [m.feishu_topic, m.panel_meeting_start ? fmtClock(m.panel_meeting_start) : ''].filter(Boolean).join(' · ');
     return `<section class="msec" id="recap-sec"><div class="msec-h"><span class="mt">会后记录</span><span class="mb">${esc(state)}</span></div>`
       + `<div class="matcard" id="recap-open"><span class="ic">${SVG_DOC}</span><div><div class="nm">飞书妙记转写</div>`
-      + `<div class="mt">已关联 · 点开读转写 + 手写档案</div></div></div>`
+      + `<div class="mt">已关联${linked ? '：' + esc(linked) : ''} · 点开读转写 + 手写档案</div></div></div>`
       + `<div class="dact" style="padding:8px 0 2px"><button class="hbtn" id="recap-reassoc">换关联</button></div></section>`;
   }
   return `<section class="msec" id="recap-sec"><div class="msec-h"><span class="mt">会后记录</span><span class="mb">需关联飞书妙记</span></div>`
@@ -78,12 +79,21 @@ async function associate(m: PersistedMeeting): Promise<boolean> {
   }
   const ls = localStartMs(m);
   const sorted = [...meetings].sort((a, b) => Math.abs((a.start_time ?? 0) - ls) - Math.abs((b.start_time ?? 0) - ls));
-  const items = sorted.map((mt) => {
-    const diff = mt.start_time && ls ? `相差${fmtDiff(mt.start_time - ls)}` : '时间未知';
+  // 时间差大（>30min）→ 不默认选中、标风险（防用户盲点确认关到错会议·codex #1）
+  const FAR_MS = 30 * 60 * 1000;
+  const items = sorted.map((mt, i) => {
+    const dms = mt.start_time && ls ? mt.start_time - ls : null;
+    const far = dms != null && Math.abs(dms) > FAR_MS;
+    const diff = dms != null ? `相差${fmtDiff(dms)}${far ? '⚠时间差大' : ''}` : '时间未知';
+    const dur = mt.start_time && mt.end_time ? `${Math.max(1, Math.round((mt.end_time - mt.start_time) / 60000))}分钟` : '';
     const tok = mt.minute_token ? '有转写' : '无转写';
-    return { id: mt.meeting_id, label: mt.topic || '(无主题会议)', sub: `${fmtClock(mt.start_time)} · ${diff} · ${tok}` };
+    const no = mt.meeting_no ? `会议号${mt.meeting_no}` : '';
+    const tag = i === 0 && !far ? '推荐 · ' : '';
+    return { id: mt.meeting_id, label: `${tag}${mt.topic || '(无主题会议)'}`, sub: [fmtClock(mt.start_time), dur, diff, no, tok].filter(Boolean).join(' · ') };
   });
-  const picked = await pickOneSheet({ title: '关联飞书会议', items, defaultId: items[0].id, confirm: '确认关联' });
+  // 最近一场就时间差很大 → 不预选(defaultId 给个不存在的)·逼用户主动选
+  const nearestFar = sorted[0]?.start_time != null && ls > 0 && Math.abs((sorted[0].start_time ?? 0) - ls) > FAR_MS;
+  const picked = await pickOneSheet({ title: '关联飞书会议（本地会议：' + (m.title || '') + '）', items, defaultId: nearestFar ? '__none__' : items[0].id, confirm: '确认关联' });
   if (!picked) return false;
   const mt = sorted.find((x) => x.meeting_id === picked);
   if (!mt) return false;
@@ -95,6 +105,7 @@ async function associate(m: PersistedMeeting): Promise<boolean> {
   await updateMeeting(m.meeting_id, {
     feishu_meeting_id: mt.meeting_id,
     feishu_meeting_no: mt.meeting_no,
+    feishu_topic: mt.topic,
     feishu_minute_token: mt.minute_token,
     feishu_minute_url: mt.minute_url ?? undefined,
     panel_meeting_start: mt.start_time,
@@ -122,16 +133,31 @@ export function wireRecapCard(root: HTMLElement, meetingId: string, rerender: ()
 
 interface RecapData { meeting: PersistedMeeting; cues: TranscriptCue[]; marks: PersistedMark[]; prox: ProximityIndex }
 let recapState: { data: RecapData; page: number } | null = null;
+// 防异步串会：打开 A 后快速返回/打开 B，A 的晚到结果不能覆盖 B 的视图/状态。
+let recapLoadSeq = 0;
+export function resetRecapView(): void { recapLoadSeq++; recapState = null; }
+function recapAlive(seq: number, bodyEl: HTMLElement): boolean {
+  return seq === recapLoadSeq && document.body.dataset.mtg === 'recap' && document.body.contains(bodyEl);
+}
 
-/** 拉转写（缓存优先·会后离线复盘不丢）。 */
+/** 拉转写：**在线先拉最新**（妙记可能后续补全/修订）→ 写缓存；离线/失败回退缓存（会后复盘不丢）。 */
 async function loadTranscript(m: PersistedMeeting): Promise<{ srt: string; cues: TranscriptCue[] } | null> {
   const token = m.feishu_minute_token;
   if (!token) return null;
   const cached = await getCachedMinute(token);
+  try {
+    const srt = await getMinuteTranscript(token, 'srt');
+    if (srt.trim()) {
+      await putCachedMinute({ minute_token: token, meeting_id: m.meeting_id, srt, fetched_at: new Date().toISOString() });
+      return { srt, cues: parseSrtTranscript(srt) };
+    }
+  } catch (e) {
+    if (cached?.srt) return { srt: cached.srt, cues: parseSrtTranscript(cached.srt) }; // 离线回退缓存
+    throw e;
+  }
+  // 在线拉到空 → 回退缓存（妙记还在生成时别覆盖已有缓存）
   if (cached?.srt) return { srt: cached.srt, cues: parseSrtTranscript(cached.srt) };
-  const srt = await getMinuteTranscript(token, 'srt');
-  if (srt) await putCachedMinute({ minute_token: token, meeting_id: m.meeting_id, srt, fetched_at: new Date().toISOString() });
-  return { srt, cues: parseSrtTranscript(srt) };
+  return { srt: '', cues: [] };
 }
 
 const clk = (ms: number): string => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
@@ -139,19 +165,23 @@ const archiveText = (mk: PersistedMark): string => (mk.marked_text || '').trim()
 
 /** 进 recap 视图：拉转写 + 手写档案 + 构建质量索引 → 填 #recap-body。bodyEl/titleEl 由 meeting.ts 给。 */
 export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titleEl: HTMLElement): Promise<void> {
+  const seq = ++recapLoadSeq;
   recapState = null;
   bodyEl.innerHTML = '<p class="rc-note">正在拉取转写…</p>';
   const m = await getMeeting(meetingId);
+  if (!recapAlive(seq, bodyEl)) return;
   if (!m) { bodyEl.innerHTML = '<p class="rc-note">会议不存在。</p>'; return; }
   titleEl.textContent = `${m.title || '会议'} · 会后记录`;
   if (!m.feishu_minute_token) { bodyEl.innerHTML = '<p class="rc-note">尚未关联飞书妙记。</p>'; return; }
 
   let loaded: { srt: string; cues: TranscriptCue[] } | null;
   try { loaded = await loadTranscript(m); }
-  catch (e) { bodyEl.innerHTML = `<p class="rc-note">拉取转写失败：${esc(String((e as Error)?.message || e))}（已关联的转写若曾缓存可离线读）。</p>`; return; }
+  catch (e) { if (!recapAlive(seq, bodyEl)) return; bodyEl.innerHTML = `<p class="rc-note">拉取转写失败：${esc(String((e as Error)?.message || e))}（已关联的转写若曾缓存可离线读）。</p>`; return; }
+  if (!recapAlive(seq, bodyEl)) return;
   if (!loaded || !loaded.cues.length) { bodyEl.innerHTML = '<p class="rc-note">转写为空或还在生成。</p>'; return; }
 
   const marks = (await getFoldedMarksByContext('mtg_' + m.meeting_id)).filter((mk) => !mk.is_tombstone).sort((a, b) => a.abs_timestamp - b.abs_timestamp);
+  if (!recapAlive(seq, bodyEl)) return;
   const t0 = m.feishu_recording_t0 ?? m.panel_meeting_start ?? (m.started_at ? Date.parse(m.started_at) : 0);
   const prox = buildProximityIndex({
     marks: marks.map((mk) => ({ mark_id: mk.mark_id, abs_timestamp: mk.abs_timestamp, document_id: mk.document_id, page_id: mk.page_id })),
@@ -170,8 +200,10 @@ function renderRecapBody(bodyEl: HTMLElement): void {
   const slice = cues.slice(p * PAGE_SIZE, (p + 1) * PAGE_SIZE);
 
   const stateLabel = meeting.align_state ? ALIGN_LABEL[meeting.align_state] : '约对齐';
+  const orphan = prox.orphanMarkIds.length;
   const note = `时间对照为<b>近似</b>（按会议开始时刻估算·非精确对齐）·当前「${esc(stateLabel)}」。`
-    + `转写共 ${cues.length} 句·手写 ${marks.length} 处·其中 ${prox.stats.matchedCueCount} 句附近有手写。`;
+    + `转写 ${cues.length} 句·手写 ${marks.length} 处·其中 ${prox.stats.matchedCueCount} 句附近有手写`
+    + (orphan ? `·另有 ${orphan} 处手写未靠近任何转写。` : '。');
 
   const cueRows = slice.map((c) => {
     const hasInk = (prox.cueToNearbyMarkIds.get(c.index) ?? []).length;
@@ -183,7 +215,12 @@ function renderRecapBody(bodyEl: HTMLElement): void {
   const t0 = meeting.feishu_recording_t0 ?? meeting.panel_meeting_start ?? (meeting.started_at ? Date.parse(meeting.started_at) : 0);
   const off = meeting.align_offset_ms ?? 0;
   const archRows = marks.length
-    ? marks.map((mk) => `<div class="rc-arch"><div class="t">${clk(mk.abs_timestamp - t0 - off)}</div><div class="x">${esc(archiveText(mk))}</div></div>`).join('')
+    ? marks.map((mk) => {
+        const txt = (mk.marked_text || '').trim();
+        const x = txt ? esc(txt) : `<span style="color:var(--ink2)">${mk.feature_type === 'drawing' ? '（图形标注/圈画）' : '（未识别·原笔迹在第' + (mk.page_index + 1) + '页）'}</span>`;
+        const pg = `<span class="nb" style="color:var(--ink2)">第${mk.page_index + 1}页</span>`;
+        return `<div class="rc-arch"><div class="t">${clk(mk.abs_timestamp - t0 - off)}</div><div class="x">${x} ${pg}</div></div>`;
+      }).join('')
     : '<div class="empty">这场会议没有留下手写档案。</div>';
 
   const pager = totalPages > 1
@@ -191,7 +228,7 @@ function renderRecapBody(bodyEl: HTMLElement): void {
     : '';
 
   bodyEl.innerHTML = `<div class="rc-note">${note}</div>`
-    + `<div class="rc-h">会议转写<span class="mb">点句旁 ✎ = 附近有你的手写</span></div>${cueRows}${pager}`
+    + `<div class="rc-h">会议转写<span class="mb">✎ = 附近±45s 有手写·非精确对应本句</span></div>${cueRows}${pager}`
     + `<div class="rc-h">你的手写档案<span class="mb">按会议相对时刻</span></div>${archRows}`;
 
   bodyEl.querySelector('#rc-prev')?.addEventListener('click', () => { if (recapState) { recapState.page = p - 1; renderRecapBody(bodyEl); bodyEl.scrollTop = 0; } });
@@ -200,25 +237,29 @@ function renderRecapBody(bodyEl: HTMLElement): void {
 
 // ════ P3 AI 思路总结（接 md-sum·防污染输入·不喂易错精确关系）════
 
-/** 组装喂 AI 的结构化文本：转写全文 + 手写文字列表（各带近似时间）；**不喂** linked_cue 精确关系。 */
-function buildSummaryPrompt(m: PersistedMeeting, cues: TranscriptCue[], marks: PersistedMark[]): string {
+/** 组装喂 AI 的结构化文本：转写（可能截断）+ 手写文字列表（各带近似时间）；**不喂** linked_cue 精确关系。
+ *  返回是否截断 + 实际喂了几句，供 summary_source 记录 + UI 透明告知（防"看起来是全文总结"误导）。 */
+function buildSummaryPrompt(m: PersistedMeeting, cues: TranscriptCue[], marks: PersistedMark[]): { prompt: string; truncated: boolean; usedCueCount: number } {
   const t0 = m.feishu_recording_t0 ?? m.panel_meeting_start ?? (m.started_at ? Date.parse(m.started_at) : 0);
   const off = m.align_offset_ms ?? 0;
   const lines: string[] = [`会议标题：${m.title || '(未命名)'}`];
   if (m.started_at) lines.push(`开始时间：${m.started_at}`);
-  lines.push('', '<转写>');
-  let used = 0;
+  lines.push('', '<转写 可能因过长被截断·见末尾标记>');
+  let used = 0; let usedCueCount = 0; let truncated = false;
   for (const c of cues) {
     const row = `[${clk(c.startMs)}]${c.speaker ? c.speaker + '：' : ''}${c.text}`;
-    if (used + row.length > SUMMARY_TRANSCRIPT_CAP) { lines.push('…（转写过长已截断·完整见妙记）'); break; }
-    lines.push(row); used += row.length;
+    if (used + row.length > SUMMARY_TRANSCRIPT_CAP) { lines.push(`…（转写在此截断·后 ${cues.length - usedCueCount} 句未提供·别对未提供部分下结论）`); truncated = true; break; }
+    lines.push(row); used += row.length; usedCueCount++;
   }
   lines.push('</转写>', '');
   lines.push('<手写标注 各为用户当时的强调·时间是近似会议相对时刻·非与某句转写的精确对应>');
-  if (marks.length) for (const mk of marks) lines.push(`[${clk(mk.abs_timestamp - t0 - off)}] ${archiveText(mk)}`);
+  if (marks.length) for (const mk of marks) {
+    const txt = (mk.marked_text || '').trim();
+    lines.push(txt ? `[${clk(mk.abs_timestamp - t0 - off)}] ${txt}` : `[${clk(mk.abs_timestamp - t0 - off)}] （一处${mk.feature_type === 'drawing' ? '图形/圈画' : '无法识别的手写'}·别推断其文字含义）`);
+  }
   else lines.push('（本场没有手写标注）');
   lines.push('</手写标注>', '', '请按系统要求产出会后思路总结。');
-  return lines.join('\n');
+  return { prompt: lines.join('\n'), truncated, usedCueCount };
 }
 
 /** 会后思路总结：拉转写 + 手写档案 → 流式 /api/chat（meeting_summary role·不走 chatTurn 不污染书 buffer）→ 写 summary。 */
@@ -231,21 +272,31 @@ export async function summarizeMeeting(meetingId: string, onDelta: (full: string
   if (!loaded || !loaded.cues.length) { await infoSheet({ title: '转写为空', message: '没有可用于总结的转写内容。' }); return null; }
   const marks = (await getFoldedMarksByContext('mtg_' + m.meeting_id)).filter((mk) => !mk.is_tombstone).sort((a, b) => a.abs_timestamp - b.abs_timestamp);
 
-  const prompt = buildSummaryPrompt(m, loaded.cues, marks);
+  const { prompt, truncated, usedCueCount } = buildSummaryPrompt(m, loaded.cues, marks);
   let full = '';
+  let streamDone = false;
+  let streamError = '';
   try {
     await postNdjson<{ k?: string; d?: string }>(
       '/api/chat',
       { messages: [{ role: 'user', content: prompt }], role: 'meeting_summary', model: settings.inferModel, maxTokens: 1600 },
-      (frame) => { if (frame.k === 't' && frame.d) { full += frame.d; onDelta(full); } }, // 只收正文帧·丢思考帧 r
+      (frame) => {
+        if (frame.k === 'e') { streamError = frame.d || '生成中断'; return; }
+        if (frame.k === 'done') { streamDone = true; return; }
+        if (frame.k === 't' && frame.d) { full += frame.d; onDelta(full); } // 只收正文帧·丢思考帧 r
+      },
     );
   } catch (e) { await infoSheet({ title: '生成失败', message: String((e as Error)?.message || e) }); return null; }
-  const summary = full.trim();
+  // 流没真完成（中途断/出错）→ 丢弃半截·不写库
+  if (streamError || !streamDone) { await infoSheet({ title: '生成失败', message: streamError || '连接中断，已丢弃未完成内容。' }); return null; }
+  let summary = full.trim();
   if (!summary) return null;
+  // 截断时给 summary 顶一行透明告知（防"看起来是全文总结"误导·UI 直接可见）
+  if (truncated) summary = `〔注：本总结基于前 ${usedCueCount}/${loaded.cues.length} 句转写 + 全部手写生成，后半场转写过长未参与〕\n\n${summary}`;
   await updateMeeting(m.meeting_id, {
     summary,
     summary_generated_at: new Date().toISOString(),
-    summary_source: { feishu_minute_token: m.feishu_minute_token, align_offset_ms: m.align_offset_ms ?? 0, mark_count: marks.length, cue_count: loaded.cues.length },
+    summary_source: { feishu_minute_token: m.feishu_minute_token, align_offset_ms: m.align_offset_ms ?? 0, mark_count: marks.length, cue_count: loaded.cues.length, transcript_truncated: truncated, used_cue_count: usedCueCount },
   });
   return summary;
 }

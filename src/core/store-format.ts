@@ -152,6 +152,7 @@ export interface PersistedMeeting {
   // ── WS2-C 飞书妙记对照（optional·零迁移；近似对照非精确对齐·见 integration/panel-feishu）──
   feishu_meeting_id?: string;       // 关联的飞书 VC 会议 id
   feishu_meeting_no?: string;       // 9 位会议号
+  feishu_topic?: string;            // 关联的飞书会议主题（卡片显示·便于用户核对没关错）
   feishu_minute_token?: string;     // 妙记 token（拉转写用）
   feishu_minute_url?: string;       // 妙记页 url
   panel_meeting_start?: number;     // panel 会议 start_time（epoch ms·≠录音起点）
@@ -160,7 +161,7 @@ export interface PersistedMeeting {
   align_state?: 'uncalibrated' | 'approx' | 'manual'; // 校准状态（UI 明示·防假精确）
   feishu_match_confirmed_at?: string; // 用户确认关联的时刻
   summary_generated_at?: string;    // summary 生成时刻（防 stale）
-  summary_source?: { feishu_minute_token?: string; align_offset_ms?: number; mark_count: number; cue_count: number };
+  summary_source?: { feishu_minute_token?: string; align_offset_ms?: number; mark_count: number; cue_count: number; transcript_truncated?: boolean; used_cue_count?: number };
   created_at: string;
   updated_at: string;
 }

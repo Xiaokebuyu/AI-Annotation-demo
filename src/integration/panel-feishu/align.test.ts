@@ -43,6 +43,26 @@ describe('parseSrtTranscript', () => {
     expect(cues[0].text).toContain('甲：你好');
     expect(cues[0].text).toContain('乙：再见');
   });
+
+  it('解码 HTML 实体·不进 UI/summary', () => {
+    const cues = parseSrtTranscript('1\n00:00:01,000 --> 00:00:02,000\nA &amp; B &lt;tag&gt; &#48;');
+    expect(cues[0].text).toBe('A & B <tag> 0');
+  });
+
+  it('数字起头正文不误判说话人（"10:30 开始"）·链接不误剥', () => {
+    const c1 = parseSrtTranscript('1\n00:00:01,000 --> 00:00:02,000\n10:30 开始评审');
+    expect(c1[0].speaker).toBeUndefined();
+    expect(c1[0].text).toBe('10:30 开始评审');
+    const c2 = parseSrtTranscript('1\n00:00:01,000 --> 00:00:02,000\nhttps://x.com 见这里');
+    expect(c2[0].speaker).toBeUndefined();
+  });
+
+  it('正文里含时间不被当 cue 边界（整行 --> 才算时间行）', () => {
+    const cues = parseSrtTranscript('1\n00:00:01,000 --> 00:00:09,000\n会议 08:00:00 到 09:00:00 之间');
+    expect(cues).toHaveLength(1);
+    expect(cues[0].endMs).toBe(9000);
+    expect(cues[0].text).toContain('08:00:00');
+  });
 });
 
 describe('buildProximityIndex（时间窗模型）', () => {

@@ -19,7 +19,7 @@ import {
 } from '../local/store';
 import { esc } from '../core/escape';
 import { infoSheet, promptSheet, formSheet, pickSheet } from './sheet';
-import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting } from './meeting-recap';
+import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting, resetRecapView } from './meeting-recap';
 import type { MeetingStatus, PersistedMeeting, PersistedWorkspace, PersistedDoc, PersistedMark } from '../core/store-format';
 
 // ── 飞书后端（feishu-service）+ 文档转换（convert-service）：同 web 默认端口；服务不在则静默退回纯本地 ──
@@ -253,7 +253,9 @@ async function renderDetail(): Promise<void> {
   const books = await listBooks();
   const bookMap = new Map(books.map((b) => [b.document_id, b]));
   const mats = m.material_doc_ids.map((id) => bookMap.get(id)).filter((b): b is PersistedDoc => !!b);
-  const markLists = await Promise.all(mats.map((b) => getFoldedMarks(b.document_id)));
+  // 资料上的「本场会议手写档案」按 context_id 过滤（与 recap/AI 一致·别混入同一资料在别场会议/阅读态的笔）
+  const mtgCtx = 'mtg_' + m.meeting_id;
+  const markLists = await Promise.all(mats.map((b) => getFoldedMarks(b.document_id).then((ms) => ms.filter((mk) => mk.context_id === mtgCtx))));
   const ws = await getWorkspace(m.workspace_id);
   // 会议手记（白板物化的 diary doc）：列进手写档案区·点击=进会议回到手记
   const noteId = noteIdOf(m.meeting_id);
@@ -289,9 +291,12 @@ async function renderDetail(): Promise<void> {
     : '';
   const archiveHtml = (noteArchiveHtml + matsArchiveHtml)
     || `<div class="empty">${m.status === 'ended' ? '本场会议没有留下手写档案。' : '会议进行 / 结束后，你在手记与资料上的手写会汇总在这里。'}</div>`;
+  // 旧总结陈旧：summary 是基于和当前不同的关联(minute_token)生成的 → 明示别当对应当前转写（防 #2 误导）
+  const summaryStale = !!(m.summary && m.summary_source?.feishu_minute_token && m.summary_source.feishu_minute_token !== m.feishu_minute_token);
   const summaryHtml = m.summary
-    ? `<div class="summary">${esc(m.summary)}</div>`
-    : `<div class="empty">${m.status === 'ended' ? '还没生成思路总结。' : '会议结束后可对手写档案做思路总结。'}\n会后 AI 综合（送云端处理）——接线后置。</div>`;
+    ? `${summaryStale ? '<div class="empty" style="margin-bottom:6px">⚠ 此总结基于旧的飞书关联生成，可能不对应当前转写，建议重新生成。</div>' : ''}<div class="summary">${esc(m.summary)}</div>`
+    : `<div class="empty">${m.status === 'ended' ? '还没生成思路总结。先在「会后记录」关联飞书妙记，再生成。' : '会议结束后可对手写档案做思路总结。'}</div>`;
+  const sumBtnLabel = m.summary ? '重新生成' : '生成思路总结';
   // 「进入会议」即开始（enterMeeting 内置置 live + 落 started_at），故不再单列「开始会议」按钮，去职责重叠。
   const enterLabel = m.status === 'live' ? '✏ 进入会议（继续）' : m.status === 'ended' ? '✏ 回看记录' : '✏ 进入会议';
   const endBtn = m.status === 'live' ? '<button class="hbtn" id="md-end">⏹ 结束会议</button>' : '';
@@ -304,7 +309,7 @@ async function renderDetail(): Promise<void> {
     + groupSec
     + `<section class="msec"><div class="msec-h"><span class="mt">你的手写档案</span></div>${archiveHtml}</section>`
     + (m.status === 'ended' ? renderRecapCard(m) : '')
-    + `<section class="msec"><div class="msec-h"><span class="mt">思路总结</span><span class="sp" style="flex:1"></span><button class="hbtn" id="md-sum"${m.status === 'ended' ? '' : ' disabled style="opacity:.45"'}>生成思路总结</button></div>${summaryHtml}</section>`
+    + `<section class="msec"><div class="msec-h"><span class="mt">思路总结</span><span class="sp" style="flex:1"></span><button class="hbtn" id="md-sum"${m.status === 'ended' ? '' : ' disabled style="opacity:.45"'}>${sumBtnLabel}</button></div>${summaryHtml}</section>`
     + `</div>`;
 
   if (m.status === 'ended') wireRecapCard(el('mv-detail'), m.meeting_id, () => void renderDetail(), () => void openRecap(m.meeting_id));
@@ -323,9 +328,8 @@ async function renderDetail(): Promise<void> {
         lastPaint = now;
         if (sumEl) { sumEl.className = 'summary'; sumEl.textContent = full; }
       });
-      if (out) void renderDetail(); // 完成后重渲染（summary 已落库）
-      else { btn.dataset.busy = ''; btn.textContent = '生成思路总结'; btn.disabled = false; }
-    } catch { btn.dataset.busy = ''; btn.textContent = '生成思路总结'; btn.disabled = false; }
+      void out; void renderDetail(); // 成功/失败都重渲染：清掉半截流式残留 + 还原按钮态（失败时 summary 没落库·显回空态）
+    } catch { void renderDetail(); }
   })());
   el('mv-detail').querySelector('#md-add')?.addEventListener('click', async () => {
     const avail = books.filter((b) => !m.material_doc_ids.includes(b.document_id));
@@ -348,7 +352,7 @@ async function renderDetail(): Promise<void> {
 /** WS2-C：进「会后记录」阅读视图（纯文本·转写 + 手写档案）。返回=回 detail。 */
 async function openRecap(mtgId: string): Promise<void> {
   setMtg('recap');
-  el('recap-back').onclick = () => { setMtg('detail'); void renderDetail(); };
+  el('recap-back').onclick = () => { resetRecapView(); setMtg('detail'); void renderDetail(); };
   await loadRecapView(mtgId, el('recap-body'), el('recap-title'));
 }
 

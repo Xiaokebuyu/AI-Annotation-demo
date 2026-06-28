@@ -121,10 +121,12 @@ function inferenceProxy(env: Record<string, string>): Plugin {
           res.setHeader('x-accel-buffering', 'no');
           try {
             for await (const delta of chatStream(JSON.parse(body))) res.write(delta);
+            res.write(JSON.stringify({ k: 'done' }) + '\n'); // 完成哨兵：客户端据此区分"真完成"vs"中途断"（防半截当成功）
             res.end();
           } catch (e) {
-            if (!res.headersSent) { res.statusCode = 502; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ error: String((e as Error)?.message || e) })); }
-            else res.end();
+            const msg = String((e as Error)?.message || e);
+            if (!res.headersSent) { res.statusCode = 502; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ error: msg })); }
+            else { try { res.write(JSON.stringify({ k: 'e', d: msg }) + '\n'); } catch { /* 客户端已断 */ } res.end(); } // 已写出 token 后出错：发 error 帧让客户端丢弃半截
           }
         });
       });

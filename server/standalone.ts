@@ -131,6 +131,7 @@ const server = createServer(async (req, res) => {
       res.setHeader('cache-control', 'no-cache');
       res.setHeader('x-accel-buffering', 'no');
       for await (const delta of chatStream(body)) res.write(String(delta));
+      res.write(JSON.stringify({ k: 'done' }) + '\n'); // 完成哨兵（与 vite.config 同·防客户端把半截当成功）
       res.end();
       return;
     }
@@ -143,7 +144,7 @@ const server = createServer(async (req, res) => {
   } catch (e) {
     const msg = String((e as Error)?.message || e);
     if (!res.headersSent) { res.statusCode = 502; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ error: msg })); }
-    else res.end();
+    else { if (url === '/api/chat') { try { res.write(JSON.stringify({ k: 'e', d: msg }) + '\n'); } catch { /* 客户端已断 */ } } res.end(); } // chat 流已写出后出错：发 error 帧让客户端丢半截
   }
 });
 
