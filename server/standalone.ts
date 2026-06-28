@@ -45,9 +45,27 @@ function setCors(req: IncomingMessage, res: ServerResponse): void {
     res.setHeader('access-control-allow-origin', origin);
     res.setHeader('vary', 'Origin');
   }
-  res.setHeader('access-control-allow-methods', 'POST, OPTIONS');
+  res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
   res.setHeader('access-control-allow-headers', 'content-type');
   res.setHeader('access-control-max-age', '86400');
+}
+
+// ── WS2-C：panel 飞书事件中枢 GET 代理（注入 x-inkloop-secret·secret 不进前端）。
+//    与 vite.config.ts panelFeishuProxy 同构，让安卓/生产包也能拉妙记转写。──
+const PANEL_FEISHU_BASE = (process.env.PANEL_FEISHU_BASE || '').replace(/\/+$/, '');
+const INKLOOP_SHARED_SECRET = process.env.INKLOOP_SHARED_SECRET || '';
+async function handlePanelFeishu(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const send = (code: number, obj: unknown): void => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); };
+  if (req.method !== 'GET') return send(405, { error: 'GET only' });
+  if (!PANEL_FEISHU_BASE || !INKLOOP_SHARED_SECRET) return send(503, { error: 'PANEL_FEISHU_BASE / INKLOOP_SHARED_SECRET 未配置' });
+  const rest = (req.url || '').replace(/^\/api\/panel-feishu/, ''); // 含 query
+  try {
+    const r = await fetch(`${PANEL_FEISHU_BASE}/api/feishu${rest}`, { headers: { 'x-inkloop-secret': INKLOOP_SHARED_SECRET } });
+    const text = await r.text();
+    res.statusCode = r.status;
+    res.setHeader('content-type', r.headers.get('content-type') || 'application/json');
+    res.end(text);
+  } catch (e) { send(502, { error: String((e as Error)?.message || e) }); }
 }
 
 // intent A/B 影子数据落盘位置（板上 production 收集云端↔端侧 respond/fold 一致率）。
@@ -82,6 +100,8 @@ const server = createServer(async (req, res) => {
   const url = (req.url || '/').split('?')[0];
   setCors(req, res);
   if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
+  // WS2-C：panel 飞书 GET 代理（在 POST-only 闸之前）
+  if (url.startsWith('/api/panel-feishu')) { await handlePanelFeishu(req, res); return; }
   if (req.method !== 'POST') { res.statusCode = 405; res.end('POST only'); return; }
 
   try {

@@ -8,7 +8,7 @@
  */
 import type { NormBBox, OverlayState, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
+import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting, PersistedMeetingMinute, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
 import { DB_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
 import { vectorStore } from './vector';
@@ -23,6 +23,7 @@ const WORKSPACES = 'workspaces'; // 会议工作区（≈群聊）
 const MEETINGS = 'meetings';     // 会议（属某 workspace）
 const INK_SEGMENTS = 'ink_segments'; // 基岩：录制段头（profile + 时间锚）
 const INK_SAMPLES = 'ink_samples';   // 基岩：采样块（批量 flush）
+const MEETING_MINUTES = 'meeting_minutes'; // WS2-C：飞书妙记转写缓存（会后离线复盘）
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 /** 幂等建 store（连同建表时的初始 index）。已存在则跳过——自愈"版本到位却缺表"。 */
@@ -58,11 +59,13 @@ function openDB(): Promise<IDBDatabase | null> {
         ensureStore(db, MEETINGS, 'meeting_id', ['by_ws', 'workspace_id']);
         ensureStore(db, INK_SEGMENTS, 'segment_id', ['by_doc', 'document_id']); // 基岩段头
         ensureStore(db, INK_SAMPLES, 'chunk_id', ['by_doc', 'document_id']);     // 基岩采样块
+        ensureStore(db, MEETING_MINUTES, 'minute_token');                        // WS2-C 妙记转写缓存
 
         // ② 阶梯迁移：每次 DB_VERSION 升级追加一块 if (oldV < N) {...}——给已存在 store 加 index /
         //    字段级 backfill（须恰好跑一次的数据迁移放这）。
         if (oldV < 6) ensureIndex(tx, MARKS, 'by_context', 'context_id'); // v6 时间脊（C2）
         // v7：基岩 ink_segments/ink_samples 由上方 ① 基线幂等建，无需额外迁移步。
+        // v8：meeting_minutes 由上方 ① 基线幂等建，无需额外迁移步。
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -629,6 +632,14 @@ export async function updateMeeting(id: string, patch: Partial<PersistedMeeting>
   const next: PersistedMeeting = { ...cur, ...patch, updated_at: new Date().toISOString() };
   await putInto(MEETINGS, next);
   return next;
+}
+
+// ── WS2-C：妙记转写缓存（会后离线复盘不丢转写）──
+export function getCachedMinute(minuteToken: string): Promise<PersistedMeetingMinute | null> {
+  return getOneFrom<PersistedMeetingMinute>(MEETING_MINUTES, minuteToken);
+}
+export async function putCachedMinute(rec: PersistedMeetingMinute): Promise<void> {
+  await putInto(MEETING_MINUTES, rec);
 }
 
 /**

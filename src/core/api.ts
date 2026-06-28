@@ -47,6 +47,16 @@ export async function postJson<T>(
 }
 
 /**
+ * 一次性 JSON GET（经 apiUrl·支持安卓包绝对基址）。失败（!ok / 网络错）即抛。
+ * WS2-C panel-feishu client 走它，不裸 fetch('/api/...')（dev 同源 + 生产 VITE_API_BASE_URL 都覆盖）。
+ */
+export async function getJson<T>(url: string, opts?: { signal?: AbortSignal }): Promise<T> {
+  const resp = await fetch(apiUrl(url), { method: 'GET', signal: opts?.signal });
+  if (!resp.ok) throw new Error(`${url} ${resp.status}`);
+  return (await resp.json()) as T;
+}
+
+/**
  * 流式 NDJSON POST：边收边按 '\n' 切行，逐行 JSON.parse 后调 onLine。
  * 半行先攒着、坏行跳过、收尾处理残行。失败（!ok / 无 body）抛错。
  */

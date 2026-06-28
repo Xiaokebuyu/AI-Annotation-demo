@@ -16,7 +16,7 @@ import type { ReflowBlock } from '../surface/reflow';
 import type { RawRef } from './bedrock';
 
 export const STORE_VERSION = '2'; // 1→2：strokes/overlays 出 docs 进 marks/ai_turns 账本（干净断裂，旧 docs 弃）
-export const DB_VERSION = 7;      // v6→v7：基岩 ink_segments/ink_samples（影子录制·上方 store.ts ① 基线幂等建）。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
+export const DB_VERSION = 9;      // v7→v9：WS2-C meeting_minutes（飞书妙记转写缓存·会后离线复盘不丢转写·store.ts ① 基线幂等建）。meeting_minutes 在幂等基线（任何升级都建）·任何升级都自愈缺表。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
 
 /** 一张图的解读：图本身可从 PDF 重渲，故只存 bbox + 文字解读。 */
 export interface PersistedImage {
@@ -149,6 +149,28 @@ export interface PersistedMeeting {
   ended_at?: string;                // ISO 真实「结束会议」墙钟
   material_doc_ids: string[];       // 可能有用的文件（指向 docs/pdf_blobs 的 document_id）
   summary?: string;                 // 会后「思路总结」（AI 综合，先空）
+  // ── WS2-C 飞书妙记对照（optional·零迁移；近似对照非精确对齐·见 integration/panel-feishu）──
+  feishu_meeting_id?: string;       // 关联的飞书 VC 会议 id
+  feishu_meeting_no?: string;       // 9 位会议号
+  feishu_minute_token?: string;     // 妙记 token（拉转写用）
+  feishu_minute_url?: string;       // 妙记页 url
+  panel_meeting_start?: number;     // panel 会议 start_time（epoch ms·≠录音起点）
+  feishu_recording_t0?: number;     // 录音 t0 绝对墙钟（epoch ms·当前用 panel start 近似·真值待 vc 事件）
+  align_offset_ms?: number;         // 用户/启发式微调（cueAbs = t0 + offset + cue 相对）
+  align_state?: 'uncalibrated' | 'approx' | 'manual'; // 校准状态（UI 明示·防假精确）
+  feishu_match_confirmed_at?: string; // 用户确认关联的时刻
+  summary_generated_at?: string;    // summary 生成时刻（防 stale）
+  summary_source?: { feishu_minute_token?: string; align_offset_ms?: number; mark_count: number; cue_count: number };
   created_at: string;
   updated_at: string;
+}
+
+/** 飞书妙记转写缓存（meeting_minutes store·会后离线复盘不丢转写）。按 minute_token 主键。 */
+export interface PersistedMeetingMinute {
+  minute_token: string;
+  meeting_id?: string;              // 关联的本地会议（便利反查）
+  srt: string;                      // 原始 SRT 文本
+  title?: string;
+  duration_ms?: number;
+  fetched_at: string;               // ISO 拉取时刻
 }

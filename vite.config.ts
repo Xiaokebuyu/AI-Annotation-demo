@@ -7,6 +7,30 @@ import { runInterpretHwr } from './server/hwr-dev.mjs';     // dev-only：英文
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join, relative, isAbsolute } from 'node:path';
 
+/** dev-only：WS2 妙记对轴代理——浏览器 GET /api/panel-feishu/* → panel 飞书事件中枢，注入 x-inkloop-secret（留服务端）。 */
+function panelFeishuProxy(env: Record<string, string>): Plugin {
+  return {
+    name: 'inkloop-panel-feishu-proxy',
+    configureServer(server) {
+      for (const k of ['PANEL_FEISHU_BASE', 'INKLOOP_SHARED_SECRET']) {
+        if (env[k] && !process.env[k]) process.env[k] = env[k];
+      }
+      const BASE = (process.env.PANEL_FEISHU_BASE || '').replace(/\/+$/, '');
+      const SECRET = process.env.INKLOOP_SHARED_SECRET || '';
+      server.middlewares.use('/api/panel-feishu', (req, res) => {
+        const send = (code: number, obj: unknown) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); };
+        if (req.method !== 'GET') return send(405, { error: 'GET only' });
+        if (!BASE || !SECRET) return send(503, { error: 'PANEL_FEISHU_BASE / INKLOOP_SHARED_SECRET 未配置' });
+        // req.url 是去掉 '/api/panel-feishu' 前缀后的剩余路径（含 query）→ 拼到 panel 的 /api/feishu
+        const target = `${BASE}/api/feishu${req.url}`;
+        fetch(target, { headers: { 'x-inkloop-secret': SECRET } })
+          .then(async (r) => { const text = await r.text(); res.statusCode = r.status; res.setHeader('content-type', r.headers.get('content-type') || 'application/json'); res.end(text); })
+          .catch((e) => send(502, { error: String(e?.message || e) }));
+      });
+    },
+  };
+}
+
 /** dev-only AI 代理：浏览器 POST /api/* → 网关 → 各识别/重排/对话端点。Key 留服务端。 */
 function inferenceProxy(env: Record<string, string>): Plugin {
   return {
@@ -129,6 +153,6 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
-    plugins: [inferenceProxy(env)],
+    plugins: [panelFeishuProxy(env), inferenceProxy(env)],
   };
 });
