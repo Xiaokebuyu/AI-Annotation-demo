@@ -119,7 +119,7 @@ export async function buildRuntimeAndVisual(
     id: b.block_id,
     kind: b.kind,
     region: b.region,
-    page: b.source?.page_id,
+    page: b.source?.page_index != null ? String(b.source.page_index) : undefined, // 对方 renderer 把 page 当页号（Number(page)）；给页索引字符串，别给 page_id（否则 Page NaN）
     content: b.text_md,
     annotations: visualByBlock.get(b.block_id) ?? [],
   }));
