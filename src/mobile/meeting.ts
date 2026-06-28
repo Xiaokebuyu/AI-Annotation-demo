@@ -6,12 +6,16 @@
  * 会中白板：渲染器是单画布深单例，故进会议时把 #stage-wrap 物理搬进 #mtg-stage-host（renderer 持元素引用、搬动后照常），
  * 退会议搬回 #rv-new；新建 meetingCtx + setActiveContext + renderBlankSurface('mtgboard_<id>')，标注落本会议白板账本。
  */
-import { bus, settings, setActiveContext, getActiveContext } from '../app/state';
+import { bus, state, settings, setActiveContext, getActiveContext } from '../app/state';
 import { SurfaceContext } from '../app/surface-context';
-import { renderBlankSurface, reopenBook, openPdfFromUrl } from '../surface/renderer';
+import { renderBlankSurface, renderBlankPage, reopenBook, openPdfFromUrl } from '../surface/renderer';
+import { redrawInk } from '../capture/ink';
+import { flushRegion } from '../app/annotation-loop';
+import { flushBedrock } from '../local/bedrock-recorder';
 import {
   listWorkspaces, listAllMeetings, getWorkspace, listMeetings, createWorkspace,
   createMeeting, getMeeting, updateMeeting, getFoldedMarks, getFoldedMarksByContext, listBooks, upsertFeishuWorkspace, startSimMeeting,
+  createDiaryDoc, renameDiary, setActiveDoc, setLastReadPage, getDoc,
 } from '../local/store';
 import { esc } from '../core/escape';
 import { infoSheet, promptSheet, formSheet, pickSheet } from './sheet';
@@ -91,6 +95,13 @@ let liveMtg: { id: string; title: string; chatId?: string; startedAt: number; fr
 let clockTimer = 0;
 let prevGesture = true;
 let liveMarkCount = 0;
+let liveNoteDoc: PersistedDoc | null = null;            // 当前会议手记 doc（=会中白板物化成的 diary doc）
+// 会中基岩 lease（三个模块级标志·能跨 visibility 抖动存活）：
+let bedrockLeased = false;        // 当前持租约（防切后台再切回时重复 start）
+let bedrockAutoEnabled = false;   // 本次租约是我们替它开的 → 退出/收租要还原成关
+let bedrockUserOverride = false;  // 本场会议里用户手动设过 bedrock → 续租/退出都别动它（每场 enterMeeting 重置）
+const RULED = { ruledLines: false } as const;            // 同日记：引擎不画线，稿纸线走 CSS 叠层 #diary-lines
+const noteIdOf = (mtgId: string): string => 'mtgboard_' + mtgId; // 会议手记 doc id = 既有白板 marks 的 document_id（零迁移·createDiaryDoc 幂等）
 
 function setMtg(view: 'home' | 'ws' | 'detail' | 'live'): void {
   document.body.dataset.mtg = view;
@@ -243,6 +254,12 @@ async function renderDetail(): Promise<void> {
   const mats = m.material_doc_ids.map((id) => bookMap.get(id)).filter((b): b is PersistedDoc => !!b);
   const markLists = await Promise.all(mats.map((b) => getFoldedMarks(b.document_id)));
   const ws = await getWorkspace(m.workspace_id);
+  // 会议手记（白板物化的 diary doc）：列进手写档案区·点击=进会议回到手记
+  const noteId = noteIdOf(m.meeting_id);
+  const [noteDoc, noteMarks] = await Promise.all([getDoc(noteId), getFoldedMarks(noteId)]);
+  const noteArchiveHtml = (noteDoc || noteMarks.length)
+    ? `<div class="matcard" data-note="1"><span class="ic">${SVG_PEN}</span><div><div class="nm">${esc(noteDoc?.filename || m.title + ' 手记')}</div><div class="mt">${noteDoc?.page_count || 1} 页 · ${noteMarks.length} 笔 · 会议手记</div></div></div>`
+    : '';
 
   // 群里收集到的资料（飞书）
   let groupSec = '';
@@ -263,12 +280,14 @@ async function renderDetail(): Promise<void> {
   const filesHtml = mats.length
     ? mats.map((b) => `<div class="matcard" data-docid="${esc(b.document_id)}" data-name="${esc(b.filename)}"><span class="ic">${SVG_FILE}</span><div><div class="nm">${esc(b.filename || '(未命名)')}</div><div class="mt">${b.page_count} 页 · 借阅读器打开</div></div></div>`).join('')
     : `<p class="empty">还没有资料。点右上「+ 添加资料」从已导入的 PDF 里挑。</p>`;
-  const archiveHtml = mats.length
+  const matsArchiveHtml = mats.length
     ? mats.map((b, i) => {
         const hand = markLists[i].filter((mk) => mk.feature_type === 'handwriting').length;
         return `<div class="matcard" data-docid="${esc(b.document_id)}" data-name="${esc(b.filename)}"><span class="ic">${SVG_PEN}</span><div><div class="nm">${esc(b.filename || '(未命名)')}</div><div class="mt">${markLists[i].length} 处标注 · 手写 ${hand}</div></div></div>`;
       }).join('')
-    : `<div class="empty">${m.status === 'ended' ? '本场会议没有留下手写档案。' : '会议进行 / 结束后，你在资料与转写上的手写会汇总在这里。'}</div>`;
+    : '';
+  const archiveHtml = (noteArchiveHtml + matsArchiveHtml)
+    || `<div class="empty">${m.status === 'ended' ? '本场会议没有留下手写档案。' : '会议进行 / 结束后，你在手记与资料上的手写会汇总在这里。'}</div>`;
   const summaryHtml = m.summary
     ? `<div class="summary">${esc(m.summary)}</div>`
     : `<div class="empty">${m.status === 'ended' ? '还没生成思路总结。' : '会议结束后可对手写档案做思路总结。'}\n会后 AI 综合（送云端处理）——接线后置。</div>`;
@@ -303,6 +322,7 @@ async function renderDetail(): Promise<void> {
   el('mv-detail').querySelectorAll<HTMLElement>('.matcard[data-docid]').forEach((card) => card.addEventListener('click', () => {
     void enterMeeting(m.meeting_id, { docId: card.dataset.docid!, name: card.dataset.name || '资料', conv: card.dataset.conv });
   }));
+  el('mv-detail').querySelector<HTMLElement>('.matcard[data-note]')?.addEventListener('click', () => { void enterMeeting(m.meeting_id); }); // 会议手记卡 → 进会议回到手记白板
   wireBack(el('mv-detail'));
 }
 
@@ -311,7 +331,9 @@ async function renderDetail(): Promise<void> {
 async function openMaterialInMeeting(docId: string, name: string, convUrl?: string): Promise<void> {
   const mtg = liveMtg, ctx = meetingCtx; // capture：转 PDF/解码慢时用户退会再进别场，迟到结果不能写当前 live UI
   if (!mtg) return;
+  flushRegion('manual'); // 切资料前收口手记/上一面在途区域（否则刚写的笔在 6s 收口前被切走丢账）
   document.body.classList.remove('side-open'); // 收起资料抽屉
+  document.body.classList.remove('mtg-note-open'); // 资料态隐手记 bar（翻页/标题是手记的，不是资料的）
   try {
     if (convUrl) await openPdfFromUrl(docId, name, convUrl);
     else await reopenBook(docId, name);
@@ -319,6 +341,62 @@ async function openMaterialInMeeting(docId: string, name: string, convUrl?: stri
   if (liveMtg !== mtg || getActiveContext() !== ctx) return; // 已退会/切会：不改标题、不刷脊
   el('mlive-title').textContent = name; // 顶栏显当前资料名
   void refreshSpine();
+}
+
+// ════ 会中基岩录制 lease：进 live 自动开、退出还原；只改内存不落盘（不污染日常）；尊重用户手动设定 ════
+function startMeetingBedrock(): void {
+  if (bedrockLeased) return;                                          // 已持租约（如从后台切回）→ 不重复
+  bedrockLeased = true;
+  bedrockAutoEnabled = !settings.bedrock && !bedrockUserOverride;     // 用户已手动接管则不替它开
+  if (bedrockAutoEnabled) settings.bedrock = true;                    // bedrockTap 实时读此值，无需 emit/init；不 saveSettings 故重启即复默认关
+}
+function stopMeetingBedrock(): void {
+  if (bedrockLeased && bedrockAutoEnabled && !bedrockUserOverride && settings.bedrock) settings.bedrock = false; // 只关「我们替它开的、且用户没手动接管的」；override 用模块级标志（跨 visibility 收租仍记得）
+  bedrockLeased = false;
+  bedrockAutoEnabled = false;
+  void flushBedrock();                                               // 落库 500ms 定时缓冲（raw_ref 已写进 mark，chunk 别迟到）
+}
+
+// ════ 会议手记：把会中白板物化成一个 diary 式文档（命名/多页/重开），仍归属本会议（context 不变·零迁移）════
+async function ensureMeetingNoteDoc(m: PersistedMeeting): Promise<PersistedDoc> {
+  return createDiaryDoc(noteIdOf(m.meeting_id), `${m.title || '会议'} 手记`, 1); // 幂等：首次建、之后取既有
+}
+function updateNotePageInd(): void {
+  const total = Math.max(state.pageCount || 1, state.pageIndex + 1); // 空白新页显 N/N（未写不缩），同日记
+  el('mtg-note-ind').textContent = `${state.pageIndex + 1}/${total}`;
+}
+/** 打开/回到本会议手记白板：物化 doc → 挂 active doc(令 mark:resolved 的 materialize 生效) → 还原页数/末读页/笔迹。 */
+async function openMeetingNote(mtgId: string): Promise<void> {
+  const m = await getMeeting(mtgId);
+  if (!m || !meetingCtx || !liveMtg || liveMtg.id !== mtgId) return; // await 期间退会/切会 → 丢弃
+  const doc = await ensureMeetingNoteDoc(m);
+  if (!meetingCtx || !liveMtg || liveMtg.id !== mtgId) return;
+  flushRegion('manual');                            // 收口上一面在途区域（quiet-6s 前切走否则该笔丢账）
+  meetingCtx.loadGeneration++;                      // latest-wins：抢占在途资料载入（renderer fresh() 判此值），慢资料迟到不再覆盖手记
+  liveNoteDoc = doc;
+  document.body.classList.add('mtg-note-open');     // 露手记标题/翻页 bar
+  document.body.classList.remove('side-open');
+  el('mtg-note-title').textContent = doc.filename || `${m.title} 手记`;
+  el('mlive-title').textContent = m.title;          // 顶栏回会议名（资料态被覆成资料名，回手记复位）
+  const host = el('mtg-stage-host');
+  renderBlankSurface(doc.document_id, doc.filename || m.title, { ...RULED, width: host.clientWidth, height: host.clientHeight });
+  state.pageCount = doc.page_count || 1;            // renderBlankSurface 写死 1 → 复原真页数
+  meetingCtx.storeDoc = doc; setActiveDoc(doc);     // current=手记 doc：materialize/末读页/改名都落到它
+  const page = Math.min(doc.last_read_page ?? 0, Math.max(0, state.pageCount - 1));
+  if (page > 0) renderBlankPage(page, RULED);
+  redrawInk();
+  updateNotePageInd();
+  void refreshSpine();
+}
+function gotoMeetingNotePage(delta: number): void {
+  if (!liveNoteDoc || state.surfaceType !== 'whiteboard') return;
+  const idx = state.pageIndex + delta;
+  if (idx < 0) return;                              // 同日记：可无限向前翻空白新页，写了才落盘
+  flushRegion('manual');                            // 翻页前收口本页在途区域（page:rendered 会 resetAssembly，否则未落账的笔丢）
+  renderBlankPage(idx, RULED);
+  redrawInk();
+  setLastReadPage(idx);
+  updateNotePageInd();
 }
 
 // ════ live：会中工作台（白板搬进 #mtg-stage-host + 时间脊 + 资料栏 + 计时）════
@@ -334,6 +412,8 @@ async function enterMeeting(mtgId: string, material?: { docId: string; name: str
   const endedMs = reviewing && m.ended_at ? new Date(m.ended_at).getTime() : 0;
   liveMtg = { id: mtgId, title: m.title, chatId: ws?.feishu_chat_id, startedAt: startedMs, frozenAt: endedMs || (reviewing ? startedMs : 0) };
   liveMarkCount = 0;
+  bedrockUserOverride = false; // 新会议：清上一场的手动接管标记
+  if (!reviewing) startMeetingBedrock(); // 进行中会议=录基岩（回看模式不录）
   setMtg('live');
   el('mlive-title').textContent = m.title; // 默认会议标题；直接开资料时 openMaterialInMeeting 覆成资料名
   // 白板搬进 live 视图（renderer 持元素引用，搬动后照常工作）
@@ -347,9 +427,7 @@ async function enterMeeting(mtgId: string, material?: { docId: string; name: str
     // 从详情页直接点资料进会议：开进该资料（免先闪一下白板）。资料载进 meetingCtx → 批注汇本会议时间脊。
     await openMaterialInMeeting(material.docId, material.name, material.conv);
   } else {
-    const host = el('mtg-stage-host');
-    renderBlankSurface('mtgboard_' + mtgId, m.title, { width: host.clientWidth, height: host.clientHeight }); // document:loaded → 还原本会议白板墨迹
-    void refreshSpine();
+    await openMeetingNote(mtgId); // 会议手记（白板物化成 diary doc）→ document:loaded 还原墨迹 + 刷脊
   }
   void mountSide();
 }
@@ -357,13 +435,16 @@ async function enterMeeting(mtgId: string, material?: { docId: string; name: str
 function teardownLive(): void {
   if (!liveMtg) return;
   liveMtg = null;
+  liveNoteDoc = null;
   stopClock();
+  stopMeetingBedrock(); // 关基岩（若是我们替它开的）+ flush
   settings.gesture.enabled = prevGesture; bus.emit('settings:changed'); // 恢复手势综合
   // 白板搬回 #rv-new（diary-bar 之后、whisper-layer 之前）
   el('rv-new').insertBefore(el('stage-wrap'), el('whisper-layer'));
   meetingCtx = null;
   if (readerCtx) setActiveContext(readerCtx); // 切回主阅读实例
   document.body.classList.remove('side-open');
+  document.body.classList.remove('mtg-note-open');
   el('mtg-spine').hidden = true;
 }
 function exitToDetail(): void { teardownLive(); setMtg('detail'); void renderDetail(); }
@@ -411,13 +492,12 @@ async function mountSide(): Promise<void> {
 
   el('mtg-side-tab').textContent = `资料 ${locals.length + files.length}`;
   const cards = localCards + feishuCards;
-  list.innerHTML = `<div class="scard blank" id="mside-blank">✏ 空白笔记页 · 画板</div>${cards || '<p class="empty" style="padding:8px">还没有资料。回详情「+ 添加资料」或在群里发文件。</p>'}`;
-  // 回白板：reload 本会议白板 surface（document:loaded → 还原白板墨迹）+ 复位顶栏标题
+  list.innerHTML = `<div class="scard blank" id="mside-blank">✏ 会议手记 · 白板</div>${cards || '<p class="empty" style="padding:8px">还没有资料。回详情「+ 添加资料」或在群里发文件。</p>'}`;
+  // 回手记：reload 本会议手记 doc（document:loaded → 还原墨迹）+ 复位顶栏/页码
   list.querySelector('#mside-blank')?.addEventListener('click', () => {
     if (!liveMtg) return;
     document.body.classList.remove('side-open');
-    renderBlankSurface('mtgboard_' + liveMtg.id, liveMtg.title, { width: el('mtg-stage-host').clientWidth, height: el('mtg-stage-host').clientHeight });
-    el('mlive-title').textContent = liveMtg.title;
+    void openMeetingNote(liveMtg.id);
   });
   // 资料卡：会中打开（保活会议）。本地无 conv 走 reopenBook，群 HTML 带 conv 走 openPdfFromUrl。
   list.querySelectorAll<HTMLElement>('.scard[data-docid]').forEach((c) => c.addEventListener('click', () => {
@@ -438,7 +518,7 @@ async function refreshSpine(): Promise<void> {
   const boardId = 'mtgboard_' + mtg.id;
   const nameOf = new Map((await listBooks()).map((b) => [b.document_id, b.filename || '(未命名)']));
   if (liveMtg !== mtg) return;
-  const labelFor = (docId: string): string => (docId === boardId ? '白板' : nameOf.get(docId) || '资料');
+  const labelFor = (docId: string): string => (docId === boardId ? (liveNoteDoc?.filename || '会议手记') : nameOf.get(docId) || '资料'); // 脊上手记来源标签跟手记名（升格后不再叫"白板"）
   const blocks = marks.map((mk: PersistedMark) => {
     const rel = clk(Math.max(0, (mk.abs_timestamp || 0) - mtg.startedAt));
     const lines = (mk.marked_text || '').split('\n').filter(Boolean);
@@ -470,6 +550,26 @@ export function initMobileMeeting(opts: { readerCtx: SurfaceContext }): void {
   el('mlive-back').addEventListener('click', () => exitToDetail());
   el('mtg-side-tab').addEventListener('click', () => document.body.classList.toggle('side-open'));
   el('mtg-chip').addEventListener('click', () => { const sp = el('mtg-spine'); sp.hidden = !sp.hidden; if (!sp.hidden) void refreshSpine(); });
+
+  // 会议手记 bar：翻页（瞬时·电纸屏无滑）+ 标题改名（落 doc）。
+  el('mtg-note-prev').addEventListener('click', () => gotoMeetingNotePage(-1));
+  el('mtg-note-next').addEventListener('click', () => gotoMeetingNotePage(1));
+  el('mtg-note-title').addEventListener('blur', () => {
+    if (!liveNoteDoc) return;
+    const t = (el('mtg-note-title').textContent || '').trim() || liveNoteDoc.filename || '会议手记';
+    el('mtg-note-title').textContent = t;
+    liveNoteDoc.filename = t;
+    void renameDiary(liveNoteDoc.document_id, t);
+  });
+  el('mtg-note-title').addEventListener('keydown', (e) => { if ((e as KeyboardEvent).key === 'Enter') { e.preventDefault(); (e.target as HTMLElement).blur(); } });
+
+  // 基岩 lease 配套：用户会议中手动设过基岩 → 标记 override（退出别误关）；切后台/关页 flush 并按 lease 处理。
+  bus.on('bedrock:user-set', () => { if (liveMtg && !liveMtg.frozenAt) bedrockUserOverride = true; }); // 仅进行中会议里用户手动设过才接管（跨 visibility 收租后续租也认）
+  window.addEventListener('pagehide', stopMeetingBedrock);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') stopMeetingBedrock();
+    else if (liveMtg && !liveMtg.frozenAt) startMeetingBedrock(); // 切回前台且在进行中会议 → 续租
+  });
 
   // 白板新标注 → 刷新计数（会中时）。document:loaded=进会议还原后首刷。
   bus.on('mark:resolved', () => { if (liveMtg) { liveMarkCount += 1; el('mtg-chip-n').textContent = `${liveMarkCount} 笔`; if (!el('mtg-spine').hidden) void refreshSpine(); } });

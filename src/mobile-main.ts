@@ -266,15 +266,18 @@ bus.on('mark:resolved', (p) => {
   if (getActiveContext().storeDoc) {
     const need = state.pageIndex + 1;
     if (need > state.pageCount) { state.pageCount = need; updatePageInd(); }
-    setDiaryPageCount(need); // 落盘 doc.page_count（need<=已存则 no-op）
+    setDiaryPageCount(need); // 落盘 doc.page_count（need<=已存则 no-op）——会议手记也有 storeDoc 故同样 materialize
   }
+  // diary-title 自动命名只对「日记」doc（id 以 diary 开头）：会议手记(mtgboard_)的命名归 meeting.ts 的 #mtg-note-title。
+  // 按 doc 类型判而非 UI mode——否则首段手写后立刻切到 dev/meet，识别迟到回来时 mode 已变会漏命名。
+  const id = state.documentId;
+  if (!id?.startsWith('diary')) return;
   if (feature !== 'handwriting' || titleEl.dataset.auto !== '1') return;
   const t = (text || '').trim().split('\n')[0].slice(0, 40);
   if (!t) return;
   titleEl.textContent = t;
   titleEl.dataset.auto = '0';
-  const id = state.documentId;
-  if (id) void renameDiary(id, t);
+  void renameDiary(id, t);
 });
 
 // 点「新日记」即新建（即便已在新日记页也另起一份）。

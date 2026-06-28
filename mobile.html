@@ -91,7 +91,7 @@
   #diary-lines{z-index:1;width:100%;height:100%;pointer-events:none;background-image:repeating-linear-gradient(to bottom,transparent 0 29px,rgba(0,0,0,.05) 29px 30px);background-position:0 36px;}
   body.lines-off #diary-lines{display:none;}
   /* 书籍读书面（PDF）：无稿纸线、无「加一页」、标题=文件名（近黑、不淡） */
-  body[data-read="book"] #diary-lines{display:none;}
+  body[data-mode="read"][data-read="book"] #diary-lines{display:none;} /* 收窄到阅读模式：否则从书进会议(data-read=book 残留)会误隐会议手记的稿纸线 */
   body[data-surface="article"] #diary-lines{display:none;} /* PDF（含会中打开的资料）一律不叠稿纸线 */
   body[data-read="book"] #diary-title{color:var(--ink);font-weight:600;}
   #ink-layer{z-index:2;touch-action:none;}
@@ -292,6 +292,12 @@
   #mtg-stage-host #stage-wrap{top:0;} /* 搬进会中：填满 host（覆盖日记态 top:42px）*/
   #mtg-spine{position:absolute;top:48px;left:0;right:0;bottom:0;overflow-y:auto;background:var(--page);z-index:3;}
   #mtg-chip{cursor:pointer;z-index:6;}
+  /* 会议手记 bar（会中白板=手记 doc 时显·命名 + 翻页·电纸屏瞬时无滑）*/
+  #mtg-note-bar{position:absolute;top:48px;left:0;right:0;height:42px;display:none;align-items:center;gap:6px;padding:0 12px;border-bottom:1px solid var(--hair);background:var(--page);z-index:3;}
+  body.mtg-note-open #mtg-note-bar{display:flex;}
+  body.mtg-note-open #mtg-stage-host,body.mtg-note-open #mtg-spine{top:90px;}
+  #mtg-note-title{font:600 15px var(--sans);outline:none;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  #mtg-note-ind{font:11px var(--mono);color:var(--mut);min-width:34px;text-align:center;}
 
   /* ════ dev 三页 ════ */
   .dv{position:absolute;inset:0;display:none;}
@@ -711,6 +717,13 @@
       <!-- 会中工作台（白板=可写画布搬进 #mtg-stage-host；时间脊=点底部 chip 切显隐；右缘半掩群资料栏）-->
       <div class="mview" id="mv-live">
         <div class="mtop"><span class="bk" id="mlive-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti" id="mlive-title">会议</span><span id="mtg-clk"><span class="dot"></span>00:00</span></div>
+        <div id="mtg-note-bar">
+          <span id="mtg-note-title" contenteditable="true" spellcheck="false">会议手记</span>
+          <span class="dsp"></span>
+          <button id="mtg-note-prev" class="pgbtn" aria-label="上一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+          <span id="mtg-note-ind">1/1</span>
+          <button id="mtg-note-next" class="pgbtn" aria-label="下一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+        </div>
         <div id="mtg-stage-host"></div>
         <div id="mtg-spine" hidden></div>
         <div id="mtg-chip"><span id="mtg-chip-n">0 笔</span> · 按会议时刻记录（点开看时间脊）</div>

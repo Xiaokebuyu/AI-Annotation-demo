@@ -246,7 +246,7 @@ const CORE: SCtl[] = [
   { label: '重排引擎', badge: 'eff', effect: 'changed', type: 'select', opts: [['ai', 'AI 结构重建'], ['hybrid', '启发式+模型精修'], ['local', '仅启发式'], ['vision', '启发式+视觉重排'], ['rewrite', 'VLM 看图重写']], get: () => settings.reflowProvider, set: (v) => { settings.reflowProvider = v; } },
   { label: '重排模型', badge: 'eff', effect: 'changed', type: 'select', opts: [['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['kimi-k2.6', 'kimi-k2.6'], ['claude-sonnet-4-6', 'claude-sonnet-4-6']], get: () => settings.reflowModel, set: (v) => { settings.reflowModel = v; } },
   { label: '重排前置（渲染即急算）', badge: 'eff', effect: 'save', type: 'check', get: () => settings.reflowEager, set: (_v, c) => { settings.reflowEager = c; } },
-  { label: '基岩录制（原始笔迹流·影子）', badge: 'eff', effect: 'save', type: 'check', get: () => settings.bedrock, set: (_v, c) => { settings.bedrock = c; } },
+  { label: '基岩录制（原始笔迹流·影子）', badge: 'eff', effect: 'save', type: 'check', get: () => settings.bedrock, set: (_v, c) => { settings.bedrock = c; bus.emit('bedrock:user-set', c); } }, // 通知会议 lease：用户手动设过 → 会议退出别误关
 ];
 const DEBUG: SCtl[] = [
   { label: '显示 bbox 叠层', desc: '对象框 + 命中高亮 + HMP 浮窗', badge: 'dev', effect: 'changed', type: 'check', get: () => settings.devOverlay, set: (_v, c) => { settings.devOverlay = c; } },
