@@ -104,6 +104,13 @@ export function renderVaultMarkdown(bundle: VaultExportBundle): RenderedFile[] {
     return { entity, hubName, dir, leaves };
   });
   const hubByDoc = new Map(named.map((n) => [n.entity.documentId, n] as const));
+  const koLeafName = new Map(named.flatMap((n) => n.leaves.map((l) => [l.ko.ko_id, l.name] as const)));
+
+  // 概念枢纽命名（叶子之后分配·防撞名）+ 概念边映射。
+  const concepts = bundle.conceptLayer?.concepts ?? [];
+  const conceptHubName = new Map(concepts.map((c) => [c.title, namer(c.title)] as const));
+  const assignmentsByKo = bundle.conceptLayer?.assignmentsByKo ?? {};
+  const membersByConcept = bundle.conceptLayer?.membersByConcept ?? {};
 
   const allDates = [...new Set(bundle.entities.flatMap((e) => e.dates))].sort();
   const dateName = new Map(allDates.map((d) => [d, namer(d)] as const));
@@ -127,9 +134,21 @@ export function renderVaultMarkdown(bundle: VaultExportBundle): RenderedFile[] {
     files.push({ path: `${dir}/${hubName}.md`, markdown: `${body.join('\n').trimEnd()}\n` });
 
     for (const { ko, name } of leaves) {
-      const leaf = [fm(ko.tags), '', `# ${name}`, '', calloutOf(ko.kind, ko.body_md.trim()), '', `**来源**：${wl(hubName)}`];
+      const cNames = assignmentsByKo[ko.ko_id] ?? [];
+      const tags = [...ko.tags, ...cNames.map((c) => `inkloop/topic/${tagSlug(c)}`)];
+      const leaf = [fm(tags), '', `# ${name}`, '', calloutOf(ko.kind, ko.body_md.trim()), '', `**来源**：${wl(hubName)}`];
+      if (cNames.length) leaf.push('', `**相关概念**：${cNames.map((c) => wl(conceptHubName.get(c) ?? c)).join('、')}`);
       files.push({ path: `${dir}/${name}.md`, markdown: `${leaf.join('\n')}\n` });
     }
+  }
+
+  // ②.5 概念枢纽（语义跨链·概念星系）：叶子 →相关概念→ 这里；这里 →相关笔记→ 各成员叶子（双向）。
+  for (const c of concepts) {
+    const hub = conceptHubName.get(c.title) ?? c.title;
+    const memberLinks = (membersByConcept[c.title] ?? []).map((koId) => koLeafName.get(koId)).filter((n): n is string => !!n).map(wl);
+    const lines = [fm(['inkloop', 'inkloop/concept', `inkloop/topic/${tagSlug(c.title)}`]), '', `# ${c.title}`, ''];
+    if (memberLinks.length) lines.push('## 相关笔记', '', ...memberLinks.map((l) => `- ${l}`), '');
+    files.push({ path: `${VAULT_ROOT}/Concepts/${hub}.md`, markdown: `${lines.join('\n').trimEnd()}\n` });
   }
 
   // ③ 每日 MOC（跨模式时间脊 + 日记句）。

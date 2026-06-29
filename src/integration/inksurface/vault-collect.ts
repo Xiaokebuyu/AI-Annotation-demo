@@ -6,6 +6,8 @@
  */
 
 import { listAllMeetings, listBooks, listDiaries } from '../../local/store';
+import { buildConceptLayer } from './concept-layer';
+import { makeConceptExtractor } from './concept-extract';
 import { buildL1Export } from './index';
 import { buildMeetingL1Export } from './meeting-export';
 import { assembleVaultBundle, type EntityExport, type VaultExportBundle } from './vault-export';
@@ -15,7 +17,9 @@ function nonEmpty(ex: { knowledgeExport: { objects: unknown[] }; documentProject
   return ex.knowledgeExport.objects.length > 0 || ex.documentProjections.document_projections.length > 0;
 }
 
-export async function collectVaultBundle(opts: { generatedAt?: string; appVersion?: string } = {}): Promise<VaultExportBundle> {
+export async function collectVaultBundle(
+  opts: { generatedAt?: string; appVersion?: string; concepts?: boolean; conceptModel?: string } = {},
+): Promise<VaultExportBundle> {
   const generatedAt = opts.generatedAt ?? new Date().toISOString();
   const o = { generatedAt, appVersion: opts.appVersion };
   const exports: EntityExport[] = [];
@@ -42,5 +46,12 @@ export async function collectVaultBundle(opts: { generatedAt?: string; appVersio
     }
   }
 
-  return assembleVaultBundle(exports, { generatedAt, appVersion: opts.appVersion });
+  // 概念层（语义跨链）：收齐全部实体的 KO 后跑一遍 LLM 抽概念 → 跨文档桥成概念枢纽。
+  // 失败/空不影响其余导出（buildConceptLayer 内部对每条容错·extractFn 失败返 []）。
+  const allKos = exports.flatMap((e) => e.knowledgeExport.objects);
+  const conceptLayer = opts.concepts === false
+    ? undefined
+    : await buildConceptLayer(allKos, makeConceptExtractor({ model: opts.conceptModel }));
+
+  return assembleVaultBundle(exports, { generatedAt, appVersion: opts.appVersion, conceptLayer });
 }

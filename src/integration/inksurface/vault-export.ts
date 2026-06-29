@@ -6,6 +6,7 @@
  * 写入端（scripts/export-vault.ts）逐实体按 folder 调 SDK adapter → 分目录 + 全量成图。
  */
 
+import type { ConceptLayer } from './concept-layer';
 import {
   DOC_PROJECTION_EXPORT_SCHEMA_VERSION,
   type DocumentProjectionExportEnvelope,
@@ -36,12 +37,14 @@ export interface VaultExportBundle {
   generatedAt: string;
   entities: VaultBundleEntity[];
   moc: { folder: { base_dir: string; documents_dir: string }; documentProjections: DocumentProjectionExportEnvelope };
+  conceptLayer?: ConceptLayer; // 概念层（语义跨链）·渲染器据此出 Concepts/ 枢纽 + 叶子相关概念链接
 }
 
 export interface VaultExportOpts {
   generatedAt: string;
   appVersion?: string;
   recentDailyLimit?: number;
+  conceptLayer?: ConceptLayer; // 由 vault-collect 跑 buildConceptLayer（LLM）后传入·纯装配不调 LLM
 }
 
 /** YYYY-MM-DD 截取（仅当像 ISO 日期）。⚠️按 UTC 切日——近本地午夜写的内容可能归到 UTC 日；
@@ -86,5 +89,6 @@ export async function assembleVaultBundle(exports: EntityExport[], opts: VaultEx
     generatedAt: opts.generatedAt,
     entities,
     moc: { folder: vaultRootFolder(), documentProjections: mocEnvelope },
+    ...(opts.conceptLayer ? { conceptLayer: opts.conceptLayer } : {}),
   };
 }

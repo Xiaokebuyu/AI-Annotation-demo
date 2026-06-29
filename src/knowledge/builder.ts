@@ -119,6 +119,7 @@ export interface Draft {
   kind: KnowledgeKind;
   documentId: string;
   documentTitle: string;
+  titleOverride?: string; // 概念 KO 等：标题=概念名，而非默认的「文档名·pN」
   pageId?: string;
   pageIndex?: number;
   objectRefs: string[];
@@ -132,7 +133,7 @@ export interface Draft {
 
 /** 从 Draft 组装一条合规 KO（确定性 ko_id + content_hash）。会议导出等"非账本派生"的 KO 复用此函数·哈希一致过 validator。 */
 export async function finalize(d: Draft): Promise<KnowledgeObject> {
-  const title = d.pageIndex != null ? `${d.documentTitle} · p${d.pageIndex + 1}` : d.documentTitle;
+  const title = d.titleOverride ?? (d.pageIndex != null ? `${d.documentTitle} · p${d.pageIndex + 1}` : d.documentTitle);
   const callout = CALLOUT[d.kind];
   const ko: KnowledgeObject = {
     schema_version: KO_SCHEMA_VERSION,

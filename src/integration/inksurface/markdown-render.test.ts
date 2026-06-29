@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { enrichExportTags, finalize } from '../../knowledge/builder';
 import type { KnowledgeKind, KnowledgeObject } from '../../knowledge/knowledge-object';
 import { assembleVaultBundle, type EntityExport } from './vault-export';
+import { buildConceptLayer } from './concept-layer';
 import { renderVaultMarkdown } from './markdown-render';
 
 const ko = async (documentId: string, title: string, kind: KnowledgeKind, body: string, createdAt: string): Promise<KnowledgeObject> =>
@@ -99,5 +100,34 @@ describe('renderVaultMarkdown', () => {
     const a = await build();
     const b = await build();
     expect(a.map((f) => f.path).sort()).toEqual(b.map((f) => f.path).sort());
+  });
+});
+
+describe('renderVaultMarkdown + 概念层', () => {
+  it('概念枢纽落 Concepts/·叶子加相关概念链接+topic 标签·零 dangling', async () => {
+    const exports = [
+      entity('reading', 'doc_csapp', '深入理解计算机系统', [await ko('doc_csapp', '缓存一致性 MESI', 'annotation', '缓存一致性 MESI 这段要重读', '2026-06-28T09:00:00Z')]),
+      entity('diary', 'diary_0629', '6.29 日记', [await ko('diary_0629', '一致性收口', 'annotation', '把一致性问题收口了', '2026-06-29T22:00:00Z')]),
+    ];
+    const kos = exports.flatMap((e) => e.knowledgeExport.objects);
+    // 假抽取器让两条不同文档的笔记共享「一致性」→ 成跨文档桥概念
+    const cl = await buildConceptLayer(kos, async (k) => (k.body_md.includes('一致性') ? ['一致性'] : []));
+    const bundle = await assembleVaultBundle(exports, { generatedAt: '2026-06-29T00:00:00Z', conceptLayer: cl });
+    const files = renderVaultMarkdown(bundle);
+
+    const concept = files.find((f) => f.path === 'InkLoop/Concepts/一致性.md');
+    expect(concept).toBeTruthy();
+    expect(concept!.markdown).toContain('inkloop/concept');
+    expect(concept!.markdown).toContain('## 相关笔记');
+    expect(concept!.markdown).toContain('[[缓存一致性 MESI 这段要重读]]'); // 成员叶子链接（叶子名=正文摘录）
+
+    const leaf = files.find((f) => baseOf(f.path) === '缓存一致性 MESI 这段要重读');
+    expect(leaf!.markdown).toContain('**相关概念**：[[一致性]]');
+    expect(leaf!.markdown).toContain('inkloop/topic/一致性');
+
+    // 零 dangling（含概念边）
+    const bases = new Set(files.map((f) => baseOf(f.path)));
+    const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
+    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
   });
 });
