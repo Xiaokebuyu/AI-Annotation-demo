@@ -36,6 +36,8 @@ export interface Pager {
   flip(dir: number): 'moved' | 'boundary';
   info(): PageInfo;
   vh(): number;
+  /** node 落在第几虚拟页（替代 scrollIntoView 的「跳到目标」）。 */
+  pageOf(node: HTMLElement): number;
   destroy(): void;
 }
 
@@ -161,6 +163,11 @@ export function createPager(container: HTMLElement, opts: PagerOpts = {}): Pager
     },
     info() { return { index: vIndex, count: vCount() }; },
     vh,
+    pageOf(node) {
+      const cr = content.getBoundingClientRect();
+      const nr = node.getBoundingClientRect();
+      return Math.max(0, Math.min(vCount() - 1, Math.floor((nr.top - cr.top) / vh())));
+    },
     destroy() {
       ro?.disconnect();
       mo?.disconnect();

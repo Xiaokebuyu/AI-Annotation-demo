@@ -14,6 +14,7 @@ import { snapshot } from '../core/metrics';
 import { pipelineSection, legacySection } from '../dev/pipeline-view'; // dev 流水线/旧轮渲染（与桌面 console.ts 共用·不引 console.css）
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
 import type { HMP, SurfaceObject } from '../core/contracts';
+import { createPager, mountPagerBar, type Pager, type PagerBar } from '../surface/virtual-pager';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 let devBook: string | null = null;
@@ -84,6 +85,19 @@ function bindBookSel(id: string, rerender: () => void): void {
 }
 
 // ════ AI 会话 ════
+// dev 三页（dv-chat/dv-hmp/dv-set）每次 render 重建 innerHTML（含 .dbody）→ 每次渲染末尾给新 .dbody 建一个新 pager。
+const devPagers = new Map<string, Pager>();
+function pageDbody(viewEl: HTMLElement, key: string, land: 'first' | 'keep' = 'keep'): void {
+  devPagers.get(key)?.destroy();
+  const sc = viewEl.querySelector<HTMLElement>('.dbody');
+  if (!sc) { devPagers.delete(key); return; }
+  let bar: PagerBar | undefined;
+  const pager = createPager(sc, { onChange: (i) => bar?.update(i) });
+  bar = mountPagerBar(pager, viewEl);
+  pager.relayout(land);
+  devPagers.set(key, pager);
+}
+
 export async function renderChat(): Promise<void> {
   const seq = ++chatRenderSeq;
   const books = await listBooks();
@@ -113,6 +127,7 @@ export async function renderChat(): Promise<void> {
   el('dv-chat').innerHTML =
     `<div class="dhead"><h1>AI 会话</h1><span class="sp"></span>${bookSel('dv-bk-chat', books)}</div><div class="dbody">${body}</div>`;
   bindBookSel('dv-bk-chat', () => { openChat = null; void renderChat(); });
+  pageDbody(el('dv-chat'), 'chat');
 }
 function turnBlock(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): string {
   const open = openChat === t.entry_id; // 抽屉单开：只渲展开项的 body
@@ -160,6 +175,7 @@ export async function renderCapture(): Promise<void> {
     `<div class="dhead"><h1>采集取证</h1>${seg}<span class="sp"></span>${bookSel('dv-bk-hmp', books)}</div><div class="dbody">${inner}</div>`;
   el('dv-hmp').querySelectorAll<HTMLElement>('.seg [data-seg]').forEach((b) => b.addEventListener('click', () => { captureSeg = b.dataset.seg as 'hmp' | 'obj'; void renderCapture(); }));
   bindBookSel('dv-bk-hmp', () => { openHmp = null; void renderCapture(); });
+  pageDbody(el('dv-hmp'), 'hmp');
   applyPendingFlash();
 }
 /** 取证图：本会话 live 的 crop/vector dataURL（持久落库已剥·历史无图如实标注）。 */
@@ -305,6 +321,7 @@ export function renderSettings(): void {
     if (!armed) { armed = true; r.textContent = '再点一次确认（清存档·重载）'; r.style.borderColor = '#111'; return; }
     resetSettings(); localStorage.removeItem(LINES_KEY); location.reload();
   });
+  pageDbody(el('dv-set'), 'set');
 }
 function diagHtml(): string {
   const st = selfTest();
@@ -324,16 +341,11 @@ function fillDiag(): void {
 
 // ── 取证页 HMP↔对象互跳：切段后定位到目标 + 闪一下（e-ink 瞬时·不平滑滚） ──
 const attrSel = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-function inDevViewport(n: HTMLElement): boolean {
-  const port = el('dv-hmp').querySelector<HTMLElement>('.dbody');
-  const r = n.getBoundingClientRect();
-  const v = port?.getBoundingClientRect() ?? { top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight };
-  return r.top >= v.top && r.bottom <= v.bottom && r.left >= v.left && r.right <= v.right;
-}
 function flashTarget(selector: string): void {
   const n = el('dv-hmp').querySelector<HTMLElement>(selector);
   if (!n) return;
-  if (!inDevViewport(n)) n.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior }); // 已在视野就不滚·要滚也瞬时
+  const pager = devPagers.get('hmp');
+  if (pager) pager.goto(pager.pageOf(n)); // 跳到目标所在虚拟页（替代 scrollIntoView·电纸屏不滚）
   n.classList.remove('cap-flash'); void n.offsetWidth; n.classList.add('cap-flash');
   window.setTimeout(() => n.classList.remove('cap-flash'), 1400);
 }

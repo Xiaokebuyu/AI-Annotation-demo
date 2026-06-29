@@ -176,13 +176,20 @@ function importBook(): void {
 }
 
 // ── 书架（真数据 listBooks）──
+// 电纸屏翻页：grid 用 spacer 推不动行，故把卡片按 2 张/行包成 .brow 块流，整行成可分页原子块。
+let booksPager: Pager | null = null;
+let booksBar: PagerBar | null = null;
 async function renderBookShelf(): Promise<void> {
-  const grid = el('rv-books').querySelector('.grid');
+  const vbody = el('rv-books').querySelector<HTMLElement>('.vbody');
   const cnt = el('rv-books').querySelector('.cnt');
-  if (!grid) return;
+  if (!vbody) return;
+  const pager = booksPager ?? (booksPager = createPager(vbody, { onChange: (i) => booksBar?.update(i) }));
+  if (!booksBar) booksBar = mountPagerBar(pager, el('rv-books'));
+  const host = pager.content;
   const books = await listBooks();
   if (cnt) cnt.textContent = `${books.length} 本`;
-  grid.textContent = '';
+  host.textContent = '';
+  const cards: HTMLElement[] = [];
   for (const b of books) {
     const pos = !b.last_read_page ? '未开始'
       : (b.last_read_page >= (b.page_count - 1) ? '读完' : `读到 ${b.last_read_page + 1} 页`);
@@ -192,14 +199,23 @@ async function renderBookShelf(): Promise<void> {
     (card.querySelector('.bt') as HTMLElement).textContent = b.filename || '(未命名)'; // textContent 防 XSS
     (card.querySelector('.bm') as HTMLElement).innerHTML = `PDF · ${b.page_count} 页<br>${pos}`;
     card.addEventListener('click', () => void openBook(b));
-    grid.appendChild(card);
+    cards.push(card);
   }
   // 导入卡（与书卡同尺寸）
   const imp = document.createElement('div');
   imp.className = 'bcard imp';
   imp.innerHTML = '<div class="pl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg></div><div class="il">导入文件</div><div class="is">PDF · HTML · 图片</div>';
   imp.addEventListener('click', importBook);
-  grid.appendChild(imp);
+  cards.push(imp);
+  // 2 张/行包成 .brow（行=分页原子块）
+  for (let i = 0; i < cards.length; i += 2) {
+    const row = document.createElement('div');
+    row.className = 'brow';
+    row.appendChild(cards[i]);
+    if (cards[i + 1]) row.appendChild(cards[i + 1]);
+    host.appendChild(row);
+  }
+  pager.relayout('keep');
 }
 el('read-sub').querySelector<HTMLElement>('[data-read="books"]')?.addEventListener('click', () => void renderBookShelf());
 
@@ -210,19 +226,24 @@ interface FileEntry { name: string; path: string; dir: boolean; size?: number }
 // 原生桥（InkLoopFilesBridge·addJavascriptInterface）：方法同步返回字符串（list=JSON / readBase64=base64）。
 interface FilesBridge { list(p: string): string; readBase64(p: string): string }
 const FILE_ROOT = '/sdcard/Download';
+let filesPager: Pager | null = null;
+let filesBar: PagerBar | null = null;
 async function openFileBrowser(path: string = FILE_ROOT): Promise<void> {
   const bridge = (window as unknown as { InkLoopFiles?: FilesBridge }).InkLoopFiles;
   if (!bridge?.list) { fileIn.click(); return; }
   document.body.classList.add('files-open');
   const crumb = el('files').querySelector('.crumb') as HTMLElement;
   const fls = el('files').querySelector('.fls') as HTMLElement;
+  const pager = filesPager ?? (filesPager = createPager(fls, { onChange: (i) => filesBar?.update(i), observe: false }));
+  if (!filesBar) filesBar = mountPagerBar(pager, el('files'));
+  const host = pager.content;
   crumb.textContent = path;
-  fls.textContent = '加载中…';
+  host.textContent = '加载中…';
   let entries: FileEntry[];
   try { const raw = await bridge.list(path); entries = JSON.parse(typeof raw === 'string' ? raw : '[]'); } // 桥同步返 JSON 串
   catch { document.body.classList.remove('files-open'); fileIn.click(); return; }
-  fls.textContent = '';
-  if (!entries.length) { fls.innerHTML = '<p class="empty" style="padding:20px 12px">这个目录是空的，或缺「所有文件访问」权限（设置里授予后重开）。</p>'; }
+  host.textContent = '';
+  if (!entries.length) { host.innerHTML = '<p class="empty" style="padding:20px 12px">这个目录是空的，或缺「所有文件访问」权限（设置里授予后重开）。</p>'; }
   const addRow = (label: string, meta: string, dir: boolean, onClick: () => void): void => {
     const r = document.createElement('div');
     r.className = dir ? 'frow dir' : 'frow';
@@ -233,7 +254,7 @@ async function openFileBrowser(path: string = FILE_ROOT): Promise<void> {
     (r.querySelector('.nm') as HTMLElement).textContent = label;
     (r.querySelector('.mt') as HTMLElement).textContent = meta;
     r.addEventListener('click', onClick);
-    fls.appendChild(r);
+    host.appendChild(r);
   };
   if (path !== FILE_ROOT) addRow('返回上级', '', true, () => void openFileBrowser(path.replace(/\/[^/]+\/?$/, '') || FILE_ROOT));
   for (const e of entries) {
@@ -241,6 +262,7 @@ async function openFileBrowser(path: string = FILE_ROOT): Promise<void> {
     else if (/\.pdf$/i.test(e.name)) addRow(e.name, e.size ? `${(e.size / 1048576).toFixed(1)} MB` : 'PDF', false, () => void importFromBridge(bridge, e));
     // 其它（HTML/图片）暂不导入——HTML→PDF / 图片转 PDF 走 convert-service，后续
   }
+  pager.relayout('first'); // 新目录 → 回首页
 }
 async function importFromBridge(bridge: FilesBridge, e: FileEntry): Promise<void> {
   try {

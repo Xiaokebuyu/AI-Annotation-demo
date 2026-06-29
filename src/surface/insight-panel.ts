@@ -1,5 +1,6 @@
 import type { ScreenOverlay } from '../core/contracts';
 import { bus, state } from '../app/state';
+import { createPager, mountPagerBar, type Pager, type PagerBar } from './virtual-pager';
 
 /**
  * 侧栏 = 本页洞察历史（只读）。默认隐藏，按钮拉出。
@@ -13,6 +14,8 @@ const TYPE_LABEL: Record<string, string> = {
 let cardsEl: HTMLElement;
 let footEl: HTMLElement;
 let countEl: HTMLElement;
+let panelPager: Pager | null = null;
+let panelBar: PagerBar | null = null;
 const cardEls = new Map<string, HTMLElement>();
 
 function refreshFoot(): void {
@@ -44,21 +47,26 @@ function add(o: ScreenOverlay): void {
   item.addEventListener('mouseenter', () => bus.emit('whisper:reveal', o.overlay_id));
   cardEls.set(o.overlay_id, item);
 
-  const empty = cardsEl.querySelector('.empty-hint');
+  const host = panelPager?.content ?? cardsEl;
+  const empty = host.querySelector('.empty-hint');
   if (empty) empty.remove();
-  cardsEl.prepend(item);
+  host.prepend(item);
   refreshFoot();
+  panelPager?.relayout('first'); // 新洞察 prepend 到顶 → 落首页看最新
 }
 
 export function initInsightPanel(els: { cards: HTMLElement; foot: HTMLElement; count: HTMLElement }): void {
   cardsEl = els.cards;
   footEl = els.foot;
   countEl = els.count;
+  panelPager = createPager(cardsEl, { onChange: (i) => panelBar?.update(i), observe: false });
+  panelBar = mountPagerBar(panelPager, cardsEl.parentElement ?? cardsEl);
   bus.on('overlay:add', (o) => add(o as ScreenOverlay));
   bus.on('overlay:remove', (id) => {
     const item = cardEls.get(id as string);
     if (item) { item.remove(); cardEls.delete(id as string); }
     refreshFoot();
+    panelPager?.relayout('keep');
   });
   bus.on('overlay:state', (o) => {
     const ov = o as ScreenOverlay;

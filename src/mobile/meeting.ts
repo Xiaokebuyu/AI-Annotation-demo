@@ -12,6 +12,7 @@ import { renderBlankSurface, renderBlankPage, reopenBook, openPdfFromUrl } from 
 import { redrawInk } from '../capture/ink';
 import { flushRegion } from '../app/annotation-loop';
 import { flushBedrock } from '../local/bedrock-recorder';
+import { createPager, mountPagerBar, type Pager, type PagerBar } from '../surface/virtual-pager';
 import {
   listWorkspaces, listAllMeetings, getWorkspace, listMeetings, createWorkspace,
   createMeeting, getMeeting, updateMeeting, getFoldedMarks, getFoldedMarksByContext, listBooks, upsertFeishuWorkspace, startSimMeeting,
@@ -109,6 +110,20 @@ function setMtg(view: 'home' | 'ws' | 'detail' | 'live' | 'recap'): void {
   document.body.classList.toggle('writable', view === 'live'); // 会中白板=可写（露工具格子）
 }
 
+// 会议各视图（mview）每次 render 重建 innerHTML（含 .mbody）→ scroll 容器被换掉，
+// 故每次渲染末尾给新 .mbody 建一个新 pager（先销毁旧的断 observer）；bar 挂到 mview，下次 innerHTML 自然清掉旧 bar。
+const mtgPagers = new Map<string, Pager>();
+function pageMbody(viewEl: HTMLElement, key: string, land: 'first' | 'keep' = 'first'): void {
+  mtgPagers.get(key)?.destroy();
+  const sc = viewEl.querySelector<HTMLElement>('.mbody');
+  if (!sc) { mtgPagers.delete(key); return; }
+  let bar: PagerBar | undefined;
+  const pager = createPager(sc, { onChange: (i) => bar?.update(i) });
+  bar = mountPagerBar(pager, viewEl);
+  pager.relayout(land);
+  mtgPagers.set(key, pager);
+}
+
 // ════ home：日程时间线 + 群聊书架 ════
 async function renderHome(): Promise<void> {
   // 飞书群 → 幂等同步成工作区
@@ -158,6 +173,7 @@ async function renderHome(): Promise<void> {
   });
   el('mv-home').querySelectorAll<HTMLElement>('.ws-card[data-ws]').forEach((c) => c.addEventListener('click', () => { mv = { wsId: c.dataset.ws }; setMtg('ws'); void renderWs(); }));
   wireRows(el('mv-home'));
+  pageMbody(el('mv-home'), 'home');
 }
 
 function timeline(events: FeishuEvent[]): string {
@@ -228,6 +244,7 @@ async function renderWs(): Promise<void> {
     await createMeeting(ws.workspace_id, { title: form.title, scheduled_at: parseWhen(form.when) }); void renderWs();
   });
   wireBack(el('mv-ws')); wireRows(el('mv-ws'));
+  pageMbody(el('mv-ws'), 'ws');
 }
 function feed(msgs: FeishuMsg[], nameOf: Map<string, string>): string {
   if (!msgs.length) return '';
@@ -347,6 +364,7 @@ async function renderDetail(): Promise<void> {
   }));
   el('mv-detail').querySelector<HTMLElement>('.matcard[data-note]')?.addEventListener('click', () => { void enterMeeting(m.meeting_id); }); // 会议手记卡 → 进会议回到手记白板
   wireBack(el('mv-detail'));
+  pageMbody(el('mv-detail'), 'detail');
 }
 
 /** WS2-C：进「会后记录」阅读视图（纯文本·转写 + 手写档案）。返回=回 detail。 */
@@ -493,10 +511,14 @@ function startClock(): void {
 }
 function stopClock(): void { if (clockTimer) { window.clearInterval(clockTimer); clockTimer = 0; } }
 
+let sidePager: Pager | null = null;
+let sideBar: PagerBar | null = null;
 async function mountSide(): Promise<void> {
   const mtg = liveMtg; // capture：await 期间退会/切会则丢弃，不写错会议侧栏
   if (!mtg) return;
   const list = el('mtg-side-list');
+  const pager = sidePager ?? (sidePager = createPager(list, { onChange: (i) => sideBar?.update(i) }));
+  if (!sideBar) sideBar = mountPagerBar(pager, el('mtg-side'));
   // ① 会议本地资料（material_doc_ids，添加资料挑的本地 PDF）——之前抽屉漏列，这里补上
   const [m, books] = await Promise.all([getMeeting(mtg.id), listBooks()]);
   if (liveMtg !== mtg) return;
@@ -523,7 +545,8 @@ async function mountSide(): Promise<void> {
 
   el('mtg-side-tab').textContent = `资料 ${locals.length + files.length}`;
   const cards = localCards + feishuCards;
-  list.innerHTML = `<div class="scard blank" id="mside-blank">✏ 会议手记 · 白板</div>${cards || '<p class="empty" style="padding:8px">还没有资料。回详情「+ 添加资料」或在群里发文件。</p>'}`;
+  pager.content.innerHTML = `<div class="scard blank" id="mside-blank">✏ 会议手记 · 白板</div>${cards || '<p class="empty" style="padding:8px">还没有资料。回详情「+ 添加资料」或在群里发文件。</p>'}`;
+  pager.relayout('first');
   // 回手记：reload 本会议手记 doc（document:loaded → 还原墨迹）+ 复位顶栏/页码
   list.querySelector('#mside-blank')?.addEventListener('click', () => {
     if (!liveMtg) return;
