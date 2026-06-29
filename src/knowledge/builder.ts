@@ -113,7 +113,7 @@ async function contentHash(ko: KnowledgeObject): Promise<Sha256> {
 
 /* ── 组装单条 KO ──────────────────────────────────────────────────────────── */
 
-interface Draft {
+export interface Draft {
   stableKey: string;
   kind: KnowledgeKind;
   documentId: string;
@@ -129,7 +129,8 @@ interface Draft {
   createdAt: string;
 }
 
-async function finalize(d: Draft): Promise<KnowledgeObject> {
+/** 从 Draft 组装一条合规 KO（确定性 ko_id + content_hash）。会议导出等"非账本派生"的 KO 复用此函数·哈希一致过 validator。 */
+export async function finalize(d: Draft): Promise<KnowledgeObject> {
   const title = d.pageIndex != null ? `${d.documentTitle} · p${d.pageIndex + 1}` : d.documentTitle;
   const callout = CALLOUT[d.kind];
   const ko: KnowledgeObject = {

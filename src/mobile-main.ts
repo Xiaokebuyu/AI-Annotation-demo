@@ -381,6 +381,8 @@ el('read-sub').querySelector<HTMLElement>('[data-read="diary"]')?.addEventListen
 (window as unknown as { __inkloop?: unknown }).__inkloop = {
   state, bus, getActiveContext, listBooks, loadFile, reopenBook, openBook,
   exportInkSurfaceL1: (docId: string) => import('./integration/inksurface').then((m) => m.buildL1Export(docId)),
+  // exportMeeting：会议 → InkSurface 契约（转写=文档/手写=标注/总结=summary KO）·dev-only·C「打通链路」
+  exportMeeting: (meetingId: string) => import('./integration/inksurface/meeting-export').then((m) => m.buildMeetingL1Export(meetingId)),
 };
 
 // ════ 线格开关 boot 态：复选框绑定移到 mobile/dev.ts（设置页重渲会重建该控件）════
