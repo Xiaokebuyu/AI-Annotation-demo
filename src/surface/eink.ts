@@ -99,21 +99,38 @@ export function signalElementArea(node: Element): void {
   pushDirty(r.left / vw, r.top / vh, (r.left + r.width) / vw, (r.top + r.height) / vh);
 }
 
-// ── 通用 UI 变化刷新（电纸屏设备形态：点按钮/切工具/开菜单也要看到反馈）──
-// 语义事件只覆盖重内容（翻页/视图/文档/旁注）；工具高亮、菜单展开、按钮态这类轻量 UI 变化
-// 不发任何 bus 事件 → 电纸屏不刷 = 手指点了看不到反馈。用 MutationObserver 兜底：任何 DOM 变动
-// 触发一次带上限的去抖整屏刷。带 maxwait 防连续动画把纯尾去抖饿死/导致狂闪。
-const UI_DEBOUNCE = 200;   // 变动静默 200ms 后刷
-const UI_MAXWAIT = 1000;   // 但连续变动最多每 1s 刷一帧（防动画狂闪/饿死）
+// ── 通用 UI 变化刷新（电纸屏：点按钮/切工具/开菜单/AI 标记/时钟也要看到反馈）──
+// 语义事件(翻页/视图/文档)走整屏 GC16；其余 DOM 变动由 MutationObserver 兜底，按【变更区域大小】决定：
+// 小改 → A2 局部快刷（工具高亮/AI 标记/时钟/列表小改）；大改(>60% 视口) / body 级(视图切换 data-* / 模态 append) → 整屏 GC16。
+// 这把原来「任何 UI 变动都整屏 GC16」换成「按区域局部刷」，工具/抽屉/时钟/AI 标记不再整屏闪。
+let uiDirty: { l: number; t: number; r: number; b: number } | null = null;
+let uiPageLevel = false;
 let uiTimer = 0;
-let uiFirstAt = 0;
-function signalUiChanged(): void {
+function flushUi(): void {
+  uiTimer = 0;
+  const d = uiDirty, pl = uiPageLevel;
+  uiDirty = null; uiPageLevel = false;
+  if (pl) { signalPageReady(); return; }
+  if (!d) return;
+  const vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+  const w = d.r - d.l, h = d.b - d.t;
+  if (w <= 0 || h <= 0) return;
+  if ((w * h) / (vw * vh) > 0.6) signalPageReady();                            // 大改 → 整屏 GC16（清残影）
+  else signalViewportArea({ x: d.l / vw, y: d.t / vh, w: w / vw, h: h / vh });  // 小改 → A2 局部
+}
+function noteUiChange(target: Node): void {
   if (!enabled || !channel()) return;
-  const now = Date.now();
-  if (!uiFirstAt) uiFirstAt = now;
-  if (uiTimer) clearTimeout(uiTimer);
-  const delay = Math.min(UI_DEBOUNCE, Math.max(0, UI_MAXWAIT - (now - uiFirstAt)));
-  uiTimer = window.setTimeout(() => { uiTimer = 0; uiFirstAt = 0; signalPageReady(); }, delay);
+  if (target === document.body) { uiPageLevel = true; }   // body 级（视图切换 data-* / 模态 append）→ 整屏
+  else {
+    const el = target instanceof Element ? target : target.parentElement;
+    const b = el?.getBoundingClientRect();
+    if (b && b.width > 0 && b.height > 0) {
+      uiDirty = uiDirty
+        ? { l: Math.min(uiDirty.l, b.left), t: Math.min(uiDirty.t, b.top), r: Math.max(uiDirty.r, b.right), b: Math.max(uiDirty.b, b.bottom) }
+        : { l: b.left, t: b.top, r: b.right, b: b.bottom };
+    }
+  }
+  if (!uiTimer) uiTimer = window.setTimeout(flushUi, 120); // 合并 120ms 内多批变动，统一决策
 }
 
 let installed = false;
@@ -125,8 +142,7 @@ export function initEinkMirror(): void {
   bus.on('page:rendered', () => signalPageReady());   // PDF 页/白板渲染完成
   bus.on('view:changed', () => signalPageReady());     // 原版 ⇄ 重排切换
   bus.on('document:loaded', () => signalPageReady());  // 文档载入
-  bus.on('overlay:add', () => signalPageReady());      // AI 旁注出现
-  bus.on('overlay:remove', () => signalPageReady());   // AI 旁注移除
+  // AI 旁注/标记 出现/消失 不再整屏 GC16——它们是局部 DOM 变动，由下面 MutationObserver 兜底按区域 A2 局部刷。
   // 通用兜底：任何 UI DOM 变动（工具高亮/菜单/按钮态…）→ 去抖整屏刷，保证触摸反馈可见。
   // 排除「不该牵动整屏」的子树：笔迹画布(走 A2 局部)、重排笔迹画布、dev 调试叠层(region/bbox/relation/hmp·
   // 开着会在手写时画框→被这里抓成整屏 GC16·已默认关·这里再兜一层)、虚拟翻页引擎自插的垫白 spacer。
@@ -139,8 +155,7 @@ export function initEinkMirror(): void {
     const mo = new MutationObserver((records) => {
       for (const r of records) {
         if (einkIgnored(r.target)) continue;
-        signalUiChanged();
-        return;
+        noteUiChange(r.target);   // 不 early-return：遍历全批取并集区域，flushUi 统一决策 A2/GC16
       }
     });
     mo.observe(document.body, {
