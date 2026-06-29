@@ -87,10 +87,15 @@ export function createPager(container: HTMLElement, opts: PagerOpts = {}): Pager
       const top = r.top - er.top;
       const h = r.height;
       while (top >= pageBottom) pageBottom += H; // 前面 spacer 已把它推过若干屏 → 边界追上
-      if (h <= H && top + VPAGE_EPS < pageBottom && top + h > pageBottom + VPAGE_EPS) {
+      const remaining = pageBottom - top;             // 当前页剩余空间
+      const crosses = top + h > pageBottom + VPAGE_EPS;
+      const atPageTop = remaining >= H - VPAGE_EPS;    // 块已在某页顶（超高块从页顶起也算）
+      // 越过页底 且 不在页顶 → 垫白推到下一屏顶。h<=H：整块下移无切口。
+      // h>H（超高单块）：让它从页顶【干净起】、尾部溢出靠后续虚拟页翻看——不再从页中段切起（codex 双审头号）。
+      if (crosses && !atPageTop) {
         const spacer = document.createElement('div');
         spacer.className = spacerClass;
-        spacer.style.cssText = `height:${pageBottom - top}px;pointer-events:none;`;
+        spacer.style.cssText = `height:${remaining}px;pointer-events:none;`;
         node.before(spacer);
         pageBottom += H;
       }
