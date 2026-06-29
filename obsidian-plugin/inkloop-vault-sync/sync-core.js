@@ -33,6 +33,8 @@ function buildVaultSyncPlan(manifestFiles, local) {
     plan.download.push(f);
   }
   for (const path of Object.keys(local)) {
+    const bad = validateManagedPath(path);
+    if (bad) { plan.rejected.push({ path, reason: bad }); continue; } // 坏 state 路径不进 delete（守住只动 InkLoop/）
     const l = local[path];
     if (remote.has(path) || l.currentHash === null) continue;
     if (l.currentHash !== l.lastSyncedHash) { plan.conflicts.push({ path, reason: 'local_edited_remote_deleted' }); continue; }
@@ -87,6 +89,7 @@ async function syncVault(deps) {
   const paths = new Set([...Object.keys(deps.prevState || {}), ...files.map((f) => f.path)]);
   const local = {};
   for (const p of paths) {
+    if (validateManagedPath(p)) continue; // 非法路径（坏 manifest/坏 state）：不读盘·不进 plan（守住只动 InkLoop/·避免 hashOf 读 InkLoop 外）
     const prev = (deps.prevState || {})[p];
     const cur = await deps.hashOf(p); // null=本地不存在
     if (prev || cur !== null) local[p] = { lastSyncedHash: prev ? prev.lastSyncedHash : '', currentHash: cur };

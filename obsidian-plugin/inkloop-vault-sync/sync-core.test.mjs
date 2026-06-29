@@ -74,6 +74,17 @@ function harness(remoteFiles /* {path:md} */, localFiles /* {path:md} */, prevSt
     const plan = buildVaultSyncPlan([{ path: '../escape.md', content_hash: sha('x'), bytes: 1 }], {});
     ok(plan.rejected.length === 1 && plan.download.length === 0, '非法路径 → rejected 不下载');
   }
+  // 8 ⭐坏路径残留在 state/local（坏 manifest 遗留或篡改）→ 不读盘·不删（守住只动 InkLoop/）
+  {
+    // buildVaultSyncPlan 直接：本地坏路径 + 远端空 → rejected·绝不进 delete
+    const plan = buildVaultSyncPlan([], { '../evil.md': { lastSyncedHash: sha('X'), currentHash: sha('X') } });
+    ok(plan.delete.length === 0 && plan.rejected.length === 1, '坏 state 路径 → rejected·不删');
+    // syncVault 端到端：prevState 含坏路径 → 跳过（不调 hashOf 读盘）·坏路径本地文件不被删
+    const prev = { '../evil.md': { lastSyncedHash: sha('X') } };
+    const r = harness({}, { '../evil.md': 'X' }, prev);
+    const out = await syncVault(r.deps);
+    ok(!out.result.deleted.includes('../evil.md') && r.local['../evil.md'] === 'X', '坏路径端到端 → 不读·不删·保留');
+  }
 
   console.log(`\n==== ${pass} passed / ${fail} failed ====`);
   process.exit(fail ? 1 : 0);
