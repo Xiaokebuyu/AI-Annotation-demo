@@ -1,7 +1,8 @@
 // 移动版（电纸屏）入口：把引擎接到「新日记」空白可写页 + 日记持久化/列表/重开 + 多页翻页。
 // 复用同名 DOM id（page-layer/ink-layer/stage/stage-wrap/whisper-layer），与桌面共用 app/annotation-loop 的编排（不分叉）。
-// 注意：不 import 桌面 styles.css —— 移动版有自己的样式（mobile.html 内联）。
+// 注意：不 import 桌面 styles.css —— 移动版有自己的样式（src/mobile/mobile.css，正规化后从 mobile.html 内联抽出）。
 import './core/polyfills'; // 必须最先：设备 WebView 109 补 Promise.withResolvers（pdf.js 用到）
+import './mobile/mobile.css'; // 移动版样式（Vite 注入；build 后抽成 dist 内 <link>，故无 FOUC）
 import { initRenderer, renderBlankSurface, renderBlankPage, loadFile, reopenBook, gotoPage, renderPage } from './surface/renderer';
 import type { SurfaceContext } from './app/surface-context';
 import { initWhisper } from './surface/whisper';
@@ -20,6 +21,7 @@ import { initEinkMirror } from './surface/eink';
 import { features } from './config/features';
 import { initMobileMeeting } from './mobile/meeting';
 import { initMobileDev } from './mobile/dev';
+import { initMobileShell } from './mobile/shell';
 import type { PersistedDoc } from './core/store-format';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -38,6 +40,7 @@ initReader(el('reader'), { notePlacement: 'inline', restoreStrokes: true, replyM
 initInsightPanel({ cards: el('m-cards'), foot: el('m-panel-foot'), count: el('m-insight-count') }); // 本页洞察历史（复用桌面同款）
 initDevOverlay(); // dev 叠层（bbox/region/relation/HMP 浮窗·设置页 devOverlay/showRegion/showRelations 控·默认关）——接真桌面同款
 if (features.einkBridge) initEinkMirror(); // 电纸屏镜像：套壳内容变化 → 推 IT8951（web/dev 无桥则 no-op）
+initMobileShell(); // 外壳交互（导航脊/子导航/工具/rail/文件浮层）——原 mobile.html 内联脚本，正规化后抽出
 
 // AI 洞察抽屉开关（rail 💡）
 el('rl-ai').addEventListener('click', () => document.body.classList.toggle('insight-open'));
