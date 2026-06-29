@@ -6,6 +6,7 @@ import { runOcrLayout } from './server/ocr-layout-dev.mjs'; // dev-only：扫描
 import { runInterpretHwr } from './server/hwr-dev.mjs';     // dev-only：英文手写识别（OpenVINO 徐方案模型），不进生产代理
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join, relative, isAbsolute } from 'node:path';
+import { assertNonEmptyVaultRelease, guardPanelVaultRest, panelVaultGuardPayload } from './server/panel-vault-guard';
 
 /** dev-only：WS2 妙记对轴代理——浏览器 GET /api/panel-feishu/* → panel 飞书事件中枢，注入 x-inkloop-secret（留服务端）。 */
 function panelFeishuProxy(env: Record<string, string>): Plugin {
@@ -36,16 +37,21 @@ function panelVaultProxy(env: Record<string, string>): Plugin {
   return {
     name: 'inkloop-panel-vault-proxy',
     configureServer(server) {
-      for (const k of ['PANEL_VAULT_BASE', 'INKLOOP_SHARED_SECRET']) {
+      for (const k of ['PANEL_VAULT_BASE', 'INKLOOP_SHARED_SECRET', 'INKLOOP_USER_ID']) {
         if (env[k] && !process.env[k]) process.env[k] = env[k];
       }
       const BASE = (process.env.PANEL_VAULT_BASE || '').replace(/\/+$/, ''); // 如 https://host/api/inkloop/vault
       const SECRET = process.env.INKLOOP_SHARED_SECRET || '';
+      const FORCE_USER = process.env.INKLOOP_USER_ID || ''; // 与 standalone 同口径·guard fail-closed（未配即 503）
       server.middlewares.use('/api/panel-vault', (req, res) => {
         const send = (code: number, obj: unknown) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); };
         if (!BASE || !SECRET) return send(503, { error: 'PANEL_VAULT_BASE / INKLOOP_SHARED_SECRET 未配置' });
         if (req.method !== 'GET' && req.method !== 'POST') return send(405, { error: 'GET/POST only' });
-        const target = `${BASE}${req.url}`; // req.url=去掉 /api/panel-vault 前缀后的剩余（含 query）
+        // connect 挂载已剥 /api/panel-vault 前缀 → req.url=剩余 rest。fail-closed 白名单 + user 钉死（同 standalone·防 confused-deputy/越桶）
+        let route: ReturnType<typeof guardPanelVaultRest>;
+        try { route = guardPanelVaultRest(req.url || '/', req.method || 'GET', FORCE_USER); }
+        catch (e) { const g = panelVaultGuardPayload(e); return g ? send(g.status, { error: g.error }) : send(400, { error: String((e as { message?: string })?.message || e) }); }
+        const target = `${BASE}${route.rest}`;
         const fwd = (body?: string) => {
           const headers: Record<string, string> = { 'x-inkloop-secret': SECRET };
           if (body !== undefined) headers['content-type'] = String(req.headers['content-type'] || 'application/json');
@@ -56,7 +62,11 @@ function panelVaultProxy(env: Record<string, string>): Plugin {
         if (req.method === 'POST') {
           const chunks: Buffer[] = [];
           req.on('data', (c) => chunks.push(c as Buffer));
-          req.on('end', () => fwd(Buffer.concat(chunks).toString('utf8')));
+          req.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf8');
+            try { if (route.releasePost) assertNonEmptyVaultRelease(body); fwd(body); }
+            catch (e) { const g = panelVaultGuardPayload(e); return g ? send(g.status, { error: g.error }) : send(400, { error: String((e as { message?: string })?.message || e) }); }
+          });
           req.on('error', (e) => send(400, { error: String(e?.message || e) }));
         } else fwd();
       });

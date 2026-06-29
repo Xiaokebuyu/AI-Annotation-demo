@@ -16,6 +16,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync, appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { assertNonEmptyVaultRelease, guardPanelVaultReqUrl, panelVaultGuardPayload } from './panel-vault-guard';
 import {
   runReflow, runReflowAi, reflowAiStream, chatStream,
   runOcrVlm, runExplainImage, runInterpret, runClassifyContext, runReflowVlm,
@@ -68,19 +69,46 @@ async function handlePanelFeishu(req: IncomingMessage, res: ServerResponse): Pro
   } catch (e) { send(502, { error: String((e as Error)?.message || e) }); }
 }
 
+// ── 交付路线 Y：panel vault release 代理（GET+POST·注入 x-inkloop-secret·secret 不进前端）。
+//    与 vite.config.ts panelVaultProxy 同构，让安卓/生产包也能 上传 / 拉取 vault release。
+//    userId 服务端 override（INKLOOP_USER_ID 设了→钉死路径 user 段·设备改不了别人的桶）——
+//    per-user 接缝：今天=固定 env（单用户），将来=登录态派生。──
+const PANEL_VAULT_BASE = (process.env.PANEL_VAULT_BASE || '').replace(/\/+$/, ''); // 形如 http://host:3001/api/inkloop/vault
+const VAULT_FORCE_USER = process.env.INKLOOP_USER_ID || ''; // 钉死路径 user 段·必配（guard fail-closed：未配即 503·绝不透传客户端 userId）
+const MAX_VAULT_BODY = 50 * 1024 * 1024; // 对齐 panel vault 50mb 上限·避免生产代理比上游更早拒 release（dev proxy 不限·panel 50mb·默认 25mb 是给页面图/ink 的）
+async function handlePanelVault(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const send = (code: number, obj: unknown): void => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); };
+  if (req.method !== 'GET' && req.method !== 'POST') return send(405, { error: 'GET/POST only' });
+  if (!PANEL_VAULT_BASE || !INKLOOP_SHARED_SECRET) return send(503, { error: 'PANEL_VAULT_BASE / INKLOOP_SHARED_SECRET 未配置' });
+  try {
+    // fail-closed 路由白名单 + user 钉死 + 路径规范化（防 confused-deputy：`../` 逃出 vault 子树把 secret 打到其它端点 / 越桶）
+    const route = guardPanelVaultReqUrl(req.url || '', req.method || 'GET', VAULT_FORCE_USER);
+    const headers: Record<string, string> = { 'x-inkloop-secret': INKLOOP_SHARED_SECRET };
+    let body: string | undefined;
+    if (req.method === 'POST') { body = await readBody(req, MAX_VAULT_BODY); if (route.releasePost) assertNonEmptyVaultRelease(body); headers['content-type'] = String(req.headers['content-type'] || 'application/json'); }
+    const r = await fetch(`${PANEL_VAULT_BASE}${route.rest}`, { method: req.method, headers, body });
+    const text = await r.text();
+    res.statusCode = r.status;
+    res.setHeader('content-type', r.headers.get('content-type') || 'application/json');
+    res.end(text);
+  } catch (e) { const g = panelVaultGuardPayload(e); if (g) return send(g.status, { error: g.error }); send(502, { error: String((e as Error)?.message || e) }); }
+}
+
 // intent A/B 影子数据落盘位置（板上 production 收集云端↔端侧 respond/fold 一致率）。
 const AB_LOG = process.env.AB_LOG || resolve(ROOT, '.ab-intent.jsonl');
 
 const MAX_BODY = 25 * 1024 * 1024; // 25MB：页面图 / ink PNG dataURL
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBody = MAX_BODY): Promise<string> {
   return new Promise((res, rej) => {
-    let buf = ''; let size = 0;
+    const chunks: Buffer[] = []; let size = 0;
     req.on('data', (c: Buffer) => {
       size += c.length;
-      if (size > MAX_BODY) { rej(new Error('body too large')); req.destroy(); return; }
-      buf += c.toString();
+      if (size > maxBody) { rej(new Error('body too large')); req.destroy(); return; }
+      chunks.push(c);
     });
-    req.on('end', () => res(buf));
+    // 先 Buffer.concat 再一次性 decode：逐 chunk toString() 会在多字节 UTF-8（中文）跨 chunk 边界处插入替换字符，
+    // 板上长 prompt/会议转写会静默失真（vite.config 代理早已这么做）。
+    req.on('end', () => res(Buffer.concat(chunks).toString('utf8')));
     req.on('error', rej);
   });
 }
@@ -102,6 +130,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
   // WS2-C：panel 飞书 GET 代理（在 POST-only 闸之前）
   if (url.startsWith('/api/panel-feishu')) { await handlePanelFeishu(req, res); return; }
+  // 交付路线 Y：vault release GET/POST 代理（在 POST-only 闸之前·因含 GET latest/blob）
+  if (url.startsWith('/api/panel-vault')) { await handlePanelVault(req, res); return; }
   if (req.method !== 'POST') { res.statusCode = 405; res.end('POST only'); return; }
 
   try {
