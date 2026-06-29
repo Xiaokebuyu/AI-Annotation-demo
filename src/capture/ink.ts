@@ -4,6 +4,7 @@ import { trace } from '../core/trace';
 import { bus, currentStrokes, settings, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
 import { recordInkSample } from '../local/bedrock-recorder';
 import { styleFor } from './stroke-style';
+import { signalInkArea } from '../surface/eink';
 
 let cv: HTMLCanvasElement;
 let ctx: CanvasRenderingContext2D;
@@ -88,6 +89,9 @@ function eraseAt(e: PointerEvent): void {
 function eraseStroke(stroke: Stroke, reason: 'erase' | 'undo'): void {
   const strokes = currentStrokes();
   const mid = strokeMarkIds.get(stroke);
+  // 被擦笔集合（命中 mark→整组·否则单笔）：留它们的点算脏区，擦完发 A2 局部刷——
+  // 否则电纸屏上画布重画了但不更新（橡皮"擦了没反应"·用户实测漏的就是这个）。
+  const erased = mid ? strokes.filter((s) => strokeMarkIds.get(s) === mid) : [stroke];
   if (mid) {
     for (let k = strokes.length - 1; k >= 0; k--) if (strokeMarkIds.get(strokes[k]) === mid) strokes.splice(k, 1);
     bus.emit('mark:erase', mid); // → main: 落 mark tombstone + 从 session 移除
@@ -98,6 +102,12 @@ function eraseStroke(stroke: Stroke, reason: 'erase' | 'undo'): void {
   }
   trace(reason === 'undo' ? 'StrokeUndone' : 'StrokeErased', { page_id: state.pageId ?? '', mark_id: mid ?? '' });
   redrawInk();
+  const pts = erased.flatMap((s) => s.points);
+  if (pts.length) {
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    signalInkArea([x0, y0, x1 - x0, y1 - y0]); // 页归一化 bbox → #ink-layer 映射 → A2 局部刷（原版画布）
+  }
 }
 
 export function undoStroke(): void {

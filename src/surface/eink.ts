@@ -64,16 +64,16 @@ function pageBoxToViewport(bx: number, by: number, bw: number, bh: number):
 
 let inkPending: { x0: number; y0: number; x1: number; y1: number } | null = null;
 let inkTimer = 0;
-/** 抬笔即调：合并该笔的视口矩形，短窗(150ms)后推一帧 A2 局部快刷。bbox=页归一化[x,y,w,h]。 */
-export function signalInkArea(bbox: [number, number, number, number]): void {
+/** 通用 A2 脏区核心：并集视口归一化矩形[0,1]，短窗(150ms)后推一帧 A2 局部快刷。夹值 + 丢空矩形。 */
+function pushDirty(x0: number, y0: number, x1: number, y1: number): void {
   if (!enabled || !channel()) return;
-  const vp = pageBoxToViewport(bbox[0], bbox[1], bbox[2], bbox[3]);
-  if (!vp) return;
-  const x0 = vp.x, y0 = vp.y, x1 = vp.x + vp.w, y1 = vp.y + vp.h;
+  x0 = Math.max(0, Math.min(1, x0)); y0 = Math.max(0, Math.min(1, y0));
+  x1 = Math.max(0, Math.min(1, x1)); y1 = Math.max(0, Math.min(1, y1));
+  if (x1 - x0 <= 0 || y1 - y0 <= 0) return;
   inkPending = inkPending
     ? { x0: Math.min(inkPending.x0, x0), y0: Math.min(inkPending.y0, y0), x1: Math.max(inkPending.x1, x1), y1: Math.max(inkPending.y1, y1) }
     : { x0, y0, x1, y1 };
-  if (inkTimer) return;   // 窗口内已排程 → 并集等它一起发（不重置计时，落笔延迟有上界）
+  if (inkTimer) return;   // 窗口内已排程 → 并集等它一起发（不重置计时，延迟有上界）
   inkTimer = window.setTimeout(() => {
     inkTimer = 0;
     const p = inkPending; inkPending = null;
@@ -82,6 +82,21 @@ export function signalInkArea(bbox: [number, number, number, number]): void {
     try { ch.postMessage(JSON.stringify({ method: 'inkArea', x: p.x0, y: p.y0, w: p.x1 - p.x0, h: p.y1 - p.y0, mode: MODE_A2 })); }
     catch { /* no-op */ }
   }, 150);
+}
+/** 抬笔即调：页归一化 bbox → 视口矩形 → A2 局部快刷（原版画布·经 #ink-layer）。 */
+export function signalInkArea(bbox: [number, number, number, number]): void {
+  const vp = pageBoxToViewport(bbox[0], bbox[1], bbox[2], bbox[3]);
+  if (vp) pushDirty(vp.x, vp.y, vp.x + vp.w, vp.y + vp.h);
+}
+/** 通用 A2 脏区：直接给视口归一化矩形[0,1]（不经 #ink-layer）。重排面手写/橡皮/AI 标记/小反馈用。 */
+export function signalViewportArea(rect: { x: number; y: number; w: number; h: number }): void {
+  pushDirty(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
+}
+/** 通用 A2 脏区：给一个元素，按其当前视口位置刷 A2（抽屉/sheet/旁注块/小反馈用）。 */
+export function signalElementArea(node: Element): void {
+  const r = node.getBoundingClientRect();
+  const vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+  pushDirty(r.left / vw, r.top / vh, (r.left + r.width) / vw, (r.top + r.height) / vh);
 }
 
 // ── 通用 UI 变化刷新（电纸屏设备形态：点按钮/切工具/开菜单也要看到反馈）──

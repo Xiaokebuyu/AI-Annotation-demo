@@ -8,6 +8,7 @@ import { styleFor } from '../capture/stroke-style';
 import { reflowProviders, reflowAiStream } from './reflow-provider';
 import { reflowLocal } from './reflow';
 import { extractPageBlocks } from './renderer';
+import { signalViewportArea } from './eink';
 import { grabRegion } from '../evidence/ocr';
 import { postJson } from '../core/api';
 import { getBookAiTurns, getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
@@ -796,10 +797,28 @@ function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[]): A
   };
 }
 
+/** 重排面 A2 局部刷：一组 ReaderStroke 的内容坐标点并集 → 视口矩形 → A2 脏区。
+ *  重排面用 .reader-ink（非 #ink-layer）→ signalInkArea 走不通；这里直接给视口矩形。 */
+function signalReaderInk(strokes: ReaderStroke[]): void {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of strokes) for (const p of s.points) {
+    if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y;
+  }
+  if (!Number.isFinite(minX)) return;
+  const er = el.getBoundingClientRect(), pad = 16, vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+  signalViewportArea({
+    x: (er.left + minX - el.scrollLeft - pad) / vw,
+    y: (er.top + minY - el.scrollTop - pad) / vh,
+    w: (maxX - minX + pad * 2) / vw,
+    h: (maxY - minY + pad * 2) / vh,
+  });
+}
 function onPenUp(st: ReaderStroke): void {
   // 保留单点笔（中文的点/顿快写只落一个点）：孤立点按仍由下游 tap 过滤滤掉，多笔手写里的点靠 keepShortStrokes 存活。
   const raw = st.points;
   if (!raw.length) return;
+  signalReaderInk([st]); // 重排面写字 A2 局部刷（命门：#ink-layer 隐藏·signalInkArea 走不通）
   const hit = hitBlock(raw);
   if (!hit) return; // 没画在任何段上 → 不入
   if (!settings.gesture.enabled) return;
@@ -860,6 +879,9 @@ function eraseRestoredMark(mid: string): void {
  *  尚未组装（无 markId·罕见的 6s 内擦）→ 只移这条视觉笔。 */
 function eraseReaderStroke(st: ReaderStroke): void {
   const mid = st.committed ? strokeMarkIds.get(st.committed) : undefined;
+  const erased: ReaderStroke[] = mid
+    ? inkStrokes.filter((s) => { const c = s.committed; return !!c && strokeMarkIds.get(c) === mid; })
+    : [st];
   if (mid) {
     const pageArr = state.pageId ? state.strokesByPage.get(state.pageId) : undefined;
     for (let k = inkStrokes.length - 1; k >= 0; k--) {
@@ -880,6 +902,7 @@ function eraseReaderStroke(st: ReaderStroke): void {
     if (k >= 0) inkStrokes.splice(k, 1);
   }
   resizeInk(); // 重画重排画布
+  signalReaderInk(erased); // 被擦区 A2 局部刷（板上才看得到擦除）
 }
 
 /** 基岩录制 tap（Tier 1·影子·死区前·surface=reader）。坐标按重排内容画布尺寸归一化、记真实运动；关时零开销。 */
