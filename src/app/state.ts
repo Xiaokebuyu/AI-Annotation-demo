@@ -88,8 +88,8 @@ export const settings: Settings = {
   classifyModel: '',  // 上下文分类器(/api/classify-context)模型；空=继承 inferModel。
   sendMarkImage: false, // 默认不送合成图：纯验证徐智强的取证路线（AI 只吃 HMP 事实+整页上下文）。
   devOverlay: false,    // dev bbox 叠层默认关。
-  showRegion: true,     // dev 组装区域实时可视：默认开（手写时看受影响区域）。
-  showRelations: true,  // dev 关联框：默认开（提交后看哪些标注被判为内容关联的一组）。
+  showRegion: false,    // dev 组装区域实时可视：**默认关**（开着会在手写时画 #region-overlay 调试框、被电纸屏 MutationObserver 抓成整屏 GC16；要看就 dev 里开）。
+  showRelations: false, // dev 关联框：**默认关**（同上·调试用）。
   bedrock: false,       // 基岩录制默认关（影子·实验）。
 };
 

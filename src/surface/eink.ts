@@ -113,12 +113,17 @@ export function initEinkMirror(): void {
   bus.on('overlay:add', () => signalPageReady());      // AI 旁注出现
   bus.on('overlay:remove', () => signalPageReady());   // AI 旁注移除
   // 通用兜底：任何 UI DOM 变动（工具高亮/菜单/按钮态…）→ 去抖整屏刷，保证触摸反馈可见。
-  // 笔迹画布走 A2 局部快刷(signalInkArea)，不应被这里的整屏 GC16 抢；故排除 #ink-layer 子树的变动。
+  // 排除「不该牵动整屏」的子树：笔迹画布(走 A2 局部)、重排笔迹画布、dev 调试叠层(region/bbox/relation/hmp·
+  // 开着会在手写时画框→被这里抓成整屏 GC16·已默认关·这里再兜一层)、虚拟翻页引擎自插的垫白 spacer。
+  const EINK_IGNORE = '#ink-layer,.reader-ink,#region-overlay,#bbox-overlay,#relation-overlay,#hmp-float,.vpager-spacer,[data-eink-ignore]';
+  const einkIgnored = (node: Node | null): boolean => {
+    const el = node instanceof Element ? node : node?.parentElement ?? null;
+    return !!el?.closest(EINK_IGNORE);
+  };
   try {
-    const inkLayer = document.getElementById('ink-layer');
     const mo = new MutationObserver((records) => {
       for (const r of records) {
-        if (inkLayer && (inkLayer === r.target || inkLayer.contains(r.target as Node))) continue;
+        if (einkIgnored(r.target)) continue;
         signalUiChanged();
         return;
       }
