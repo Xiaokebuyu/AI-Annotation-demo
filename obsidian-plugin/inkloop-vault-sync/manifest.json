@@ -1,0 +1,9 @@
+{
+  "id": "inkloop-vault-sync",
+  "name": "InkLoop Vault Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "拉取 InkLoop 知识库 release 到本地 vault（交付路线 Y·只读消费·本地编辑受保护·只动 InkLoop/）。",
+  "author": "InkLoop",
+  "isDesktopOnly": false
+}
