@@ -31,6 +31,39 @@ function panelFeishuProxy(env: Record<string, string>): Plugin {
   };
 }
 
+/** dev-only：vault release 代理——浏览器 GET/POST /api/panel-vault/* → panel /api/inkloop/vault/*，注入 x-inkloop-secret（留服务端）。 */
+function panelVaultProxy(env: Record<string, string>): Plugin {
+  return {
+    name: 'inkloop-panel-vault-proxy',
+    configureServer(server) {
+      for (const k of ['PANEL_VAULT_BASE', 'INKLOOP_SHARED_SECRET']) {
+        if (env[k] && !process.env[k]) process.env[k] = env[k];
+      }
+      const BASE = (process.env.PANEL_VAULT_BASE || '').replace(/\/+$/, ''); // 如 https://host/api/inkloop/vault
+      const SECRET = process.env.INKLOOP_SHARED_SECRET || '';
+      server.middlewares.use('/api/panel-vault', (req, res) => {
+        const send = (code: number, obj: unknown) => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); };
+        if (!BASE || !SECRET) return send(503, { error: 'PANEL_VAULT_BASE / INKLOOP_SHARED_SECRET 未配置' });
+        if (req.method !== 'GET' && req.method !== 'POST') return send(405, { error: 'GET/POST only' });
+        const target = `${BASE}${req.url}`; // req.url=去掉 /api/panel-vault 前缀后的剩余（含 query）
+        const fwd = (body?: string) => {
+          const headers: Record<string, string> = { 'x-inkloop-secret': SECRET };
+          if (body !== undefined) headers['content-type'] = String(req.headers['content-type'] || 'application/json');
+          fetch(target, { method: req.method, headers, body })
+            .then(async (r) => { const text = await r.text(); res.statusCode = r.status; res.setHeader('content-type', r.headers.get('content-type') || 'application/json'); res.end(text); })
+            .catch((e) => send(502, { error: String(e?.message || e) }));
+        };
+        if (req.method === 'POST') {
+          const chunks: Buffer[] = [];
+          req.on('data', (c) => chunks.push(c as Buffer));
+          req.on('end', () => fwd(Buffer.concat(chunks).toString('utf8')));
+          req.on('error', (e) => send(400, { error: String(e?.message || e) }));
+        } else fwd();
+      });
+    },
+  };
+}
+
 /** dev-only AI 代理：浏览器 POST /api/* → 网关 → 各识别/重排/对话端点。Key 留服务端。 */
 function inferenceProxy(env: Record<string, string>): Plugin {
   return {
@@ -155,6 +188,6 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
-    plugins: [panelFeishuProxy(env), inferenceProxy(env)],
+    plugins: [panelFeishuProxy(env), panelVaultProxy(env), inferenceProxy(env)],
   };
 });
