@@ -30,12 +30,12 @@ describe('buildConceptLayer', () => {
     expect(layer.assignmentsByKo[c.ko_id]).toBeUndefined(); // 局部性被丢→c 无概念
   });
 
-  it('规范化归并：大小写/空白不同的同概念合一（显示名取首见）', async () => {
-    const a = await mkKo('doc_1', 'x');
-    const b = await mkKo('doc_2', 'y');
-    const layer = await buildConceptLayer([a, b], lookupExtract({ x: ['Cache Coherence'], y: ['cache  coherence'] }));
+  it('规范化归并：大小写/空白不同的同概念合一（显示名取确定性首位：早 created_at）', async () => {
+    const a = await mkKo('doc_1', 'x', '2026-06-29T10:00:00Z'); // 更早 → 稳定排序后首位
+    const b = await mkKo('doc_2', 'y', '2026-06-29T11:00:00Z');
+    const layer = await buildConceptLayer([b, a], lookupExtract({ x: ['Cache Coherence'], y: ['cache  coherence'] })); // 故意倒序传入
     expect(layer.concepts).toHaveLength(1);
-    expect(layer.concepts[0].title).toBe('Cache Coherence'); // 首见原样
+    expect(layer.concepts[0].title).toBe('Cache Coherence'); // 不随输入序漂移：取 created_at 早的 a 的原样
     expect(layer.membersByConcept['Cache Coherence']).toHaveLength(2);
   });
 
@@ -45,6 +45,15 @@ describe('buildConceptLayer', () => {
     let called = 0;
     const layer = await buildConceptLayer([a, b], async () => { called++; return ['噪声']; });
     expect(called).toBe(0);
+    expect(layer.concepts).toEqual([]);
+  });
+
+  it('会议手写占位带时间尾巴「（约 m:ss 处手写）」也跳过（不抽假概念）', async () => {
+    const a = await mkKo('mtgdoc_1', '（图形标注 / 圈画）　（约 0:16 处手写）');
+    const b = await mkKo('mtgdoc_2', '（图形标注 / 圈画）　（约 1:20 处手写）');
+    let called = 0;
+    const layer = await buildConceptLayer([a, b], async () => { called++; return ['图形标注']; });
+    expect(called).toBe(0); // 剥尾巴后命中 PLACEHOLDER → 根本不调 LLM
     expect(layer.concepts).toEqual([]);
   });
 

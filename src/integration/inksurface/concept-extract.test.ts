@@ -17,4 +17,9 @@ describe('parseConcepts', () => {
     expect(parseConcepts('none\nN/A\n没有')).toEqual([]);
     expect(parseConcepts('这是一段非常长的不像概念词的句子超过二十四个字所以会被剔掉对吧\n一致性')).toEqual(['一致性']);
   });
+  it('行首数字是概念一部分时不被腰斩（5G/2PC/3D/1.5）', () => {
+    expect(parseConcepts('5G 网络\n2PC\n3D 重建')).toEqual(['5G 网络', '2PC', '3D 重建']);
+    expect(parseConcepts('1.5 倍采样')).toEqual(['1.5 倍采样']); // `1.` 后跟数字→不当编号
+    expect(parseConcepts('1. 一致性\n2) 复制')).toEqual(['一致性', '复制']); // 真编号列表照样剔
+  });
 });

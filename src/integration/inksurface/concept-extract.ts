@@ -12,13 +12,19 @@ import type { ConceptExtractFn } from './concept-layer';
 
 const MAX_CONCEPTS = 3;
 
-/** 解析 LLM 输出：每行一个概念词·剔编号/项目符号/尾标点/空行/「无」·去重·封顶 3。纯·可单测。 */
+/** 解析 LLM 输出：每行一个概念词·剔编号/项目符号/尾标点/空行/「无」·去重·封顶 3。纯·可单测。
+ *  ⚠️只剔「列表标记」前缀（`-`/`•`/`1.` 这类），不能无脑吃行首数字——否则真概念 `5G 网络`/`2PC`/`3D 重建` 被腰斩。 */
 export function parseConcepts(text: string): string[] {
   return [
     ...new Set(
       text
         .split('\n')
-        .map((l) => l.replace(/^[\s\-*•·\d.、)]+/, '').replace(/[。.;；,，]+$/, '').trim())
+        .map((l) =>
+          l
+            .replace(/^\s*(?:[-*•·]\s*|\d+[.)、](?!\d)\s*)/u, '') // 项目符号 / 编号列表（`12.` 后非数字才算编号，放过 `1.5`）
+            .replace(/[。.;；,，]+$/, '')
+            .trim(),
+        )
         .filter((l) => l && l.length <= 24 && !/^(无|none|n\/?a|没有|空)$/i.test(l)),
     ),
   ].slice(0, MAX_CONCEPTS);
@@ -50,7 +56,9 @@ export function makeConceptExtractor(opts: { model?: string; signal?: AbortSigna
     try {
       await postNdjson<{ k?: string; d?: string }>(
         '/api/chat',
-        { messages: [{ role: 'user', content }], role: 'concept_extractor', model: opts.model, maxTokens: 80 },
+        // thinking:false——概念抽取是轻分类，不需推理。否则 /api/chat 默认开 thinking，maxTokens 被抬到 minTokens(1280)、
+        // kimi 还烧 budget_tokens(1024)，几百条 KO 串行又慢又费 token（见 server/infer.ts gatewayEventStream）。
+        { messages: [{ role: 'user', content }], role: 'concept_extractor', model: opts.model, maxTokens: 80, thinking: false },
         (f) => {
           if (f.k === 'e') err = f.d || '中断';
           else if (f.k === 'done') done = true;

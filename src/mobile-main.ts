@@ -417,8 +417,9 @@ el('read-sub').querySelector<HTMLElement>('[data-read="diary"]')?.addEventListen
   exportInkSurfaceL1: (docId: string) => import('./integration/inksurface').then((m) => m.buildL1Export(docId)),
   // exportMeeting：会议 → InkSurface 契约（转写=文档/手写=标注/总结=summary KO）·dev-only·C「打通链路」
   exportMeeting: (meetingId: string) => import('./integration/inksurface/meeting-export').then((m) => m.buildMeetingL1Export(meetingId)),
-  // exportVaultBundle：枚举 阅读/日记/会议 → 各 L1 导出（含 taxonomy 标签）+ MOC + 落夹 → bundle JSON·dev-only·
-  // 待办1+2「全量感知 + folder 整理」。产出交 scripts/export-vault.ts 写进真 Obsidian vault。
+  // exportVaultBundle：枚举 阅读/日记/会议 → 各 L1 导出（含 taxonomy 标签）+ MOC + 概念层（LLM 跨链）→ bundle JSON·dev-only。
+  // 主写盘路径＝scripts/render-vault.ts（干净 .md·消费 conceptLayer→ 出 Concepts/ 枢纽 + 叶子相关概念·Vision A 知识图谱）。
+  // scripts/export-vault.ts（SDK adapter·带 sidecar·**不消费概念层**）保留给将来插件/L2 双向同步那条消费方，别拿它当默认导出。
   exportVaultBundle: () => import('./integration/inksurface/vault-collect').then((m) => m.collectVaultBundle()),
 };
 
