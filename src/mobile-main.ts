@@ -359,6 +359,16 @@ el('view-toggle').addEventListener('click', () => {
 });
 // 手型工具横滑 → 翻页（ink.ts 发 nav:flip）。
 bus.on('nav:flip', (dir) => pageNav(Number(dir) || 0));
+// 双指左右滑翻页：板上 touch-remap 把双指横滑识别成方向键注入（单指写字契约不变·见 eink/touch-remap.c）→ 这里收方向键翻页。
+// 只在阅读/书写面 + 会中白板生效（列表面有 ‹ › 翻页条；pageNav 在列表态会去翻隐藏文档故 gate）。
+window.addEventListener('keydown', (e) => {
+  const m = document.body.dataset.mode, read = document.body.dataset.read;
+  const ok = (m === 'read' && (read === 'new' || read === 'book' || read === 'open'))
+    || (m === 'meet' && document.body.dataset.mtg === 'live');
+  if (!ok) return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown') bus.emit('nav:flip', 1);
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp') bus.emit('nav:flip', -1);
+});
 // 书籍 gotoPage 渲染后更新页码（日记 gotoDiaryPage 自带；重复调用幂等）。
 bus.on('page:rendered', updatePageInd);
 bus.on('reader:vpage', updatePageInd); // 重排虚拟页翻动/重排落地 → 刷新页码（N/M · v/n）
