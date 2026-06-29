@@ -383,6 +383,9 @@ el('read-sub').querySelector<HTMLElement>('[data-read="diary"]')?.addEventListen
   exportInkSurfaceL1: (docId: string) => import('./integration/inksurface').then((m) => m.buildL1Export(docId)),
   // exportMeeting：会议 → InkSurface 契约（转写=文档/手写=标注/总结=summary KO）·dev-only·C「打通链路」
   exportMeeting: (meetingId: string) => import('./integration/inksurface/meeting-export').then((m) => m.buildMeetingL1Export(meetingId)),
+  // exportVaultBundle：枚举 阅读/日记/会议 → 各 L1 导出（含 taxonomy 标签）+ MOC + 落夹 → bundle JSON·dev-only·
+  // 待办1+2「全量感知 + folder 整理」。产出交 scripts/export-vault.ts 写进真 Obsidian vault。
+  exportVaultBundle: () => import('./integration/inksurface/vault-collect').then((m) => m.collectVaultBundle()),
 };
 
 // ════ 线格开关 boot 态：复选框绑定移到 mobile/dev.ts（设置页重渲会重建该控件）════

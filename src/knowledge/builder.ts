@@ -13,6 +13,7 @@
  */
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
 import { getBookAiTurns, getDoc, getFoldedMarks, listBooks } from '../local/store';
+import { type EntityMode, taxonomyTags } from '../integration/inksurface/vault-layout';
 import {
   KO_SCHEMA_VERSION,
   type KnowledgeKind,
@@ -162,6 +163,25 @@ export async function finalize(d: Draft): Promise<KnowledgeObject> {
   return ko;
 }
 
+/** 导出边界·后置标签富化（待办1·全量感知）：给 KO 叠加 taxonomy 标签（mode/实体/日期）→ 重算 content_hash。
+ *  **只在导出路径调用**（运行态 KO 不富化·标签对画布无意义）。ko_id 不变（派生自 stableKey·与 tags 无关）
+ *  → document_projection 的 block→ko 链接仍有效。默认从 KO 自身派生；overrides 可显式指定
+ *  （会议传 started_at 日期、自定 entity slug）。tags 去重保序（既有在前）。 */
+export async function enrichExportTags(
+  ko: KnowledgeObject,
+  overrides: { mode?: EntityMode; entitySlug?: string; date?: string } = {},
+): Promise<KnowledgeObject> {
+  const extra = taxonomyTags({
+    documentId: ko.source.document_id,
+    documentTitle: ko.source.document_title,
+    isoDate: ko.created_at,
+    ...overrides,
+  });
+  const next: KnowledgeObject = { ...ko, tags: [...new Set([...ko.tags, ...extra])] };
+  next.content_hash = await contentHash(next);
+  return next;
+}
+
 /* ── 纯转换核心 ──────────────────────────────────────────────────────────── */
 
 /**
@@ -214,9 +234,11 @@ export async function assembleKnowledgeObjects(input: BuilderInput): Promise<Kno
     if (consumed.has(m.mark_id)) continue;
     const kind: KnowledgeKind = m.feature_type === 'markup' ? 'excerpt' : 'annotation';
     const transcript = m.hmp?.text_hint?.trim();
-    // excerpt 正文=所标原文；annotation（手写/画）正文=识别出的手写转写，退回所标内容
-    const body = kind === 'excerpt' ? m.marked_text || '' : transcript || m.marked_text || '';
-    if (!body) continue; // 无正文无 quote = 无价值，不产 KO
+    // excerpt 正文=所标原文（空则无价值·跳）；annotation（手写/画）正文=识别文字，退回所标内容，
+    // **再退回占位**——纯图形/未识别手写也要产 KO，否则用户真画过的圈画在导出里无声消失（与会议侧 inkBody 同口径）。
+    const inkBody = (m.feature_type === 'drawing' ? '（图形标注 / 圈画）' : '（未识别手写）');
+    const body = kind === 'excerpt' ? m.marked_text || '' : transcript || (m.marked_text || '').trim() || inkBody;
+    if (!body) continue; // 仅 excerpt 无所标原文时为空→跳；annotation 永有占位正文（不丢手写）
     out.push(
       await finalize({
         stableKey: `mark:${document_id}:${m.mark_id}`,

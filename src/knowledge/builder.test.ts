@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { HMP, InferenceView, ScreenOverlay } from '../core/contracts';
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
-import { assembleKnowledgeObjects, type BuilderInput } from './builder';
-import { KO_SCHEMA_VERSION } from './knowledge-object';
+import { assembleKnowledgeObjects, type BuilderInput, enrichExportTags, finalize } from './builder';
+import { KO_SCHEMA_VERSION, type KnowledgeObject } from './knowledge-object';
 
 /* ── 合成账本工厂（只填 builder 真读的字段，重型嵌套类型给最小占位）──────── */
 
@@ -212,10 +212,20 @@ describe('KnowledgeBuilder', () => {
     expect(kos[0].render_hints?.markdown_callout).toBe('question');
   });
 
-  it('empty-content mark produces no KO', async () => {
+  it('empty-content markup(excerpt) produces no KO', async () => {
     const m = mark({ mark_id: 'm9', feature_type: 'markup', marked_text: '', hmp: null });
     const kos = await assembleKnowledgeObjects(input([m], []));
     expect(kos).toHaveLength(0);
+  });
+
+  it('纯图形/未识别手写仍产 annotation KO（占位正文·不丢手写·导出全量感知）', async () => {
+    const draw = mark({ mark_id: 'md', feature_type: 'drawing', marked_text: '', hmp: null });
+    const blank = mark({ mark_id: 'mh', feature_type: 'handwriting', marked_text: '', hmp: null });
+    const kos = await assembleKnowledgeObjects(input([draw, blank], []));
+    expect(kos).toHaveLength(2);
+    expect(kos.every((k) => k.kind === 'annotation')).toBe(true);
+    expect(kos.find((k) => k.provenance.mark_ids?.includes('md'))?.body_md).toBe('（图形标注 / 圈画）');
+    expect(kos.find((k) => k.provenance.mark_ids?.includes('mh'))?.body_md).toBe('（未识别手写）');
   });
 
   it('ko_id stable across rebuilds; content_hash flips when body changes', async () => {
@@ -291,5 +301,42 @@ describe('KnowledgeBuilder', () => {
     const [a] = await assembleKnowledgeObjects({ document_id: 'docA', document_title: 'A', marks: [mk], aiTurns: [] });
     const [b] = await assembleKnowledgeObjects({ document_id: 'docB', document_title: 'B', marks: [mk], aiTurns: [] });
     expect(a.ko_id).not.toBe(b.ko_id);
+  });
+});
+
+describe('enrichExportTags（导出边界·taxonomy 富化）', () => {
+  const koOf = (documentId: string, documentTitle: string, createdAt: string): Promise<KnowledgeObject> =>
+    finalize({
+      stableKey: `mark:${documentId}:m1`, kind: 'annotation', documentId, documentTitle,
+      objectRefs: ['r'], body: '一条手写', provenance: { created_from: 'mark', mark_ids: ['m1'] },
+      status: 'export_ready', createdAt,
+    });
+
+  it('reading：book/<标题slug> + date·既有标签不丢·ko_id 不变', async () => {
+    const ko = await koOf('doc_abc', '深入理解 计算机', '2026-06-29T10:00:00Z');
+    const e = await enrichExportTags(ko);
+    expect(e.ko_id).toBe(ko.ko_id); // ko_id 与 tags 无关·projection 链接仍有效
+    expect(e.tags).toEqual(['inkloop', 'inkloop/annotation', 'inkloop/reading', 'inkloop/book/深入理解-计算机', 'inkloop/date/2026-06-29']);
+  });
+
+  it('diary：实体 slug 用日期', async () => {
+    const e = await enrichExportTags(await koOf('diary_x', '6.29 日记', '2026-06-29T22:00:00Z'));
+    expect(e.tags).toContain('inkloop/diary');
+    expect(e.tags).toContain('inkloop/diary/2026-06-29');
+  });
+
+  it('content_hash 随富化重算·且自洽（去 hash 重算应一致·过对方 validator 同口径）', async () => {
+    const ko = await koOf('doc_abc', '书', '2026-06-29T10:00:00Z');
+    const e = await enrichExportTags(ko);
+    expect(e.content_hash).not.toBe(ko.content_hash); // tags 变 → hash 变
+    const e2 = await enrichExportTags(ko); // 幂等·确定性
+    expect(e2.content_hash).toBe(e.content_hash);
+  });
+
+  it('幂等 overrides：会议可显式覆盖 date（started_at 而非落笔时刻）', async () => {
+    const e = await enrichExportTags(await koOf('mtgdoc_m1', '周会', '2026-06-29T01:00:00Z'), { date: '2026-06-28' });
+    expect(e.tags).toContain('inkloop/meeting');
+    expect(e.tags).toContain('inkloop/date/2026-06-28');
+    expect(e.tags).not.toContain('inkloop/date/2026-06-29');
   });
 });

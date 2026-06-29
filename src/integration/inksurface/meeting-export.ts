@@ -13,7 +13,7 @@
 import { getMeeting, getCachedMinute, getFoldedMarksByContext } from '../../local/store';
 import { parseSrtTranscript } from '../panel-feishu/align';
 import { buildSegments, buildSegmentMarks, digestCacheKey, type RecapSegment } from '../panel-feishu/segment';
-import { finalize, clampNormBBox } from '../../knowledge/builder';
+import { finalize, clampNormBBox, enrichExportTags } from '../../knowledge/builder';
 import { pageIdFor } from '../../core/ids';
 import type { PersistedMeeting } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
@@ -175,8 +175,8 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     if (anchorBlock) anchorBlock.knowledge_object_ids = [...new Set([...anchorBlock.knowledge_object_ids, ko.ko_id])].sort();
   }
 
-  // ⑤ 过导出闸 + 信封。
-  const exportable = kos.filter(isExportableKo);
+  // ⑤ 过导出闸 + taxonomy 标签富化（待办1·mode=meeting/会议 slug/会议日期 都从 KO 自身派生·createdAt 已是会议日期）+ 信封。
+  const exportable = await Promise.all(kos.filter(isExportableKo).map((ko) => enrichExportTags(ko)));
   const skippedKoCount = kos.length - exportable.length;
   if (skippedKoCount) warnings.push(`${skippedKoCount} 个 KO 被导出闸挡掉（隐私/状态/空正文）`);
 

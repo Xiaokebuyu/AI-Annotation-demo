@@ -105,6 +105,18 @@ describe('assembleMeetingL1Export（会议→L1）', () => {
     }
   });
 
+  it('taxonomy 标签富化：每个会议 KO 带 mode/会议/日期维度（待办1 全量感知）', async () => {
+    const out = await assembleMeetingL1Export(input(), OPTS);
+    const koDate = new Date(T0).toISOString().slice(0, 10); // 会议日期=started_at（KO createdAt 同源）
+    expect(out.knowledgeExport.objects.length).toBeGreaterThan(0);
+    for (const ko of out.knowledgeExport.objects) {
+      expect(ko.tags).toContain('inkloop'); // 既有基线不丢
+      expect(ko.tags).toContain('inkloop/meeting'); // mode
+      expect(ko.tags).toContain('inkloop/meeting/架构评审-v4'); // 实体 slug·空格→连字符
+      expect(ko.tags).toContain(`inkloop/date/${koDate}`); // 跨模式时间连接
+    }
+  });
+
   it('确定性：同输入 + 同 generatedAt → 同 ko_id/hash', async () => {
     const a = await assembleMeetingL1Export(input(), OPTS);
     const b = await assembleMeetingL1Export(input(), OPTS);
