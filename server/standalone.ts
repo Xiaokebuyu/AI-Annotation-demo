@@ -57,11 +57,22 @@ const PANEL_FEISHU_BASE = (process.env.PANEL_FEISHU_BASE || '').replace(/\/+$/, 
 const INKLOOP_SHARED_SECRET = process.env.INKLOOP_SHARED_SECRET || '';
 async function handlePanelFeishu(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const send = (code: number, obj: unknown): void => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); };
-  if (req.method !== 'GET') return send(405, { error: 'GET only' });
-  if (!PANEL_FEISHU_BASE || !INKLOOP_SHARED_SECRET) return send(503, { error: 'PANEL_FEISHU_BASE / INKLOOP_SHARED_SECRET 未配置' });
+  const method = req.method || 'GET';
+  // GET=拉妙记/会议/转写；POST=写操作（bind-minute / 生成总结 / 日程回写）。panel 侧 requireInkloopSecret + 路由收敛兜底。
+  if (method !== 'GET' && method !== 'POST') return send(405, { error: 'GET/POST only' });
   const rest = (req.url || '').replace(/^\/api\/panel-feishu/, ''); // 含 query
+  // 白名单：只放行设备真用的端点（防 confused-deputy——代理替前端带 secret，别让任意 POST 打到非预期端点）。
+  const apath = (rest || '/').split('?')[0];
+  const allowed = method === 'GET'
+    ? (/^\/meetings\/[^/]+$/.test(apath) || /^\/meetings\/[^/]+\/summary$/.test(apath) || /^\/minutes\/[A-Za-z0-9_-]+(?:\/transcript)?$/.test(apath) || /^\/oauth\/status$/.test(apath))
+    : /^\/meetings\/[^/]+\/(?:bind-minute|summary)$/.test(apath);
+  if (!allowed) return send(403, { error: 'path not allowed' });
+  if (!PANEL_FEISHU_BASE || !INKLOOP_SHARED_SECRET) return send(503, { error: 'PANEL_FEISHU_BASE / INKLOOP_SHARED_SECRET 未配置' });
   try {
-    const r = await fetch(`${PANEL_FEISHU_BASE}/api/feishu${rest}`, { headers: { 'x-inkloop-secret': INKLOOP_SHARED_SECRET } });
+    const headers: Record<string, string> = { 'x-inkloop-secret': INKLOOP_SHARED_SECRET };
+    let body: string | undefined;
+    if (method === 'POST') { body = await readBody(req); headers['content-type'] = String(req.headers['content-type'] || 'application/json'); } // readBody 一次性 decode·中文安全
+    const r = await fetch(`${PANEL_FEISHU_BASE}/api/feishu${rest}`, { method, headers, body });
     const text = await r.text();
     res.statusCode = r.status;
     res.setHeader('content-type', r.headers.get('content-type') || 'application/json');

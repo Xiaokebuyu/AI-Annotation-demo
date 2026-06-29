@@ -14,14 +14,15 @@ import { flushRegion } from '../app/annotation-loop';
 import { flushBedrock } from '../local/bedrock-recorder';
 import { createPager, mountPagerBar, type Pager, type PagerBar } from '../surface/virtual-pager';
 import {
-  listWorkspaces, listAllMeetings, getWorkspace, listMeetings, createWorkspace,
+  listWorkspaces, listAllMeetings, getWorkspace, listMeetings,
   createMeeting, getMeeting, updateMeeting, getFoldedMarks, getFoldedMarksByContext, listBooks, upsertFeishuWorkspace, startSimMeeting,
-  createDiaryDoc, renameDiary, setActiveDoc, setLastReadPage, getDoc,
+  createDiaryDoc, renameDiary, setActiveDoc, setLastReadPage, getDoc, upsertPanelWorkspace,
 } from '../local/store';
 import { esc } from '../core/escape';
-import { infoSheet, promptSheet, formSheet, pickSheet } from './sheet';
+import { infoSheet, formSheet, pickSheet } from './sheet';
 import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting, resetRecapView, recapHandleBack } from './meeting-recap';
 import type { MeetingStatus, PersistedMeeting, PersistedWorkspace, PersistedDoc, PersistedMark } from '../core/store-format';
+import { pollPanelMeetingEvents, listActivePanelMeetings, type PanelFeishuMeeting } from '../integration/panel-feishu/client';
 
 // ── 飞书后端（feishu-service）+ 文档转换（convert-service）：同 web 默认端口；服务不在则静默退回纯本地 ──
 const FEISHU_BASE = ((import.meta.env.VITE_FEISHU_BASE_URL as string | undefined) ?? 'http://localhost:4321').replace(/\/+$/, '');
@@ -32,7 +33,7 @@ async function feishuGet<T>(path: string): Promise<T | null> {
 }
 
 interface FeishuMsg { message_id: string; msg_type: string; sender_id?: string; create_time?: string; text?: string; file_name?: string; file_key?: string; image_key?: string; }
-interface FeishuEvent { event_id: string; summary?: string; start_time?: { timestamp?: string; date?: string }; recurring?: boolean }
+interface FeishuEvent { event_id: string; summary?: string; start_time?: { timestamp?: string; date?: string }; end_time?: { timestamp?: string }; recurring?: boolean; has_meeting?: boolean; vchat?: { meeting_url?: string; vc_type?: string } | null }
 const isConvertible = (f: FeishuMsg): boolean => f.msg_type === 'file' && /\.html?$/i.test(f.file_name || '');
 function feishuFileUrl(f: FeishuMsg): string {
   const img = f.msg_type === 'image';
@@ -124,8 +125,75 @@ function pageMbody(viewEl: HTMLElement, key: string, land: 'first' | 'keep' = 'f
   mtgPagers.set(key, pager);
 }
 
+// ════ L1：panel 飞书会议同步（VC all_meeting_started/ended → 本地会议·带真 t0）════
+const PANEL_CURSOR_KEY = 'inkloop.panelMeeting.cursor.v1';
+const panelUpserts = new Map<string, Promise<void>>(); // 按 meeting_id 串行·防 events+active 并发同一会议重复建
+
+/** panel 会议 → 落成本地会议。靠 feishu_meeting_id 幂等去重·同一 meeting_id 串行（防并发重复建）。 */
+async function upsertPanelMeeting(mt: PanelFeishuMeeting, type: 'started' | 'ended'): Promise<void> {
+  if (!mt.meeting_id) return;
+  const key = mt.meeting_id;
+  const prev = panelUpserts.get(key) ?? Promise.resolve();
+  const job = prev.catch(() => {}).then(() => upsertPanelMeetingInner(mt, type)).finally(() => {
+    if (panelUpserts.get(key) === job) panelUpserts.delete(key);
+  });
+  panelUpserts.set(key, job);
+  await job;
+}
+
+async function upsertPanelMeetingInner(mt: PanelFeishuMeeting, type: 'started' | 'ended'): Promise<void> {
+  const existing = (await listAllMeetings()).find((x) => x.feishu_meeting_id === mt.meeting_id);
+  const existingWs = existing ? await getWorkspace(existing.workspace_id) : null;
+  // C：start_time 缺失时**不伪装成真会议 t0**——优先已存真 t0，否则只拿同步时刻占位（不标 vc_event）。
+  const hasRealStart = typeof mt.start_time === 'number' && Number.isFinite(mt.start_time);
+  const realT0 = hasRealStart ? mt.start_time! : (typeof existing?.vc_meeting_start_t0 === 'number' ? existing.vc_meeting_start_t0 : 0);
+  const startMs = realT0 || Date.now();
+  const startIso = new Date(startMs).toISOString();
+  const endMs = typeof mt.end_time === 'number' && mt.end_time > 0 ? mt.end_time : 0;
+  // B：无 group_ids 不建飞书伪群（renderWs 拉 members 必失败），落 manual「飞书会议」桶；已在真群则复用。
+  const ws = mt.group_ids?.[0]
+    ? await upsertFeishuWorkspace(mt.group_ids[0], mt.topic || existingWs?.name || '飞书会议')
+    : (existingWs && existingWs.source === 'feishu' ? existingWs : await upsertPanelWorkspace('飞书会议'));
+  const base = existing ?? await createMeeting(ws.workspace_id, { title: mt.topic || '飞书会议', scheduled_at: startIso });
+  const ended = type === 'ended' || endMs > 0;
+  await updateMeeting(base.meeting_id, {
+    workspace_id: ws.workspace_id,                 // 迁移到正确 workspace（无群→manual·后续拿到真群→迁真群）
+    title: mt.topic || base.title,
+    scheduled_at: startIso,
+    status: ended ? 'ended' : 'live',
+    started_at: startIso,
+    ...(endMs ? { ended_at: new Date(endMs).toISOString() } : {}),
+    feishu_meeting_id: mt.meeting_id,
+    feishu_meeting_no: mt.meeting_no,
+    feishu_topic: mt.topic,
+    // C：只有真 start_time（或已存真 t0）才标 vc_event；否则 t0 是同步兜底·诚实标 uncalibrated·不假装精确。
+    ...(realT0
+      ? { vc_meeting_start_t0: realT0, t0_source: 'vc_event', align_state: 'event', panel_meeting_start: realT0 }
+      : { t0_source: 'local_enter', align_state: 'uncalibrated' }),
+    ...(mt.minute_token ? { feishu_minute_token: mt.minute_token } : {}),
+    ...(mt.minute_url ? { feishu_minute_url: mt.minute_url } : {}),
+  });
+  // 正在会中这场 → 热更 t0（仅当有真 t0·事件迟到/补发时不丢时间脊基准）
+  if (liveMtg && liveMtg.id === base.meeting_id && realT0) {
+    liveMtg.startedAt = realT0;
+    startClock();
+    void refreshSpine();
+  }
+}
+
+/** 拉 panel 增量会议事件 + 进行中快照，落成本地会议。失败静默（不阻断 home·退回纯本地）。 */
+async function syncPanelMeetings(): Promise<void> {
+  const since = Number(localStorage.getItem(PANEL_CURSOR_KEY) || 0) || 0;
+  const feed = await pollPanelMeetingEvents(since);
+  for (const ev of feed.events) await upsertPanelMeeting(ev.meeting, ev.type);
+  if (feed.cursor && feed.cursor !== since) localStorage.setItem(PANEL_CURSOR_KEY, String(feed.cursor));
+  // 无 cursor / 迟到打开：补进行中会议（active·12h 内未结束）
+  for (const mt of await listActivePanelMeetings()) await upsertPanelMeeting(mt, 'started');
+}
+
 // ════ home：日程时间线 + 群聊书架 ════
 async function renderHome(): Promise<void> {
+  await syncPanelMeetings().catch(() => {}); // L1：先把 panel 飞书会议拉成本地会议，再聚合渲染
   // 飞书群 → 幂等同步成工作区
   const wsRes = await feishuGet<{ workspaces: Array<{ chat_id: string; name: string; chat_status: string }> }>('/api/feishu/workspaces');
   if (wsRes) for (const w of wsRes.workspaces || []) if (w.chat_status === 'normal') await upsertFeishuWorkspace(w.chat_id, w.name);
@@ -151,21 +219,16 @@ async function renderHome(): Promise<void> {
     || (tl ? '' : `<p class="empty">还没接飞书日历，本地也没有会议。进群聊「+ 新建会议」。</p>`);
   const wsGrid = workspaces.length
     ? `<div class="ws-grid">${workspaces.map((w) => wsCard(w, count.get(w.workspace_id) ?? 0)).join('')}</div>`
-    : `<p class="empty">还没有群聊。点右上「新建群聊」（接飞书后从群自动汇入）。</p>`;
+    : `<p class="empty">还没有群聊。机器人所在的飞书群会自动同步进来。</p>`;
 
   el('mv-home').innerHTML =
     `<div class="vhead"><h1>会议</h1><span class="cnt">${workspaces.length} 群 · ${allMeetings.length} 场</span><span class="sp"></span>`
-    + `<button class="hbtn" id="mh-sim">模拟会议</button><button class="hbtn pri" id="mh-new-ws">+ 新建群聊</button></div>`
+    + `<button class="hbtn" id="mh-sim">模拟会议</button></div>`
     + `<div class="mbody">`
     + `<section class="msec"><div class="msec-h"><span class="mt">会议日程</span><span class="mb">飞书 + 本地 · 待开始/进行中</span>${fsOk}</div>${tl}${schedRows}</section>`
     + `<section class="msec"><div class="msec-h"><span class="mt">群聊书架</span><span class="mb">以群聊为单位</span></div>${wsGrid}</section>`
     + `</div>`;
 
-  el('mv-home').querySelector('#mh-new-ws')?.addEventListener('click', async () => {
-    const name = await promptSheet({ title: '新建群聊 / 工作区', placeholder: '群聊或工作区名称', confirm: '创建' });
-    if (name == null || !name) return;
-    await createWorkspace(name); void renderHome();
-  });
   el('mv-home').querySelector('#mh-sim')?.addEventListener('click', async () => {
     const m = await startSimMeeting();
     if (!m) { await infoSheet({ title: '模拟会议', message: '先连一个飞书群（机器人所在群会自动同步成工作区）再开模拟会议。' }); return; }
@@ -181,7 +244,8 @@ function timeline(events: FeishuEvent[]): string {
   const today = fsDayLabel(Date.now()).split(' · ').pop() || '';
   const cards = events.slice(0, 6).map((e) => {
     const ms = fsEventWhen(e);
-    return `<div class="tl-card"><div class="d">${esc(fsDayLabel(ms))}</div><div class="t">${esc(fsHHMM(ms))}</div><div class="n">${esc(e.summary || '(无标题日程)')}</div><span class="bd">${e.recurring ? '每周' : '单次'}</span></div>`;
+    const badge = e.has_meeting ? '📹 会议' : (e.recurring ? '每周' : '单次'); // L2：区分视频会议日程 vs 普通日程
+    return `<div class="tl-card${e.has_meeting ? ' tl-meet' : ''}"><div class="d">${esc(fsDayLabel(ms))}</div><div class="t">${esc(fsHHMM(ms))}</div><div class="n">${esc(e.summary || '(无标题日程)')}</div><span class="bd">${badge}</span></div>`;
   }).join('');
   const more = events.length > 6 ? `<div class="tl-more">还有 ${events.length - 6} 场 ›</div>` : '';
   return `<div class="tl"><div class="tl-now"><span class="d"></span><span class="l">今天<br>${esc(today)}</span></div>${cards}${more}</div>`;
@@ -453,10 +517,14 @@ async function enterMeeting(mtgId: string, material?: { docId: string; name: str
   const m = await getMeeting(mtgId);
   if (!m) return;
   const ws = await getWorkspace(m.workspace_id);
-  const startedIso = m.started_at ?? new Date().toISOString();
-  // 已结束=回看模式：不复活成 live、时钟冻结在会议时长。只有 upcoming/缺 started_at 才置 live + 落开始墙钟。
+  // t0 优先级：vc 会议事件真 start_time（L1·迟到进入也按真会议起点对·非本机进入时刻）→ 已存 started_at → 本机现在
+  const vcT0 = typeof m.vc_meeting_start_t0 === 'number' && Number.isFinite(m.vc_meeting_start_t0) ? m.vc_meeting_start_t0 : 0;
+  const startedIso = vcT0 ? new Date(vcT0).toISOString() : (m.started_at ?? new Date().toISOString());
+  // 已结束=回看模式：不复活成 live、时钟冻结在会议时长。只有 upcoming/缺 started_at/有真 t0 才置 live + 落开始墙钟。
   const reviewing = m.status === 'ended';
-  if (!reviewing && (m.status !== 'live' || !m.started_at)) await updateMeeting(mtgId, { status: 'live', started_at: startedIso });
+  if (!reviewing && (m.status !== 'live' || !m.started_at || vcT0)) {
+    await updateMeeting(mtgId, { status: 'live', started_at: startedIso, ...(vcT0 ? { t0_source: 'vc_event', align_state: 'event' } : {}) });
+  }
   const startedMs = new Date(startedIso).getTime();
   const endedMs = reviewing && m.ended_at ? new Date(m.ended_at).getTime() : 0;
   liveMtg = { id: mtgId, title: m.title, chatId: ws?.feishu_chat_id, startedAt: startedMs, frozenAt: endedMs || (reviewing ? startedMs : 0) };
@@ -626,5 +694,13 @@ export function initMobileMeeting(opts: { readerCtx: SurfaceContext }): void {
   });
 
   // 白板新标注 → 刷新计数（会中时）。document:loaded=进会议还原后首刷。
-  bus.on('mark:resolved', () => { if (liveMtg) { liveMarkCount += 1; el('mtg-chip-n').textContent = `${liveMarkCount} 笔`; if (!el('mtg-spine').hidden) void refreshSpine(); } });
+  // 计数即时更新；时间脊重建去抖（普通笔逐笔发 mark:resolved，连续手写别逐笔重建 spine·过刷电纸屏）。
+  let spineRefreshTimer = 0;
+  bus.on('mark:resolved', () => {
+    if (!liveMtg) return;
+    liveMarkCount += 1; el('mtg-chip-n').textContent = `${liveMarkCount} 笔`;
+    if (el('mtg-spine').hidden) return;
+    clearTimeout(spineRefreshTimer);
+    spineRefreshTimer = window.setTimeout(() => void refreshSpine(), 800);
+  });
 }

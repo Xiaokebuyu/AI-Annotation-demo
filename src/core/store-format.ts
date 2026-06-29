@@ -36,7 +36,7 @@ export interface PersistedPdfBlob {
 
 /** 一笔的低成本序列：归一化点串 + 工具（redraw 据此还原原貌、保多笔保真）。 */
 export interface PersistedStroke {
-  tool: 'pen' | 'highlighter' | 'eraser' | 'hand';
+  tool: 'pen' | 'aipen' | 'highlighter' | 'eraser' | 'hand';
   points: StrokePoint[];
   anchor_runs?: string[];           // 位置真相锚（逐笔）：该笔落笔时命中重排块的 source run ids → 重投影时各笔认各自的块（多笔手写跨段不被拉拢/塌缩·恒等）。仅重排落笔有；原版/老条目缺=undefined
 }
@@ -94,6 +94,8 @@ export interface PersistedMark extends BaseEntry {
   scored_score: number;
   hmp: HMP | null;                 // 取证（落库前剥掉 crop_ref/vector_ref，存料不存图）
   marked_text: string;             // 落笔当时解析好的"所标内容"
+  ai_eligible?: boolean;           // 笔触划分（Phase P）：是否进 AI 管线。false=普通笔/荧光纯内容（不识别/不答问/不进 pending session）；true/缺=AI 笔触或旧自动判意（reload 仍可综合）。getPendingMarks 据此排除内容笔
+  origin?: 'pen' | 'ai_pen' | 'highlighter' | 'auto'; // 来源：普通笔 / AI 笔 / 荧光 / 自动判意模式。诊断+将来策略用；缺=旧条目
   raw_ref?: RawRef;                // → 基岩录像的对应段+seq 区间（仅 features/settings.bedrock 开时有；老条目缺=undefined）
   reflow_anchor_runs?: string[];   // 位置真相锚：重排面落笔时所在重排块的 source run ids → 重投影时认它定段（恒等·不靠坐标猜）。仅重排落笔有；原版落笔/老条目缺=undefined（退 nearestBlockByBbox 近似）
   is_tombstone: boolean;           // true = 本条擦除 mark_id（append-only，不就地删）
@@ -138,6 +140,23 @@ export interface PersistedWorkspace {
 
 export type MeetingStatus = 'upcoming' | 'live' | 'ended'; // 待开始 / 进行中 / 已结束
 
+/** L5：panel 飞书会议五要素总结（「会议讲了什么」·和本地手写 recap「我何时写了什么」互补）。 */
+export interface PanelMeetingSummaryFive {
+  conclusions: string[];
+  action_items: Array<{ task: string; owner: string; due?: string; evidence?: string }>;
+  risks: string[];
+  open_questions: string[];
+  next_steps: string[];
+}
+export interface PanelMeetingSummaryRecord {
+  minute_token: string;
+  meeting_id?: string;
+  topic?: string;
+  generated_at: number;        // epoch ms
+  model?: string;
+  summary: PanelMeetingSummaryFive;
+}
+
 /** 一场会议：属某 workspace，引用资料（已导入书的 document_id），会后留手写档案 + 思路总结。 */
 export interface PersistedMeeting {
   meeting_id: string;               // 'mtg_'+shortId
@@ -155,14 +174,20 @@ export interface PersistedMeeting {
   feishu_topic?: string;            // 关联的飞书会议主题（卡片显示·便于用户核对没关错）
   feishu_minute_token?: string;     // 妙记 token（拉转写用）
   feishu_minute_url?: string;       // 妙记页 url
-  panel_meeting_start?: number;     // panel 会议 start_time（epoch ms·≠录音起点）
-  feishu_recording_t0?: number;     // 录音 t0 绝对墙钟（epoch ms·当前用 panel start 近似·真值待 vc 事件）
+  panel_meeting_start?: number;     // panel 会议 start_time（epoch ms·≠录音起点·保留 raw 供核对/兜底）
+  vc_meeting_start_t0?: number;     // vc all_meeting_started.start_time（epoch ms·会议开始·L1 真 t0 来源）
+  feishu_recording_t0?: number;     // 真录音 t0 绝对墙钟（epoch ms）；旧数据可能装过 panel start 近似（兼容读·见 recapT0）
+  t0_source?: 'local_enter' | 'panel_start' | 'vc_event' | 'recording_event' | 'manual'; // t0 来源（会中用会议 t0·会后优先录音 t0·诚实标注）
   align_offset_ms?: number;         // 用户/启发式微调（cueAbs = t0 + offset + cue 相对）
-  align_state?: 'uncalibrated' | 'approx' | 'manual'; // 校准状态（UI 明示·防假精确）
+  align_state?: 'uncalibrated' | 'approx' | 'event' | 'manual'; // 校准状态（event=会议事件 t0·录音残差未消除·UI 明示防假精确）
   feishu_match_confirmed_at?: string; // 用户确认关联的时刻
   summary_generated_at?: string;    // summary 生成时刻（防 stale）
   summary_source?: { feishu_minute_token?: string; align_offset_ms?: number; mark_count: number; cue_count: number; transcript_truncated?: boolean; used_cue_count?: number };
   segment_digests?: Record<string, string>; // WS2-C V2：active 段一句话 AI 摘要缓存（键＝段 cueHash·内容变即换键失效·旧键残留无害）。零迁移 optional
+  // ── L5 panel 总结缓存（recap 顶部显示·离线不丢·optional 零迁移）──
+  panel_summary?: PanelMeetingSummaryRecord;
+  panel_summary_fetched_at?: string;
+  panel_summary_status?: 'ready' | 'not_generated' | 'missing_minute' | 'failed';
   created_at: string;
   updated_at: string;
 }

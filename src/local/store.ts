@@ -244,6 +244,38 @@ export async function listDiaries(): Promise<PersistedDoc[]> {
     .sort((a, b) => (b.saved_at || '').localeCompare(a.saved_at || ''));
 }
 
+/** dev 页可下钻的全部文档（书/日记/会议白板/其它）——按 kind 标注、最近倒序。
+ *  dev 通道原只列 listBooks()，日记/会议（无 PDF 字节）选不到；本函数让三类都进选择器。 */
+export type InspectableKind = 'book' | 'diary' | 'meeting' | 'other';
+export interface InspectableDoc { document_id: string; filename: string; kind: InspectableKind; saved_at: string }
+export async function listInspectableDocs(): Promise<InspectableDoc[]> {
+  const db = await openDB();
+  if (!db) return [];
+  const [docs, blobIds] = await Promise.all([
+    new Promise<PersistedDoc[]>((resolve) => {
+      try {
+        const r = db.transaction(STORE, 'readonly').objectStore(STORE).getAll();
+        r.onsuccess = () => resolve((r.result as PersistedDoc[]) ?? []);
+        r.onerror = () => resolve([]);
+      } catch { resolve([]); }
+    }),
+    new Promise<Set<string>>((resolve) => {
+      try {
+        const r = db.transaction(PDF_STORE, 'readonly').objectStore(PDF_STORE).getAllKeys();
+        r.onsuccess = () => resolve(new Set((r.result as string[]) ?? []));
+        r.onerror = () => resolve(new Set());
+      } catch { resolve(new Set()); }
+    }),
+  ]);
+  const kindOf = (d: PersistedDoc): InspectableKind =>
+    blobIds.has(d.document_id) ? 'book'
+      : d.document_id.startsWith('diary') ? 'diary'
+        : d.document_id.startsWith('mtgboard_') ? 'meeting' : 'other';
+  return docs
+    .map((d) => ({ document_id: d.document_id, filename: d.filename || '(未命名)', kind: kindOf(d), saved_at: d.saved_at || '' }))
+    .sort((a, b) => b.saved_at.localeCompare(a.saved_at));
+}
+
 /** 删除一篇日记：移除 doc 记录 + 它在各账本（marks/ai_turns/基岩段+块）的所有条目。
  *  删的是当前活跃文档则连 saveTimer 一起清，防去抖回写把已删文档复活。 */
 export async function deleteDiary(documentId: string): Promise<void> {
@@ -422,10 +454,12 @@ export async function getFoldedMarksByContext(contextId: string): Promise<Persis
   return foldMarks(await entriesByContext<PersistedMark>(MARKS, contextId));
 }
 
-/** 未综合的 mark（seq > 当前书水位线）：reload 重建 pending session。 */
+/** 未综合的 mark（seq > 当前书水位线）：reload 重建 pending session。
+ *  排除 ai_eligible===false 的内容笔（Phase P 普通笔=纯内容）——否则 reload 后普通墨被塞回 pending、
+ *  下次 idle 误当 AI 笔综合。老条目无此字段(undefined)按旧行为保留。 */
 export async function getPendingMarks(documentId: string): Promise<PersistedMark[]> {
   const wm = current?.synthesis_watermark_seq ?? -1;
-  return (await getFoldedMarks(documentId)).filter((m) => m.seq > wm);
+  return (await getFoldedMarks(documentId)).filter((m) => m.seq > wm && m.ai_eligible !== false);
 }
 
 /** 按 id 取一本书的记录（只读，不挂 current）。KnowledgeBuilder 等派生投影按 documentId 取书目元（如 filename 当标题）。 */
@@ -598,6 +632,17 @@ export async function upsertFeishuWorkspace(chatId: string, name: string): Promi
   if (cur && cur.name === name && cur.source === 'feishu') return cur;
   const now = new Date().toISOString();
   const ws: PersistedWorkspace = { workspace_id: id, name: name.trim() || '未命名群聊', source: 'feishu', feishu_chat_id: chatId, created_at: cur?.created_at ?? now, updated_at: now };
+  await putInto(WORKSPACES, ws);
+  return ws;
+}
+
+/** 无群飞书会议的兜底工作区（manual·不带 feishu_chat_id → renderWs 不会去拉群 members/messages 而失败）。 */
+export async function upsertPanelWorkspace(name = '飞书会议'): Promise<PersistedWorkspace> {
+  const id = 'ws_panel_meetings';
+  const cur = await getOneFrom<PersistedWorkspace>(WORKSPACES, id);
+  if (cur && cur.source === 'manual') return cur;
+  const now = new Date().toISOString();
+  const ws: PersistedWorkspace = { workspace_id: id, name: name.trim() || '飞书会议', source: 'manual', created_at: cur?.created_at ?? now, updated_at: now };
   await putInto(WORKSPACES, ws);
   return ws;
 }
