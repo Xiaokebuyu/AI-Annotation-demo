@@ -22,6 +22,7 @@ import { features } from './config/features';
 import { initMobileMeeting } from './mobile/meeting';
 import { initMobileDev } from './mobile/dev';
 import { initMobileShell } from './mobile/shell';
+import { createPager, mountPagerBar, type Pager, type PagerBar } from './surface/virtual-pager';
 import type { PersistedDoc } from './core/store-format';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -342,19 +343,26 @@ bus.on('reader:vpage', updatePageInd); // 重排虚拟页翻动/重排落地 →
 
 // ════ 日记列表（真数据） ════
 const WK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+// 日记列表虚拟翻页（电纸屏：禁滚 + ‹ › 翻页）——共享 virtual-pager 引擎
+let diaryPager: Pager | null = null;
+let diaryBar: PagerBar | null = null;
 async function renderDiaryList(): Promise<void> {
-  const body = el('rv-diary').querySelector('.vbody');
+  const body = el('rv-diary').querySelector<HTMLElement>('.vbody');
   const cnt = el('rv-diary').querySelector('.cnt');
   if (!body) return;
+  const pager = diaryPager ?? (diaryPager = createPager(body, { onChange: (i) => diaryBar?.update(i) }));
+  if (!diaryBar) diaryBar = mountPagerBar(pager, el('rv-diary'));
+  const host = pager.content;
   const diaries = await listDiaries();
   if (cnt) cnt.textContent = `${diaries.length} 篇`;
-  body.textContent = '';
+  host.textContent = '';
   if (!diaries.length) {
     const e = document.createElement('div');
     e.className = 'recent-empty';
     e.style.cssText = 'padding:24px 8px;color:var(--mut2);font-size:13px;';
     e.textContent = '还没有日记。点左侧「新日记」开一篇。';
-    body.appendChild(e);
+    host.appendChild(e);
+    pager.relayout('keep');
     return;
   }
   for (const doc of diaries) {
@@ -373,8 +381,9 @@ async function renderDiaryList(): Promise<void> {
       const ok = await confirmSheet({ title: '删除日记', message: `「${doc.filename || '未命名'}」及其全部手写会删掉，不可恢复。`, confirm: '删除' });
       if (ok) { await deleteDiary(doc.document_id); void renderDiaryList(); }
     });
-    body.appendChild(row);
+    host.appendChild(row);
   }
+  pager.relayout('keep');
 }
 // 切到「日记」时刷新列表。
 el('read-sub').querySelector<HTMLElement>('[data-read="diary"]')?.addEventListener('click', () => void renderDiaryList());
