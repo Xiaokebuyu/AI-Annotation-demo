@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { HMP, InferenceView, ScreenOverlay } from '../core/contracts';
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
-import { assembleKnowledgeObjects, type BuilderInput, enrichExportTags, finalize } from './builder';
+import { assembleKnowledgeObjects, type BuilderInput, enrichExportTags, finalize, INK_PLACEHOLDER_DRAWING, INK_PLACEHOLDER_HANDWRITING, isInkPlaceholderBody } from './builder';
 import { KO_SCHEMA_VERSION, type KnowledgeObject } from './knowledge-object';
 
 /* ── 合成账本工厂（只填 builder 真读的字段，重型嵌套类型给最小占位）──────── */
@@ -338,5 +338,29 @@ describe('enrichExportTags（导出边界·taxonomy 富化）', () => {
     expect(e.tags).toContain('inkloop/meeting');
     expect(e.tags).toContain('inkloop/date/2026-06-28');
     expect(e.tags).not.toContain('inkloop/date/2026-06-29');
+  });
+});
+
+describe('isInkPlaceholderBody（笔迹占位判定·vault 过渡过滤用）', () => {
+  it('恰为占位串 → true', () => {
+    expect(isInkPlaceholderBody(INK_PLACEHOLDER_DRAWING)).toBe(true);
+    expect(isInkPlaceholderBody(INK_PLACEHOLDER_HANDWRITING)).toBe(true);
+  });
+  it('真内容 → false', () => {
+    expect(isInkPlaceholderBody('梅雨是什么时候')).toBe(false);
+    expect(isInkPlaceholderBody('')).toBe(false);
+  });
+  it('会议占位带时间后缀 → false（不误伤会议手记）', () => {
+    expect(isInkPlaceholderBody(`${INK_PLACEHOLDER_DRAWING}　（约 3:21 处手写）`)).toBe(false);
+  });
+  it('builder 给纯图形 mark 产的占位 KO 能被判定命中（防字段名漂移：body_md）', async () => {
+    const m: PersistedMark = {
+      mark_id: 'm-draw', document_id: 'd', page_id: 'p0', page_index: 0,
+      feature_type: 'drawing', marked_text: '', created_at: '2026-06-29T00:00:00Z',
+    } as unknown as PersistedMark;
+    const kos = await assembleKnowledgeObjects({ document_id: 'd', document_title: 'D', marks: [m], aiTurns: [] } as BuilderInput);
+    const placeholder = kos.find((k) => k.kind === 'annotation');
+    expect(placeholder?.body_md).toBe(INK_PLACEHOLDER_DRAWING);
+    expect(isInkPlaceholderBody(placeholder!.body_md)).toBe(true);
   });
 });

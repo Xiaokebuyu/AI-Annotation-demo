@@ -12,9 +12,21 @@ import { buildL1Export } from './index';
 import { buildMeetingL1Export } from './meeting-export';
 import { assembleVaultBundle, type EntityExport, type VaultExportBundle } from './vault-export';
 import { entityModeOf } from './vault-layout';
+import { isInkPlaceholderBody } from '../../knowledge/builder';
 
 function nonEmpty(ex: { knowledgeExport: { objects: unknown[] }; documentProjections: { document_projections: unknown[] } }): boolean {
   return ex.knowledgeExport.objects.length > 0 || ex.documentProjections.document_projections.length > 0;
+}
+
+/**
+ * ⚠️过渡过滤（笔迹重现 SVG 上线即移除）：丢掉内容为空的笔迹占位 KO（纯涂鸦圈画 / 未识别手写·body_md 恰为占位串）。
+ * 否则空白页涂鸦在 Obsidian 刷屏（实测一篇日记 100+ 个占位淹没真内容）。笔迹仍在账本·不丢·将来渲成墨迹再恢复。
+ * 在 nonEmpty 判定**之前**过滤 → 纯涂鸦实体（过滤后无 KO 且无 projection）自然跳过、不留空壳。
+ * 会议侧 body=占位+「（约 X 处手写）」带时间上下文·不恰等占位·不命中·不误伤。详见记忆 inkloop-obsidian-clean-vault。
+ */
+function dropInkPlaceholders<T extends { knowledgeExport: { objects: { body_md: string }[] } }>(ex: T): T {
+  ex.knowledgeExport.objects = ex.knowledgeExport.objects.filter((ko) => !isInkPlaceholderBody(ko.body_md));
+  return ex;
 }
 
 export async function collectVaultBundle(
@@ -28,19 +40,19 @@ export async function collectVaultBundle(
     // listBooks 含会议资料 PDF（mtgdoc_<会议>_<msg> 也有 blob）——它们由会议导出覆盖（marks 在 mtg_ 上下文）；
     // 这里只收真书（entityModeOf==='reading'），否则会落错夹（Reading vs meeting 标签）+ 双重导出。
     if (entityModeOf(b.document_id) !== 'reading') continue;
-    const ex = await buildL1Export(b.document_id, o);
+    const ex = dropInkPlaceholders(await buildL1Export(b.document_id, o));
     if (nonEmpty(ex)) {
       exports.push({ mode: 'reading', documentId: b.document_id, documentTitle: b.filename || b.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: b.saved_at, warnings: ex.warnings });
     }
   }
   for (const d of await listDiaries()) {
-    const ex = await buildL1Export(d.document_id, o);
+    const ex = dropInkPlaceholders(await buildL1Export(d.document_id, o));
     if (nonEmpty(ex)) {
       exports.push({ mode: 'diary', documentId: d.document_id, documentTitle: d.filename || d.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: d.saved_at, warnings: ex.warnings });
     }
   }
   for (const m of await listAllMeetings()) {
-    const ex = await buildMeetingL1Export(m.meeting_id, o);
+    const ex = dropInkPlaceholders(await buildMeetingL1Export(m.meeting_id, o));
     if (nonEmpty(ex)) {
       exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings });
     }

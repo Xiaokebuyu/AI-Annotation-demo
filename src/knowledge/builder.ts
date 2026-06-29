@@ -183,6 +183,14 @@ export async function enrichExportTags(
   return next;
 }
 
+/** 纯图形/未识别手写的占位正文（无文字可 OCR、无所标内容）——单一真相源（builder + meeting-export 共用）。 */
+export const INK_PLACEHOLDER_DRAWING = '（图形标注 / 圈画）';
+export const INK_PLACEHOLDER_HANDWRITING = '（未识别手写）';
+/** 该正文是否只是内容为空的笔迹占位（body 恰等于占位串）。
+ *  vault 导出在「笔迹重现(SVG)」上线前据此过滤掉这类占位（否则空白页涂鸦在 Obsidian 刷屏·见记忆 inkloop-obsidian-clean-vault）。
+ *  ⚠️只判恰等——会议侧 body=占位+「（约 X 处手写）」带时间上下文·不命中·不过滤。笔迹仍在账本·不丢·将来渲成墨迹。 */
+export const isInkPlaceholderBody = (body: string): boolean => body === INK_PLACEHOLDER_DRAWING || body === INK_PLACEHOLDER_HANDWRITING;
+
 /* ── 纯转换核心 ──────────────────────────────────────────────────────────── */
 
 /**
@@ -237,7 +245,7 @@ export async function assembleKnowledgeObjects(input: BuilderInput): Promise<Kno
     const transcript = m.hmp?.text_hint?.trim();
     // excerpt 正文=所标原文（空则无价值·跳）；annotation（手写/画）正文=识别文字，退回所标内容，
     // **再退回占位**——纯图形/未识别手写也要产 KO，否则用户真画过的圈画在导出里无声消失（与会议侧 inkBody 同口径）。
-    const inkBody = (m.feature_type === 'drawing' ? '（图形标注 / 圈画）' : '（未识别手写）');
+    const inkBody = (m.feature_type === 'drawing' ? INK_PLACEHOLDER_DRAWING : INK_PLACEHOLDER_HANDWRITING);
     const body = kind === 'excerpt' ? m.marked_text || '' : transcript || (m.marked_text || '').trim() || inkBody;
     if (!body) continue; // 仅 excerpt 无所标原文时为空→跳；annotation 永有占位正文（不丢手写）
     out.push(

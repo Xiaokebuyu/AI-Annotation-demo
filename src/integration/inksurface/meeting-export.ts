@@ -13,7 +13,7 @@
 import { getMeeting, getCachedMinute, getFoldedMarksByContext } from '../../local/store';
 import { parseSrtTranscript } from '../panel-feishu/align';
 import { buildSegments, buildSegmentMarks, digestCacheKey, type RecapSegment } from '../panel-feishu/segment';
-import { finalize, clampNormBBox, enrichExportTags } from '../../knowledge/builder';
+import { finalize, clampNormBBox, enrichExportTags, INK_PLACEHOLDER_DRAWING, INK_PLACEHOLDER_HANDWRITING } from '../../knowledge/builder';
 import { pageIdFor } from '../../core/ids';
 import type { PersistedMeeting } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
@@ -48,7 +48,7 @@ export interface MeetingL1Export {
 const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
 const clk = (ms: number): string => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const rng = (a: number, b: number): string => `${clk(a)}–${clk(b)}`;
-const inkBody = (text: string, feat: string): string => text.trim() || (feat === 'drawing' ? '（图形标注 / 圈画）' : '（未识别手写）');
+const inkBody = (text: string, feat: string): string => text.trim() || (feat === 'drawing' ? INK_PLACEHOLDER_DRAWING : INK_PLACEHOLDER_HANDWRITING);
 
 /** 把一场会议折成 L1 导出（KO 包 + 文档投影），可过对方 validator + 走 obsidian-fs CLI。 */
 /** store wrapper：从 IndexedDB 取数（会议 + 缓存转写 + 时间脊手写）→ 调纯核心。浏览器/设备用。 */
