@@ -12,12 +12,12 @@ describe('datesOf', () => {
   it('KO 日期去重升序', () => {
     expect(datesOf(env('2026-06-29T10:00:00Z', '2026-06-28T09:00:00Z', '2026-06-29T20:00:00Z'))).toEqual(['2026-06-28', '2026-06-29']);
   });
-  it('projection-only（无 KO）走 projection created_at/generated_at（不从时间维度消失）', () => {
-    expect(datesOf(env(), projEnv({ generated_at: '2026-06-27T00:00:00Z' }))).toEqual(['2026-06-27']);
-    expect(datesOf(env(), projEnv({ created_at: '2026-06-25T00:00:00Z', generated_at: '2026-06-27T00:00:00Z' }))).toEqual(['2026-06-25']);
+  it('无 KO 实体走 fallbackDate（saved_at/started_at·真内容日期·不从时间维度消失）', () => {
+    expect(datesOf(env(), '2026-06-26T00:00:00Z')).toEqual(['2026-06-26']);
   });
-  it('fallbackDate 兜底（连 projection 都没有的实体）', () => {
-    expect(datesOf(env(), projEnv(), '2026-06-26T00:00:00Z')).toEqual(['2026-06-26']);
+  it('不把 projection/导出时刻误当活动日期：KO 在 6-28 则只 6-28（projection generated_at=导出戳·不进）', () => {
+    // fallbackDate 与 KO 日期都给 → 合并；但 projection 的导出时刻不该污染（datesOf 根本不收 projection）
+    expect(datesOf(env('2026-06-28T09:00:00Z'), '2026-06-28T00:00:00Z')).toEqual(['2026-06-28']);
   });
   it('非法/空日期被剔', () => {
     expect(datesOf(env('not-a-date', ''))).toEqual([]);

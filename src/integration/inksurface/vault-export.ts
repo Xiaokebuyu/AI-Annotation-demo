@@ -48,25 +48,18 @@ export interface VaultExportOpts {
  *  按设备本地时区分日是已知后续（要把 timeZone 串遍 ExportOpts→enrich→datesOf→folder，blast radius 大，暂缓）。 */
 const day = (s?: string): string | undefined => (s && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : undefined);
 
-/** 某实体有活动的日期（去重·升序·YYYY-MM-DD）：取 KO created_at + projection 日期 + 来源 fallbackDate。
- *  含 projection/fallback → projection-only / 无 KO 实体也能进每日 MOC、落对日期（不从时间维度消失）。 */
-export function datesOf(env: KnowledgeExportEnvelope, projections?: DocumentProjectionExportEnvelope, fallbackDate?: string): string[] {
-  return [
-    ...new Set(
-      [
-        ...env.objects.map((o) => day(o.created_at)),
-        ...(projections?.document_projections.map((p) => day(p.created_at) ?? day(p.generated_at)) ?? []),
-        day(fallbackDate),
-      ].filter((d): d is string => !!d),
-    ),
-  ].sort();
+/** 某实体有活动的日期（去重·升序·YYYY-MM-DD）：KO created_at（真内容时刻）+ 来源 fallbackDate（saved_at/started_at）。
+ *  ⚠️**不用 projection 的 created_at/generated_at**——我方那俩=导出时刻、非内容日期，会把每个实体误塞进"导出当天"。
+ *  fallbackDate 让 projection-only / 无 KO 实体也能落对日期、进每日 MOC（不从时间维度消失）。 */
+export function datesOf(env: KnowledgeExportEnvelope, fallbackDate?: string): string[] {
+  return [...new Set([...env.objects.map((o) => day(o.created_at)), day(fallbackDate)].filter((d): d is string => !!d))].sort();
 }
 
 /** 实体导出 → vault bundle（配落夹 + 合成 MOC）。纯·确定性。 */
 export async function assembleVaultBundle(exports: EntityExport[], opts: VaultExportOpts): Promise<VaultExportBundle> {
   const appVersion = opts.appVersion ?? '0.1.0';
   const entities: VaultBundleEntity[] = exports.map((ex) => {
-    const dates = datesOf(ex.knowledgeExport, ex.documentProjections, ex.activityDate);
+    const dates = datesOf(ex.knowledgeExport, ex.activityDate);
     const folder = vaultFolderForEntity({
       documentId: ex.documentId,
       documentTitle: ex.documentTitle,
