@@ -78,4 +78,39 @@ describe('buildConceptLayer', () => {
     expect(normConcept('  Cache   Coherence ')).toBe('cache coherence');
     expect(normConcept('缓存一致性')).toBe('缓存一致性');
   });
+
+  it('两级：单文档复现→local（只标签·不建 hub）·单笔→丢', async () => {
+    const a = await mkKo('doc_x', 'p1');
+    const b = await mkKo('doc_x', 'p2');
+    const c = await mkKo('doc_x', 'p3');
+    const layer = await buildConceptLayer([a, b, c], lookupExtract({ p1: ['局部性'], p2: ['局部性'], p3: ['虚拟内存'] }));
+    expect(layer.concepts).toEqual([]); // 没跨文档 → 无 primary hub
+    expect(layer.localByKo[a.ko_id]).toEqual(['局部性']); // 2 成员 1 文档 → local
+    expect(layer.localByKo[b.ko_id]).toEqual(['局部性']);
+    expect(layer.localByKo[c.ko_id]).toBeUndefined(); // 虚拟内存 单笔 → 丢（不出标签）
+    expect(layer.assignmentsByKo[a.ko_id]).toBeUndefined(); // local 不进 assignments（不出 wikilink）
+  });
+
+  it('晋升免状态：本地概念跨到第二文档→重算自动变 primary', async () => {
+    const a = await mkKo('doc_x', 'p1');
+    const b = await mkKo('doc_x', 'p2');
+    const before = await buildConceptLayer([a, b], lookupExtract({ p1: ['局部性'], p2: ['局部性'] }));
+    expect(before.concepts).toEqual([]); // 同文档 → local
+    const c = await mkKo('doc_y', 'p3'); // 第二文档也谈
+    const after = await buildConceptLayer([a, b, c], lookupExtract({ p1: ['局部性'], p2: ['局部性'], p3: ['局部性'] }));
+    expect(after.concepts.map((x) => x.title)).toEqual(['局部性']); // 自动晋升 primary
+    expect(after.localByKo[a.ko_id]).toBeUndefined();
+  });
+
+  it('merge seam：近义 key 并进 canonical（成员/边重映射）', async () => {
+    const a = await mkKo('doc_1', 'm1');
+    const b = await mkKo('doc_2', 'm2');
+    const tbl = lookupExtract({ m1: ['语义层', '抽象层级'], m2: ['语义层', '抽象层级'] });
+    const noMerge = await buildConceptLayer([a, b], tbl);
+    expect(noMerge.concepts.map((c) => c.title).sort()).toEqual(['抽象层级', '语义层']); // 不合并=两个冗余 hub
+    const merged = await buildConceptLayer([a, b], tbl, { merge: () => new Map([['抽象层级', '语义层']]) });
+    expect(merged.concepts.map((c) => c.title)).toEqual(['语义层']); // 合并成一个
+    expect(merged.membersByConcept['语义层'].sort()).toEqual([a.ko_id, b.ko_id].sort());
+    expect(merged.assignmentsByKo[a.ko_id]).toEqual(['语义层']); // 抽象层级 被重映射掉
+  });
 });

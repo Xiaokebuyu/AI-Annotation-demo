@@ -111,6 +111,7 @@ export function renderVaultMarkdown(bundle: VaultExportBundle): RenderedFile[] {
   const conceptHubName = new Map(concepts.map((c) => [c.title, namer(c.title)] as const));
   const assignmentsByKo = bundle.conceptLayer?.assignmentsByKo ?? {};
   const membersByConcept = bundle.conceptLayer?.membersByConcept ?? {};
+  const localByKo = bundle.conceptLayer?.localByKo ?? {}; // 本地（单文档）概念：只打 #topic 标签·不建 hub 文件（无 wikilink·防 dangling）
 
   const allDates = [...new Set(bundle.entities.flatMap((e) => e.dates))].sort();
   const dateName = new Map(allDates.map((d) => [d, namer(d)] as const));
@@ -134,8 +135,9 @@ export function renderVaultMarkdown(bundle: VaultExportBundle): RenderedFile[] {
     files.push({ path: `${dir}/${hubName}.md`, markdown: `${body.join('\n').trimEnd()}\n` });
 
     for (const { ko, name } of leaves) {
-      const cNames = assignmentsByKo[ko.ko_id] ?? [];
-      const tags = [...ko.tags, ...cNames.map((c) => `inkloop/topic/${tagSlug(c)}`)];
+      const cNames = assignmentsByKo[ko.ko_id] ?? []; // primary：出 hub 文件 + wikilink + 标签
+      const localNames = localByKo[ko.ko_id] ?? []; // local：只出 #topic 标签（无 hub·无 wikilink）
+      const tags = [...ko.tags, ...[...cNames, ...localNames].map((c) => `inkloop/topic/${tagSlug(c)}`)];
       const leaf = [fm(tags), '', `# ${name}`, '', calloutOf(ko.kind, ko.body_md.trim()), '', `**来源**：${wl(hubName)}`];
       if (cNames.length) leaf.push('', `**相关概念**：${cNames.map((c) => wl(conceptHubName.get(c) ?? c)).join('、')}`);
       files.push({ path: `${dir}/${name}.md`, markdown: `${leaf.join('\n')}\n` });
