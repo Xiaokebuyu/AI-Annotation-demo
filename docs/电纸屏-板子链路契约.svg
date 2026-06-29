@@ -1,0 +1,78 @@
+<svg viewBox="0 0 940 660" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ttl desc" style="font-family:-apple-system,'PingFang SC','Helvetica Neue',sans-serif">
+<title id="ttl">InkLoop 电纸屏触摸与显示链路契约</title>
+<desc id="desc">触摸链路：WingCool 原始触摸经 touch-remap 单指重映射成虚拟设备进 Android 再到 WebView；显示链路：WebView 经 InkLoopEink 语义信号触发 EinkBridge 抓帧、TRANSVERSE 灰度、socket 交 eink-helper 推 IT8951 面板。底部列出五项待补硬化。</desc>
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0 0L10 5L0 10z" fill="#5a5953"/>
+</marker>
+</defs>
+<rect x="6" y="6" width="928" height="648" rx="14" fill="#fcfcfa" stroke="#dcd9d0" stroke-width="1"/>
+<text x="28" y="40" font-size="17" font-weight="500" fill="#1c1c1a">InkLoop 电纸屏 · 触摸 + 显示 链路契约</text>
+<text x="28" y="60" font-size="11.5" fill="#6b6a64">已核对源码 · 2026-06-29 · ATK_RK3588 + IT8951(GDEP103TC2) + WingCool 触摸</text>
+
+<text x="28" y="92" font-size="12.5" font-weight="500" fill="#1d4b50">① 触摸输入  (raw → 重映射 → WebView)</text>
+<g>
+<rect x="28" y="104" width="152" height="62" rx="8" fill="#e8f4f1" stroke="#2f6b73" stroke-width="1.3"/>
+<text x="104" y="131" font-size="12.5" font-weight="500" fill="#173f44" text-anchor="middle">WingCool 触摸屏</text>
+<text x="104" y="150" font-size="10.5" fill="#38696f" text-anchor="middle">raw 16383×9599</text>
+<rect x="200" y="104" width="152" height="62" rx="8" fill="#e8f4f1" stroke="#2f6b73" stroke-width="1.3"/>
+<text x="276" y="131" font-size="12.5" font-weight="500" fill="#173f44" text-anchor="middle">touch-remap</text>
+<text x="276" y="150" font-size="10.5" fill="#38696f" text-anchor="middle">单指 MT-B 重映射</text>
+<rect x="372" y="104" width="152" height="62" rx="8" fill="#e8f4f1" stroke="#2f6b73" stroke-width="1.3"/>
+<text x="448" y="131" font-size="12" font-weight="500" fill="#173f44" text-anchor="middle">InkLoop TouchRemap</text>
+<text x="448" y="150" font-size="10.5" fill="#38696f" text-anchor="middle">uinput · 1920×1080</text>
+<rect x="544" y="104" width="152" height="62" rx="8" fill="#e8f4f1" stroke="#2f6b73" stroke-width="1.3"/>
+<text x="620" y="131" font-size="12.5" font-weight="500" fill="#173f44" text-anchor="middle">Android input</text>
+<text x="620" y="150" font-size="10.5" fill="#38696f" text-anchor="middle">MT 事件注入</text>
+<rect x="716" y="104" width="152" height="62" rx="8" fill="#f3f1ea" stroke="#55534b" stroke-width="1.3"/>
+<text x="792" y="131" font-size="12.5" font-weight="500" fill="#2a2823" text-anchor="middle">WebView</text>
+<text x="792" y="150" font-size="10.5" fill="#5a584f" text-anchor="middle">810×1080 · 3:4 竖</text>
+<line x1="182" y1="135" x2="198" y2="135" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+<line x1="354" y1="135" x2="370" y2="135" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+<line x1="526" y1="135" x2="542" y2="135" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+<line x1="698" y1="135" x2="714" y2="135" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+</g>
+<rect x="28" y="176" width="840" height="26" rx="5" fill="#f1f8f6"/>
+<text x="40" y="193" font-size="10.5" fill="#2f6b73">标定 P0..P3 = 1365.8 / −0.0835 / −4.6 / 0.06545   →   dX = P0 + P1·rawY,   dY = P2 + P3·rawX   ·   弃 ghost slot1，仅 slot0   ·   横转 90° TRANSVERSE</text>
+
+<text x="28" y="240" font-size="12.5" font-weight="500" fill="#1f3f73">② 显示输出  (WebView → 桥 → helper → 面板)</text>
+<g>
+<rect x="28" y="252" width="152" height="62" rx="8" fill="#f3f1ea" stroke="#55534b" stroke-width="1.3"/>
+<text x="104" y="279" font-size="12.5" font-weight="500" fill="#2a2823" text-anchor="middle">WebView</text>
+<text x="104" y="298" font-size="10.5" fill="#5a584f" text-anchor="middle">postMessage(JSON)</text>
+<rect x="200" y="252" width="152" height="62" rx="8" fill="#e9f0fb" stroke="#2b5aa5" stroke-width="1.3"/>
+<text x="276" y="279" font-size="12.5" font-weight="500" fill="#15376b" text-anchor="middle">EinkBridge</text>
+<text x="276" y="298" font-size="10.5" fill="#3a5f9a" text-anchor="middle">PixelCopy·TRANSVERSE</text>
+<rect x="372" y="252" width="152" height="62" rx="8" fill="#e9f0fb" stroke="#2b5aa5" stroke-width="1.3"/>
+<text x="448" y="279" font-size="12.5" font-weight="500" fill="#15376b" text-anchor="middle">abstract socket</text>
+<text x="448" y="298" font-size="10.5" fill="#3a5f9a" text-anchor="middle">inkloop_eink</text>
+<rect x="544" y="252" width="152" height="62" rx="8" fill="#e9f0fb" stroke="#2b5aa5" stroke-width="1.3"/>
+<text x="620" y="279" font-size="12.5" font-weight="500" fill="#15376b" text-anchor="middle">eink-helper (root)</text>
+<text x="620" y="298" font-size="10.5" fill="#3a5f9a" text-anchor="middle">24B 帧头 + 8bpp 灰度</text>
+<rect x="716" y="252" width="152" height="62" rx="8" fill="#f1efe8" stroke="#444339" stroke-width="1.3"/>
+<text x="792" y="279" font-size="12.5" font-weight="500" fill="#2a2823" text-anchor="middle">IT8951 面板</text>
+<text x="792" y="298" font-size="10.5" fill="#5a584f" text-anchor="middle">1872×1404 · 10.3″</text>
+<line x1="182" y1="283" x2="198" y2="283" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+<line x1="354" y1="283" x2="370" y2="283" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+<line x1="526" y1="283" x2="542" y2="283" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+<line x1="698" y1="283" x2="714" y2="283" stroke="#5a5953" stroke-width="1.4" marker-end="url(#ah)"/>
+</g>
+<rect x="28" y="324" width="840" height="26" rx="5" fill="#eef3fc"/>
+<text x="40" y="341" font-size="10.5" fill="#2b5aa5">整屏 {pageReady, mode:2} → GC16   ·   局部 {inkArea, x/y/w/h, mode:4} → A2（仍整屏抓帧再裁子区）   ·   连 10 次 A2 自动 GC16 清残影   ·   VCOM 1520mV</text>
+
+<text x="28" y="386" font-size="12.5" font-weight="500" fill="#8a3417">③ 待补硬化  (codex 核出 · 已确认)</text>
+<rect x="28" y="396" width="840" height="150" rx="10" fill="#fbeee8" stroke="#cf8b6f" stroke-width="1.1"/>
+<text x="44" y="421" font-size="11" fill="#7a2e15">①  reader 虚拟页上写字 → 无 A2 脏区（#ink-layer display:none）→ 每笔全屏 GC16 闪。需补 signalViewportArea。  ★命门</text>
+<text x="44" y="446" font-size="11" fill="#7a2e15">②  EinkBridge 忙时直接丢整屏 pageReady → 翻页/切视图可能停旧画面。需保留最后一帧整屏刷新。</text>
+<text x="44" y="471" font-size="11" fill="#7a2e15">③  touch-remap / eink-helper 为 boot oneshot，无 watchdog → 进程挂了不自拉起（触摸失灵 / 屏停旧画面）。</text>
+<text x="44" y="496" font-size="11" fill="#7a2e15">④  面板尺寸 1872×1404 硬编码于 EinkBridge.kt → 换屏须从 helper SysInfo 读取。</text>
+<text x="44" y="521" font-size="11" fill="#7a2e15">⑤  eink-test.c socket 遗留 /data/local/tmp/eink.sock（生产链路已是 abstract inkloop_eink）。</text>
+
+<rect x="28" y="556" width="14" height="14" rx="3" fill="#e8f4f1" stroke="#2f6b73"/>
+<text x="48" y="567" font-size="10.5" fill="#4a4a44">触摸入</text>
+<rect x="104" y="556" width="14" height="14" rx="3" fill="#e9f0fb" stroke="#2b5aa5"/>
+<text x="124" y="567" font-size="10.5" fill="#4a4a44">显示出</text>
+<rect x="186" y="556" width="14" height="14" rx="3" fill="#fbeee8" stroke="#cf8b6f"/>
+<text x="206" y="567" font-size="10.5" fill="#4a4a44">待补硬化</text>
+<text x="360" y="567" font-size="10" fill="#6b6a64">归一化坐标 = 视口(非 CSS / 面板 px)  ·  WebView 与面板同为 3:4，无 letterbox</text>
+</svg>
