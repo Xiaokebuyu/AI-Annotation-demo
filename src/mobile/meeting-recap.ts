@@ -11,11 +11,10 @@ import { getMeeting, updateMeeting, getFoldedMarksByContext, getCachedMinute, pu
 import { postNdjson } from '../core/api';
 import { settings } from '../app/state';
 import { listRecentPanelMeetings, getMinuteTranscript, type PanelFeishuMeeting } from '../integration/panel-feishu/client';
-import { parseSrtTranscript, buildProximityIndex, type TranscriptCue, type ProximityIndex } from '../integration/panel-feishu/align';
+import { parseSrtTranscript, type TranscriptCue } from '../integration/panel-feishu/align';
+import { buildSegments, buildSegmentMarks, digestCacheKey, type RecapSegment } from '../integration/panel-feishu/segment';
 import type { PersistedMeeting, PersistedMark } from '../core/store-format';
 
-const PAGE_SIZE = 40;            // 每页转写句数
-const QUALITY_WINDOW_MS = 45_000; // 质量态「附近」窗（比对照略宽·只标有无附近手写）
 const SUMMARY_TRANSCRIPT_CAP = 16000; // 喂 AI 的转写字数软上限（长转写分块留 P5）
 
 const ALIGN_LABEL: Record<NonNullable<PersistedMeeting['align_state']>, string> = {
@@ -129,15 +128,42 @@ export function wireRecapCard(root: HTMLElement, meetingId: string, rerender: ()
   root.querySelector('#recap-open')?.addEventListener('click', () => openRecap());
 }
 
-// ════ P2 recap 阅读视图：转写句列 + 手写档案（纯文本·近似对照）════
+// ════ V2 recap：分段对轴时间线（概览段级 ⇄ 详情句级 · 翻页 · 近似对照）════
 
-interface RecapData { meeting: PersistedMeeting; cues: TranscriptCue[]; marks: PersistedMark[]; prox: ProximityIndex }
-let recapState: { data: RecapData; page: number } | null = null;
-// 防异步串会：打开 A 后快速返回/打开 B，A 的晚到结果不能覆盖 B 的视图/状态。
+const OV_PAGE = 6;             // 概览每页段数
+const DT_PAGE = 12;            // 详情每页句数
+const DIGEST_CONCURRENCY = 4; // active 段 AI 摘要并发上限
+const MARKS_CAP = 3;          // 概览段内手写最多列几条（余下折成「＋另 N 处」·详情看全）
+
+interface RecapV2 {
+  meeting: PersistedMeeting;
+  segments: RecapSegment[];
+  digests: Record<string, string>; // 段 cueHash → AI 一句话（缓存命中 + 新生成合并）
+  view: 'overview' | 'detail';
+  detailIdx: number;            // detail 视图当前段下标
+  ovPage: number;               // 概览翻页
+  dtPage: number;               // 详情翻页
+  bodyEl: HTMLElement;          // 供 recapHandleBack 复用重渲
+  transcriptMissing: boolean;   // 转写为空/未就绪但仍展示手写档案（提示用·防误以为没内容）
+}
+let recapState: RecapV2 | null = null;
+// 防异步串会：打开 A 后快速返回/打开 B，A 的晚到结果（转写/AI 摘要）不能覆盖 B 的视图/状态。
 let recapLoadSeq = 0;
 export function resetRecapView(): void { recapLoadSeq++; recapState = null; }
 function recapAlive(seq: number, bodyEl: HTMLElement): boolean {
-  return seq === recapLoadSeq && document.body.dataset.mtg === 'recap' && document.body.contains(bodyEl);
+  // 含 data-mode：底部导航离开会议页后，晚到的异步 digest 不再更新隐藏 state/缓存（codex A#5）。
+  return seq === recapLoadSeq && document.body.dataset.mode === 'meet' && document.body.dataset.mtg === 'recap' && document.body.contains(bodyEl);
+}
+
+/** 顶栏「返回」：在详情段视图时先退回概览（返回 true）；已在概览则交调用方退出 recap（返回 false）。 */
+export function recapHandleBack(): boolean {
+  if (recapState && recapState.view === 'detail') {
+    recapState.view = 'overview';
+    renderRecap(recapState.bodyEl);
+    recapState.bodyEl.scrollTop = 0;
+    return true;
+  }
+  return false;
 }
 
 /** 拉转写：**在线先拉最新**（妙记可能后续补全/修订）→ 写缓存；离线/失败回退缓存（会后复盘不丢）。 */
@@ -161,9 +187,14 @@ async function loadTranscript(m: PersistedMeeting): Promise<{ srt: string; cues:
 }
 
 const clk = (ms: number): string => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
-const archiveText = (mk: PersistedMark): string => (mk.marked_text || '').trim() || (mk.feature_type === 'drawing' ? '（图形标注/圈画）' : '（手写）');
+const rng = (a: number, b: number): string => `${clk(a)}–${clk(b)}`;
+// t0/offset 防 NaN（started_at 可能解析失败·codex A#1）：取第一个有限值，否则 0。
+const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
+const meetingT0 = (m: PersistedMeeting): number => finiteMs(m.feishu_recording_t0, m.panel_meeting_start, m.started_at ? Date.parse(m.started_at) : NaN);
+const inkLabel = (feat: string): string => (feat === 'drawing' ? '◇ 图形' : '✎ 手写');
+const inkText = (text: string, feat: string): string => text.trim() || (feat === 'drawing' ? '（图形标注 / 圈画）' : '（未识别手写）');
 
-/** 进 recap 视图：拉转写 + 手写档案 + 构建质量索引 → 填 #recap-body。bodyEl/titleEl 由 meeting.ts 给。 */
+/** 进 recap 视图：拉转写 + 手写档案 → 分段 → 渲染概览（段级时间线）；并异步补 active 段 AI 摘要。 */
 export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titleEl: HTMLElement): Promise<void> {
   const seq = ++recapLoadSeq;
   recapState = null;
@@ -178,61 +209,190 @@ export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titl
   try { loaded = await loadTranscript(m); }
   catch (e) { if (!recapAlive(seq, bodyEl)) return; bodyEl.innerHTML = `<p class="rc-note">拉取转写失败：${esc(String((e as Error)?.message || e))}（已关联的转写若曾缓存可离线读）。</p>`; return; }
   if (!recapAlive(seq, bodyEl)) return;
-  if (!loaded || !loaded.cues.length) { bodyEl.innerHTML = '<p class="rc-note">转写为空或还在生成。</p>'; return; }
+  const cues = loaded?.cues ?? [];
 
   const marks = (await getFoldedMarksByContext('mtg_' + m.meeting_id)).filter((mk) => !mk.is_tombstone).sort((a, b) => a.abs_timestamp - b.abs_timestamp);
   if (!recapAlive(seq, bodyEl)) return;
-  const t0 = m.feishu_recording_t0 ?? m.panel_meeting_start ?? (m.started_at ? Date.parse(m.started_at) : 0);
-  const prox = buildProximityIndex({
-    marks: marks.map((mk) => ({ mark_id: mk.mark_id, abs_timestamp: mk.abs_timestamp, document_id: mk.document_id, page_id: mk.page_id })),
-    cues: loaded.cues, t0AbsMs: t0, offsetMs: m.align_offset_ms ?? 0, windowMs: QUALITY_WINDOW_MS,
-  });
-  recapState = { data: { meeting: m, cues: loaded.cues, marks, prox }, page: 0 };
-  renderRecapBody(bodyEl);
+  const t0 = meetingT0(m);
+  const segMarks = buildSegmentMarks(
+    marks.map((mk) => ({ mark_id: mk.mark_id, abs_timestamp: mk.abs_timestamp, feature_type: mk.feature_type, marked_text: mk.marked_text, page_index: mk.page_index })),
+    t0, finiteMs(m.align_offset_ms),
+  );
+  // 转写与手写都空 → 无可展示；但**转写未就绪而有手写时仍要把手写档案露出来**（否则用户的手写被整页静默隐藏）。
+  if (!cues.length && !segMarks.length) { bodyEl.innerHTML = '<p class="rc-note">转写为空或还在生成，本场也没有手写档案。</p>'; return; }
+
+  const segments = buildSegments({ cues, marks: segMarks });
+  recapState = { meeting: m, segments, digests: { ...(m.segment_digests ?? {}) }, view: 'overview', detailIdx: 0, ovPage: 0, dtPage: 0, bodyEl, transcriptMissing: !cues.length };
+  renderRecap(bodyEl);
+  if (cues.length) void generateDigests(seq, bodyEl, m, segments); // 有转写才补 AI 段摘要（无转写没东西可总结）
 }
 
-function renderRecapBody(bodyEl: HTMLElement): void {
+/** 只留当前分段 active 段的缓存键（剪掉旧分段/旧 prompt 版本残留键·codex A#4）。 */
+function keepCurrentDigests(segments: RecapSegment[], digests: Record<string, string>): Record<string, string> {
+  const keep: Record<string, string> = {};
+  for (const s of segments) { const k = digestCacheKey(s); if (s.kind === 'active' && digests[k]) keep[k] = digests[k]; }
+  return keep;
+}
+const sameMap = (a: Record<string, string>, b: Record<string, string>): boolean => {
+  const ak = Object.keys(a); return ak.length === Object.keys(b).length && ak.every((k) => a[k] === b[k]);
+};
+
+// ── active 段一句话 AI 摘要（缺缓存才调·并发受限·完成后单次重渲·失败回退启发式）──
+async function generateDigests(seq: number, bodyEl: HTMLElement, m: PersistedMeeting, segments: RecapSegment[]): Promise<void> {
+  // 全无 pending 也要把缓存剪到当前键（旧分段/旧 prompt 版本残留键清掉·A#4），与重渲解耦。
+  const persistPrune = async (): Promise<void> => {
+    if (seq !== recapLoadSeq || !recapState) return;
+    const keep = keepCurrentDigests(segments, recapState.digests);
+    if (!sameMap(m.segment_digests ?? {}, keep)) { try { await updateMeeting(m.meeting_id, { segment_digests: keep }); } catch { /* 缓存失败不阻断显示 */ } }
+  };
+  const pending = segments.filter((s) => s.kind === 'active' && s.cues.length && !recapState?.digests[digestCacheKey(s)]);
+  if (!pending.length) { await persistPrune(); return; }
+  let changed = false;
+  await runPool(pending, DIGEST_CONCURRENCY, async (seg) => {
+    const text = await digestSegment(seg);
+    if (!text || seq !== recapLoadSeq || !recapState) return;
+    recapState.digests[digestCacheKey(seg)] = text;
+    changed = true;
+  });
+  if (seq !== recapLoadSeq || !recapState) return;
+  await persistPrune();
+  if (changed && recapAlive(seq, bodyEl)) renderRecap(bodyEl);
+}
+
+/** 单段 AI 一句话摘要（segment_digest role·纯文本·不走 chatTurn 不污染书 buffer）。失败/中断返回 null（回退启发式）。 */
+async function digestSegment(seg: RecapSegment): Promise<string | null> {
+  const transcript = seg.cues.map((c) => (c.speaker ? c.speaker + '：' : '') + c.text).join('\n');
+  const prompt = `会议某时段转写片段（请只据此用一句话概括）：\n${transcript}`;
+  let full = ''; let done = false; let err = '';
+  try {
+    await postNdjson<{ k?: string; d?: string }>(
+      '/api/chat',
+      { messages: [{ role: 'user', content: prompt }], role: 'segment_digest', model: settings.inferModel, maxTokens: 120 },
+      (frame) => {
+        if (frame.k === 'e') { err = frame.d || '中断'; return; }
+        if (frame.k === 'done') { done = true; return; }
+        if (frame.k === 't' && frame.d) full += frame.d;
+      },
+    );
+  } catch { return null; }
+  if (err || !done) return null;
+  const out = full.trim().replace(/^摘要[:：]\s*/, '').replace(/[。.\s]+$/, '');
+  return out || null;
+}
+
+/** 并发池：items 经 n 路 worker 跑 fn，单项失败不影响其它。 */
+async function runPool<T>(items: T[], n: number, fn: (it: T) => Promise<void>): Promise<void> {
+  let i = 0;
+  const worker = async (): Promise<void> => { while (i < items.length) { const it = items[i++]; await fn(it).catch(() => {}); } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+}
+
+function renderRecap(bodyEl: HTMLElement): void {
   if (!recapState) return;
-  const { data, page } = recapState;
-  const { meeting, cues, marks, prox } = data;
-  const totalPages = Math.max(1, Math.ceil(cues.length / PAGE_SIZE));
-  const p = Math.min(page, totalPages - 1);
-  const slice = cues.slice(p * PAGE_SIZE, (p + 1) * PAGE_SIZE);
+  if (recapState.view === 'detail') renderRecapDetail(bodyEl);
+  else renderRecapOverview(bodyEl);
+}
 
+/** 翻页条（id 前缀区分概览/详情）。 */
+function pagerHtml(id: string, page: number, total: number): string {
+  if (total <= 1) return '';
+  return `<div class="tl-pager"><button class="hbtn" id="${id}-prev"${page === 0 ? ' disabled style="opacity:.4"' : ''}>‹ 上一页</button>`
+    + `<span class="tl-pn">${page + 1} / ${total}</span>`
+    + `<button class="hbtn" id="${id}-next"${page >= total - 1 ? ' disabled style="opacity:.4"' : ''}>下一页 ›</button></div>`;
+}
+
+/** 页码钳到 [0, total-1]（防负/越界渲染空页·codex A#6）。 */
+const clampPage = (p: number, total: number): number => Math.max(0, Math.min(p, total - 1));
+
+/** 概览：段级中轴时间线。active 段左摘要右手写、quiet 段轴上塌缩站点。点段→详情。 */
+function renderRecapOverview(bodyEl: HTMLElement): void {
+  if (!recapState) return;
+  const { meeting, segments, digests } = recapState;
   const stateLabel = meeting.align_state ? ALIGN_LABEL[meeting.align_state] : '约对齐';
-  const orphan = prox.orphanMarkIds.length;
-  const note = `时间对照为<b>近似</b>（按会议开始时刻估算·非精确对齐）·当前「${esc(stateLabel)}」。`
-    + `转写 ${cues.length} 句·手写 ${marks.length} 处·其中 ${prox.stats.matchedCueCount} 句附近有手写`
-    + (orphan ? `·另有 ${orphan} 处手写未靠近任何转写。` : '。');
+  const hasInk = segments.some((s) => s.kind === 'active');
+  const note = recapState.transcriptMissing
+    ? `⚠ 飞书转写为空或还在生成——下面是<b>本场手写档案</b>（按时间）。转写就绪后再来即可看到会议内容对照。`
+    : !hasInk
+      ? `本场<b>没有手写锚点</b>——下面是整场转写（点开浏览）。时间为<b>近似</b>·非精确对齐。`
+      : `一根时间轴贯穿全会（时间为<b>近似</b>·非精确对齐·当前「${esc(stateLabel)}」）。`
+        + `左＝会议在讲什么·右＝你那时的手写；<b>实心●</b>＝你写了东西的段，<b>空心○</b>＝你没写（右侧留空）。点任意段看逐句详情。`;
 
-  const cueRows = slice.map((c) => {
-    const hasInk = (prox.cueToNearbyMarkIds.get(c.index) ?? []).length;
-    const sp = c.speaker ? `<span class="sp">${esc(c.speaker)}：</span>` : '';
-    const nb = hasInk ? `<span class="nb">✎${hasInk}</span>` : '';
-    return `<div class="rc-cue${hasInk ? ' has' : ''}"><div class="t">${clk(c.startMs)}</div><div class="x">${sp}${esc(c.text)}${nb}</div></div>`;
+  const total = Math.max(1, Math.ceil(segments.length / OV_PAGE));
+  const p = clampPage(recapState.ovPage, total);
+  recapState.ovPage = p;
+  const slice = segments.slice(p * OV_PAGE, (p + 1) * OV_PAGE);
+
+  const rows = slice.map((s, j) => {
+    const idx = p * OV_PAGE + j;
+    if (s.kind === 'active') {
+      const sum = digests[digestCacheKey(s)] || s.heuristicSummary;
+      const shown = s.marks.slice(0, MARKS_CAP);
+      const marksHtml = shown.map((mk) => `<span class="tl-ink${mk.feature_type === 'drawing' ? ' tl-draw' : ''}"><span class="tl-ic">${inkLabel(mk.feature_type)}</span>${esc(inkText(mk.marked_text, mk.feature_type))}</span>`).join('')
+        + (s.marks.length > MARKS_CAP ? `<span class="tl-more">＋另 ${s.marks.length - MARKS_CAP} 处</span>` : '');
+      const left = `<span class="tl-lb">会议 · ${rng(s.startMs, s.endMs)} · ${s.cues.length}句</span><span class="tl-txt">${esc(sum)}</span><span class="tl-hint">详情 ›</span>`;
+      const mid = `<div class="tl-mid"><span class="tl-md"></span><span class="tl-mt">${clk(s.startMs)}</span></div>`;
+      return `<div class="tl-row tl-click" data-seg="${idx}"><div class="tl-cl">${left}</div>${mid}<div class="tl-cr">${marksHtml}</div></div>`;
+    }
+    // quiet（无手写）：内容左置·文字弱化·右侧留空·小空心点。点开仍可读该段转写。
+    const left = `<span class="tl-lb">无手写 · ${rng(s.startMs, s.endMs)} · ${s.cues.length}句</span><span class="tl-txt">${esc(s.heuristicSummary)}</span><span class="tl-hint">详情 ›</span>`;
+    const mid = `<div class="tl-mid"><span class="tl-md tl-hollow"></span><span class="tl-mt tl-dim">${clk(s.startMs)}</span></div>`;
+    return `<div class="tl-row tl-click tl-quiet" data-seg="${idx}"><div class="tl-cl">${left}</div>${mid}<div class="tl-cr"></div></div>`;
   }).join('');
 
-  const t0 = meeting.feishu_recording_t0 ?? meeting.panel_meeting_start ?? (meeting.started_at ? Date.parse(meeting.started_at) : 0);
-  const off = meeting.align_offset_ms ?? 0;
-  const archRows = marks.length
-    ? marks.map((mk) => {
-        const txt = (mk.marked_text || '').trim();
-        const x = txt ? esc(txt) : `<span style="color:var(--ink2)">${mk.feature_type === 'drawing' ? '（图形标注/圈画）' : '（未识别·原笔迹在第' + (mk.page_index + 1) + '页）'}</span>`;
-        const pg = `<span class="nb" style="color:var(--ink2)">第${mk.page_index + 1}页</span>`;
-        return `<div class="rc-arch"><div class="t">${clk(mk.abs_timestamp - t0 - off)}</div><div class="x">${x} ${pg}</div></div>`;
-      }).join('')
-    : '<div class="empty">这场会议没有留下手写档案。</div>';
-
-  const pager = totalPages > 1
-    ? `<div class="rc-pager"><button class="hbtn" id="rc-prev"${p === 0 ? ' disabled style="opacity:.4"' : ''}>‹ 上一页</button><span class="t" style="font:11px var(--mono)">第 ${p + 1}/${totalPages} 页</span><button class="hbtn" id="rc-next"${p >= totalPages - 1 ? ' disabled style="opacity:.4"' : ''}>下一页 ›</button></div>`
-    : '';
-
   bodyEl.innerHTML = `<div class="rc-note">${note}</div>`
-    + `<div class="rc-h">会议转写<span class="mb">✎ = 附近±45s 有手写·非精确对应本句</span></div>${cueRows}${pager}`
-    + `<div class="rc-h">你的手写档案<span class="mb">按会议相对时刻</span></div>${archRows}`;
+    + `<div class="tl-seg"><div class="tl-ax"></div>${rows}</div>`
+    + pagerHtml('ov', p, total);
 
-  bodyEl.querySelector('#rc-prev')?.addEventListener('click', () => { if (recapState) { recapState.page = p - 1; renderRecapBody(bodyEl); bodyEl.scrollTop = 0; } });
-  bodyEl.querySelector('#rc-next')?.addEventListener('click', () => { if (recapState) { recapState.page = p + 1; renderRecapBody(bodyEl); bodyEl.scrollTop = 0; } });
+  bodyEl.querySelectorAll<HTMLElement>('[data-seg]').forEach((el) => el.addEventListener('click', () => {
+    if (!recapState) return;
+    const idx = Number(el.dataset.seg);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= recapState.segments.length) return; // 防脏 dataset
+    recapState.view = 'detail'; recapState.detailIdx = idx; recapState.dtPage = 0;
+    renderRecap(bodyEl); bodyEl.scrollTop = 0;
+  }));
+  bodyEl.querySelector('#ov-prev')?.addEventListener('click', () => { if (recapState) { recapState.ovPage = p - 1; renderRecap(bodyEl); bodyEl.scrollTop = 0; } });
+  bodyEl.querySelector('#ov-next')?.addEventListener('click', () => { if (recapState) { recapState.ovPage = p + 1; renderRecap(bodyEl); bodyEl.scrollTop = 0; } });
+}
+
+/** 详情：单段句级中轴时间线（左转写右手写按时刻）+ 翻页 + 返回概览。 */
+function renderRecapDetail(bodyEl: HTMLElement): void {
+  if (!recapState) return;
+  if (recapState.detailIdx < 0 || recapState.detailIdx >= recapState.segments.length) { recapState.view = 'overview'; renderRecapOverview(bodyEl); return; }
+  const seg = recapState.segments[recapState.detailIdx];
+  if (!seg) { recapState.view = 'overview'; renderRecapOverview(bodyEl); return; }
+  type Item = { t: number; side: 'L' | 'R'; speaker?: string; text: string; feat?: string };
+  const items: Item[] = [];
+  for (const c of seg.cues) items.push({ t: c.startMs, side: 'L', speaker: c.speaker, text: c.text });
+  for (const mk of seg.marks) items.push({ t: mk.relMs, side: 'R', text: inkText(mk.marked_text, mk.feature_type), feat: mk.feature_type });
+  items.sort((a, b) => a.t - b.t);
+
+  const total = Math.max(1, Math.ceil(items.length / DT_PAGE));
+  const p = clampPage(recapState.dtPage, total);
+  recapState.dtPage = p;
+  const slice = items.slice(p * DT_PAGE, (p + 1) * DT_PAGE);
+
+  const rows = slice.map((it) => {
+    if (it.side === 'L') {
+      // 转写句：左·小空心点·精确时刻（cue 相对录音 t=0 是准的）
+      const mid = `<div class="tl-mid"><span class="tl-md tl-hollow"></span><span class="tl-mt tl-dim">${clk(it.t)}</span></div>`;
+      const sp = it.speaker ? `<span class="tl-sp">${esc(it.speaker)}</span>` : '';
+      return `<div class="tl-row"><div class="tl-cl"><span class="tl-txt">${sp}${esc(it.text)}</span></div>${mid}<div class="tl-cr"></div></div>`;
+    }
+    // 手写：右·实心点·时刻带「~」（落点是估算的·别当精确锚定）
+    const mid = `<div class="tl-mid"><span class="tl-md"></span><span class="tl-mt">~${clk(it.t)}</span></div>`;
+    return `<div class="tl-row"><div class="tl-cl"></div>${mid}<div class="tl-cr"><span class="tl-ink${it.feat === 'drawing' ? ' tl-draw' : ''}"><span class="tl-ic">${inkLabel(it.feat || '')}</span>${esc(it.text)}</span></div></div>`;
+  }).join('');
+
+  const sum = recapState.digests[digestCacheKey(seg)] || seg.heuristicSummary;
+  const head = seg.kind === 'active' ? `你在这段写了 ${seg.marks.length} 处` : '这段你没有手写';
+  bodyEl.innerHTML = `<div class="tl-dtop"><button class="hbtn" id="tl-back">‹ 返回概览</button><span class="tl-tt">${rng(seg.startMs, seg.endMs)}</span></div>`
+    + `<div class="rc-note">${head}：${esc(sum)}（逐句时刻为<b>近似</b>）。</div>`
+    + `<div class="tl-seg"><div class="tl-ax"></div>${rows}</div>`
+    + pagerHtml('dt', p, total);
+
+  bodyEl.querySelector('#tl-back')?.addEventListener('click', () => { if (recapState) { recapState.view = 'overview'; renderRecap(bodyEl); bodyEl.scrollTop = 0; } });
+  bodyEl.querySelector('#dt-prev')?.addEventListener('click', () => { if (recapState) { recapState.dtPage = p - 1; renderRecap(bodyEl); bodyEl.scrollTop = 0; } });
+  bodyEl.querySelector('#dt-next')?.addEventListener('click', () => { if (recapState) { recapState.dtPage = p + 1; renderRecap(bodyEl); bodyEl.scrollTop = 0; } });
 }
 
 // ════ P3 AI 思路总结（接 md-sum·防污染输入·不喂易错精确关系）════
@@ -240,8 +400,8 @@ function renderRecapBody(bodyEl: HTMLElement): void {
 /** 组装喂 AI 的结构化文本：转写（可能截断）+ 手写文字列表（各带近似时间）；**不喂** linked_cue 精确关系。
  *  返回是否截断 + 实际喂了几句，供 summary_source 记录 + UI 透明告知（防"看起来是全文总结"误导）。 */
 function buildSummaryPrompt(m: PersistedMeeting, cues: TranscriptCue[], marks: PersistedMark[]): { prompt: string; truncated: boolean; usedCueCount: number } {
-  const t0 = m.feishu_recording_t0 ?? m.panel_meeting_start ?? (m.started_at ? Date.parse(m.started_at) : 0);
-  const off = m.align_offset_ms ?? 0;
+  const t0 = meetingT0(m);
+  const off = finiteMs(m.align_offset_ms);
   const lines: string[] = [`会议标题：${m.title || '(未命名)'}`];
   if (m.started_at) lines.push(`开始时间：${m.started_at}`);
   lines.push('', '<转写 可能因过长被截断·见末尾标记>');

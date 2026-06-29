@@ -19,7 +19,7 @@ import {
 } from '../local/store';
 import { esc } from '../core/escape';
 import { infoSheet, promptSheet, formSheet, pickSheet } from './sheet';
-import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting, resetRecapView } from './meeting-recap';
+import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting, resetRecapView, recapHandleBack } from './meeting-recap';
 import type { MeetingStatus, PersistedMeeting, PersistedWorkspace, PersistedDoc, PersistedMark } from '../core/store-format';
 
 // ── 飞书后端（feishu-service）+ 文档转换（convert-service）：同 web 默认端口；服务不在则静默退回纯本地 ──
@@ -352,7 +352,8 @@ async function renderDetail(): Promise<void> {
 /** WS2-C：进「会后记录」阅读视图（纯文本·转写 + 手写档案）。返回=回 detail。 */
 async function openRecap(mtgId: string): Promise<void> {
   setMtg('recap');
-  el('recap-back').onclick = () => { resetRecapView(); setMtg('detail'); void renderDetail(); };
+  // 顶栏返回：详情段视图先退回概览（recapHandleBack 处理）；已在概览才退出 recap 回 detail。
+  el('recap-back').onclick = () => { if (recapHandleBack()) return; resetRecapView(); setMtg('detail'); void renderDetail(); };
   await loadRecapView(mtgId, el('recap-body'), el('recap-title'));
 }
 

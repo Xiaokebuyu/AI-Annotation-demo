@@ -162,6 +162,7 @@ export interface PersistedMeeting {
   feishu_match_confirmed_at?: string; // 用户确认关联的时刻
   summary_generated_at?: string;    // summary 生成时刻（防 stale）
   summary_source?: { feishu_minute_token?: string; align_offset_ms?: number; mark_count: number; cue_count: number; transcript_truncated?: boolean; used_cue_count?: number };
+  segment_digests?: Record<string, string>; // WS2-C V2：active 段一句话 AI 摘要缓存（键＝段 cueHash·内容变即换键失效·旧键残留无害）。零迁移 optional
   created_at: string;
   updated_at: string;
 }
