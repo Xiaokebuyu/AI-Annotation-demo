@@ -10,7 +10,7 @@ import { infoSheet, pickOneSheet } from './sheet';
 import { getMeeting, updateMeeting, getFoldedMarksByContext, getCachedMinute, putCachedMinute } from '../local/store';
 import { postNdjson } from '../core/api';
 import { settings } from '../app/state';
-import { listRecentPanelMeetings, getMinuteTranscript, bindPanelMinute, getPanelMeetingSummary, generatePanelMeetingSummary, type PanelFeishuMeeting } from '../integration/panel-feishu/client';
+import { listRecentPanelMeetings, getMinuteTranscript, bindPanelMinute, getPanelMeetingSummary, generatePanelMeetingSummary, type PanelFeishuMeeting, type PanelMeetingSummaryStatus } from '../integration/panel-feishu/client';
 import { parseSrtTranscript, type TranscriptCue } from '../integration/panel-feishu/align';
 import { buildSegments, buildSegmentMarks, digestCacheKey, type RecapSegment } from '../integration/panel-feishu/segment';
 import type { PersistedMeeting, PersistedMark, PanelMeetingSummaryRecord } from '../core/store-format';
@@ -48,17 +48,23 @@ function fmtDiff(deltaMs: number): string {
 
 /** detail 里「会后记录」卡的 HTML（含关联状态）。 */
 export function renderRecapCard(m: PersistedMeeting): string {
-  const associated = !!m.feishu_minute_token;
+  // 放宽：有飞书会议(feishu_meeting_id)即可进 recap 看 panel 总结；妙记(token)绑了再补转写对轴。
+  const associated = !!(m.feishu_meeting_id || m.feishu_minute_token);
   if (associated) {
-    const state = m.align_state ? ALIGN_LABEL[m.align_state] : '约对齐';
+    const hasMinute = !!m.feishu_minute_token;
+    const state = hasMinute ? (m.align_state ? ALIGN_LABEL[m.align_state] : '约对齐') : (m.panel_summary ? 'panel 总结已同步' : '等 panel 绑定妙记');
     const linked = [m.feishu_topic, m.panel_meeting_start ? fmtClock(m.panel_meeting_start) : ''].filter(Boolean).join(' · ');
+    const nm = hasMinute ? '飞书妙记转写' : '飞书会后记录';
+    const desc = hasMinute
+      ? `已关联${linked ? '：' + esc(linked) : ''} · 点开读转写 + 手写档案`
+      : `已关联飞书会议${linked ? '：' + esc(linked) : ''} · 点开看 panel 总结，妙记绑定后补转写`;
     return `<section class="msec" id="recap-sec"><div class="msec-h"><span class="mt">会后记录</span><span class="mb">${esc(state)}</span></div>`
-      + `<div class="matcard" id="recap-open"><span class="ic">${SVG_DOC}</span><div><div class="nm">飞书妙记转写</div>`
-      + `<div class="mt">已关联${linked ? '：' + esc(linked) : ''} · 点开读转写 + 手写档案</div></div></div>`
-      + `<div class="dact" style="padding:8px 0 2px"><button class="hbtn" id="recap-reassoc">换关联</button></div></section>`;
+      + `<div class="matcard" id="recap-open"><span class="ic">${SVG_DOC}</span><div><div class="nm">${nm}${m.panel_summary_unread ? ' · <b>新总结</b>' : ''}</div>`
+      + `<div class="mt">${desc}</div></div></div>`
+      + `<div class="dact" style="padding:8px 0 2px"><button class="hbtn" id="recap-reassoc">改关联会议</button></div></section>`;
   }
-  return `<section class="msec" id="recap-sec"><div class="msec-h"><span class="mt">会后记录</span><span class="mb">需关联飞书妙记</span></div>`
-    + `<div class="empty">把这场会议关联到对应的飞书妙记，会后就能读完整转写、看自己的手写档案。</div>`
+  return `<section class="msec" id="recap-sec"><div class="msec-h"><span class="mt">会后记录</span><span class="mb">需关联飞书会议</span></div>`
+    + `<div class="empty">把这场会议关联到对应的飞书会议，会后就能读 panel 总结；妙记绑定后会补齐转写。</div>`
     + `<div class="dact" style="padding:8px 0 2px"><button class="hbtn pri" id="recap-assoc">关联飞书会议</button></div></section>`;
 }
 
@@ -216,12 +222,18 @@ export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titl
   if (!recapAlive(seq, bodyEl)) return;
   if (!m) { bodyEl.innerHTML = '<p class="rc-note">会议不存在。</p>'; return; }
   titleEl.textContent = `${m.title || '会议'} · 会后记录`;
-  if (!m.feishu_minute_token) { bodyEl.innerHTML = '<p class="rc-note">尚未关联飞书妙记。</p>'; return; }
+  if (m.panel_summary_unread) void updateMeeting(m.meeting_id, { panel_summary_unread: false }); // 进 recap 即「已读」·清 home/detail 提醒
+  const hasPanelMeeting = !!m.feishu_meeting_id;
+  const hasMinute = !!m.feishu_minute_token;
+  if (!hasPanelMeeting && !hasMinute) { bodyEl.innerHTML = '<p class="rc-note">尚未关联飞书会议。</p>'; return; }
 
-  let loaded: { srt: string; cues: TranscriptCue[] } | null;
-  try { loaded = await loadTranscript(m); }
-  catch (e) { if (!recapAlive(seq, bodyEl)) return; bodyEl.innerHTML = `<p class="rc-note">拉取转写失败：${esc(String((e as Error)?.message || e))}（已关联的转写若曾缓存可离线读）。</p>`; return; }
-  if (!recapAlive(seq, bodyEl)) return;
+  // 有妙记才拉转写；只有 panel 会议（妙记未绑）时跳过转写，靠 panel 总结 + 手写档案撑起 recap。
+  let loaded: { srt: string; cues: TranscriptCue[] } | null = null;
+  if (hasMinute) {
+    try { loaded = await loadTranscript(m); }
+    catch (e) { if (!recapAlive(seq, bodyEl)) return; bodyEl.innerHTML = `<p class="rc-note">拉取转写失败：${esc(String((e as Error)?.message || e))}（已关联的转写若曾缓存可离线读）。</p>`; return; }
+    if (!recapAlive(seq, bodyEl)) return;
+  }
   const cues = loaded?.cues ?? [];
 
   const marks = (await getFoldedMarksByContext('mtg_' + m.meeting_id)).filter((mk) => !mk.is_tombstone).sort((a, b) => a.abs_timestamp - b.abs_timestamp);
@@ -232,11 +244,11 @@ export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titl
     t0, finiteMs(m.align_offset_ms),
   );
   // 转写与手写都空 → 无可展示；但**转写未就绪而有手写时仍要把手写档案露出来**（否则用户的手写被整页静默隐藏）。
-  if (!cues.length && !segMarks.length) { bodyEl.innerHTML = '<p class="rc-note">转写为空或还在生成，本场也没有手写档案。</p>'; return; }
+  if (!cues.length && !segMarks.length && !hasPanelMeeting) { bodyEl.innerHTML = '<p class="rc-note">转写为空或还在生成，本场也没有手写档案。</p>'; return; }
 
   const segments = buildSegments({ cues, marks: segMarks });
   recapState = { meeting: m, segments, digests: { ...(m.segment_digests ?? {}) }, view: 'overview', detailIdx: 0, ovPage: 0, dtPage: 0, bodyEl, transcriptMissing: !cues.length,
-    panelSummary: m.panel_summary ?? null, panelSummaryStatus: m.panel_summary ? 'ready' : 'loading' };
+    panelSummary: m.panel_summary ?? null, panelSummaryStatus: m.panel_summary ? 'ready' : (m.panel_summary_status ?? 'loading') };
   renderRecap(bodyEl);
   if (cues.length) void generateDigests(seq, bodyEl, m, segments); // 有转写才补 AI 段摘要（无转写没东西可总结）
   void loadPanelSummary(seq, bodyEl, m); // L5：异步拉 panel 总结（不阻塞时间线·拉到后重渲顶部）
@@ -319,15 +331,35 @@ function pagerHtml(id: string, page: number, total: number): string {
 /** 页码钳到 [0, total-1]（防负/越界渲染空页·codex A#6）。 */
 const clampPage = (p: number, total: number): number => Math.max(0, Math.min(p, total - 1));
 
-/** L5：异步拉 panel 五要素总结，拉到后缓存进会议 + 重渲顶部。失败标 failed（不影响时间线）。 */
+type StoredPanelSummaryStatus = NonNullable<PersistedMeeting['panel_summary_status']>;
+function toStoredPanelSummaryStatus(status: PanelMeetingSummaryStatus): StoredPanelSummaryStatus {
+  if (status === 'ready' || status === 'not_generated' || status === 'missing_minute' || status === 'not_found') return status;
+  return 'failed'; // 'failed' 外的取数态都落库，下次进 recap 直接显示而非永远 loading。
+}
+
+/**
+ * 按 feishu_meeting_id 拉 panel 五要素总结、写入本地缓存。事件消费(summary_ready)与 recap 内共用。
+ * 远端拉取失败 / 本地写失败都会抛 —— 由调用方决定 best-effort（吞掉下次再拉）还是中断（不推 cursor）。
+ */
+export async function refreshPanelSummaryCache(m: PersistedMeeting): Promise<{ status: PanelMeetingSummaryStatus; summary: PanelMeetingSummaryRecord | null }> {
+  if (!m.feishu_meeting_id) {
+    await updateMeeting(m.meeting_id, { panel_summary_status: 'missing_minute' });
+    return { status: 'missing_minute', summary: null };
+  }
+  const r = await getPanelMeetingSummary(m.feishu_meeting_id);
+  const fetchedAt = new Date().toISOString();
+  if (r.summary) await updateMeeting(m.meeting_id, { panel_summary: r.summary, panel_summary_fetched_at: fetchedAt, panel_summary_status: 'ready' });
+  else await updateMeeting(m.meeting_id, { panel_summary_fetched_at: fetchedAt, panel_summary_status: toStoredPanelSummaryStatus(r.status) });
+  return r;
+}
+
+/** L5：recap 内异步拉 panel 总结、拉到后重渲顶部。失败标 failed（best-effort·不影响时间线）。 */
 async function loadPanelSummary(seq: number, bodyEl: HTMLElement, m: PersistedMeeting): Promise<void> {
-  if (!m.feishu_meeting_id) { if (recapState) recapState.panelSummaryStatus = 'missing_minute'; return; }
   try {
-    const r = await getPanelMeetingSummary(m.feishu_meeting_id);
+    const r = await refreshPanelSummaryCache(m);
     if (!recapAlive(seq, bodyEl) || !recapState) return;
     recapState.panelSummary = r.summary ?? recapState.panelSummary;
     recapState.panelSummaryStatus = r.summary ? 'ready' : r.status;
-    if (r.summary) await updateMeeting(m.meeting_id, { panel_summary: r.summary, panel_summary_fetched_at: new Date().toISOString(), panel_summary_status: 'ready' });
   } catch {
     if (recapState) recapState.panelSummaryStatus = recapState.panelSummary ? 'ready' : 'failed';
   }
@@ -370,16 +402,39 @@ function panelSummaryHtml(): string {
     return box(`<div style="font-weight:600;margin-bottom:4px">panel AI 总结 · 会议讲了什么${rec.model ? ` · ${esc(rec.model)}` : ''}</div>`
       + blk('📌 结论', s.conclusions) + ai + blk('⚠️ 风险', s.risks) + blk('❓ 待决', s.open_questions) + blk('➡️ 后续', s.next_steps));
   }
-  if (status === 'missing_minute') return box('尚未关联妙记，无法生成 panel 总结。');
+  if (status === 'missing_minute') return box('这场会议在 panel 端还没拿到妙记转写——AI 总结会在妙记绑定后自动同步过来，设备会自己刷新，无需操作。');
   if (status === 'loading' || status === 'generating') return box(status === 'generating' ? '正在生成 panel 总结…（M3 读完整场转写，稍候）' : '正在拉取 panel 总结…');
-  // not_generated / failed / not_found → 给生成按钮
+  if (status === 'failed') return box('拉取 panel 总结失败（网络/服务波动）。<button class="hbtn" id="ps-refresh" style="margin-top:6px">刷新重试</button>');
+  if (status === 'not_found') return box('panel 没找到这场会议（可能关联错了，可回上一页改关联）。<button class="hbtn" id="ps-refresh" style="margin-top:6px">刷新</button>');
+  // not_generated → 可主动触发生成
   return box('panel 还没生成这场会议的 AI 总结。<button class="hbtn" id="ps-gen" style="margin-top:6px">生成总结</button>');
+}
+
+/** 绑定 panel 总结块的按钮（生成 / 刷新重试）——概览正常态与空态共用。 */
+function wirePanelSummaryButtons(bodyEl: HTMLElement): void {
+  bodyEl.querySelector('#ps-gen')?.addEventListener('click', () => { // 生成 panel 总结（带 seq/会议守卫·防串会）
+    if (!recapState) return;
+    void generatePanelSummary(recapLoadSeq, bodyEl, recapState.meeting.meeting_id);
+  });
+  bodyEl.querySelector('#ps-refresh')?.addEventListener('click', () => { // 失败/未找到时重拉
+    if (!recapState) return;
+    recapState.panelSummaryStatus = 'loading';
+    renderRecap(bodyEl);
+    void loadPanelSummary(recapLoadSeq, bodyEl, recapState.meeting);
+  });
 }
 
 /** 概览：段级中轴时间线。active 段左摘要右手写、quiet 段轴上塌缩站点。点段→详情。 */
 function renderRecapOverview(bodyEl: HTMLElement): void {
   if (!recapState) return;
   const { meeting, segments, digests } = recapState;
+  // 空态：有飞书会议但无转写无手写——别渲空时间轴误导用户「内容没加载出来」（意图 #3）。
+  if (!segments.length) {
+    bodyEl.innerHTML = panelSummaryHtml()
+      + `<div class="rc-note">这场会议已关联飞书会议；panel 总结生成后会自动同步到这里。当前还没有转写和手写档案。</div>`;
+    wirePanelSummaryButtons(bodyEl);
+    return;
+  }
   const stateLabel = meeting.align_state ? ALIGN_LABEL[meeting.align_state] : '约对齐';
   const hasInk = segments.some((s) => s.kind === 'active');
   const note = recapState.transcriptMissing
@@ -415,10 +470,7 @@ function renderRecapOverview(bodyEl: HTMLElement): void {
     + `<div class="rc-note">${note}</div>`
     + `<div class="tl-seg"><div class="tl-ax"></div>${rows}</div>`
     + pagerHtml('ov', p, total);
-  bodyEl.querySelector('#ps-gen')?.addEventListener('click', () => { // L5：生成 panel 总结（带 seq/会议守卫·防串会）
-    if (!recapState) return;
-    void generatePanelSummary(recapLoadSeq, bodyEl, recapState.meeting.meeting_id);
-  });
+  wirePanelSummaryButtons(bodyEl);
 
   bodyEl.querySelectorAll<HTMLElement>('[data-seg]').forEach((el) => el.addEventListener('click', () => {
     if (!recapState) return;

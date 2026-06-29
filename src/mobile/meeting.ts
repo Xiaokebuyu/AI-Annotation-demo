@@ -20,9 +20,9 @@ import {
 } from '../local/store';
 import { esc } from '../core/escape';
 import { infoSheet, formSheet, pickSheet } from './sheet';
-import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting, resetRecapView, recapHandleBack } from './meeting-recap';
+import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting, resetRecapView, recapHandleBack, refreshPanelSummaryCache } from './meeting-recap';
 import type { MeetingStatus, PersistedMeeting, PersistedWorkspace, PersistedDoc, PersistedMark } from '../core/store-format';
-import { pollPanelMeetingEvents, listActivePanelMeetings, type PanelFeishuMeeting } from '../integration/panel-feishu/client';
+import { pollPanelMeetingEvents, listActivePanelMeetings, type PanelFeishuMeeting, type PanelMeetingEvent } from '../integration/panel-feishu/client';
 
 // ── 飞书后端（feishu-service）+ 文档转换（convert-service）：同 web 默认端口；服务不在则静默退回纯本地 ──
 const FEISHU_BASE = ((import.meta.env.VITE_FEISHU_BASE_URL as string | undefined) ?? 'http://localhost:4321').replace(/\/+$/, '');
@@ -128,9 +128,18 @@ function pageMbody(viewEl: HTMLElement, key: string, land: 'first' | 'keep' = 'f
 // ════ L1：panel 飞书会议同步（VC all_meeting_started/ended → 本地会议·带真 t0）════
 const PANEL_CURSOR_KEY = 'inkloop.panelMeeting.cursor.v1';
 const panelUpserts = new Map<string, Promise<void>>(); // 按 meeting_id 串行·防 events+active 并发同一会议重复建
+type PanelMeetingUpsertType = 'started' | 'ended' | 'metadata'; // metadata=minute_bound/summary_ready 带来的元数据更新·不改 status/时间
 
-/** panel 会议 → 落成本地会议。靠 feishu_meeting_id 幂等去重·同一 meeting_id 串行（防并发重复建）。 */
-async function upsertPanelMeeting(mt: PanelFeishuMeeting, type: 'started' | 'ended'): Promise<void> {
+/** 事件内嵌会议上的当前妙记 token（顶层 minute_token 优先·回退 match.minute_token）。 */
+function panelMinuteToken(mt: PanelFeishuMeeting): string | null {
+  return mt.minute_token || mt.match?.minute_token || null;
+}
+async function findLocalPanelMeeting(panelMeetingId: string): Promise<PersistedMeeting | null> {
+  return (await listAllMeetings()).find((x) => x.feishu_meeting_id === panelMeetingId) ?? null;
+}
+
+/** panel 会议 → 落成本地会议。靠 feishu_meeting_id 幂等去重·同一 meeting_id 串行（防并发重复建）。本地写失败会抛 → 上层不推 cursor。 */
+async function upsertPanelMeeting(mt: PanelFeishuMeeting, type: PanelMeetingUpsertType): Promise<void> {
   if (!mt.meeting_id) return;
   const key = mt.meeting_id;
   const prev = panelUpserts.get(key) ?? Promise.resolve();
@@ -141,14 +150,15 @@ async function upsertPanelMeeting(mt: PanelFeishuMeeting, type: 'started' | 'end
   await job;
 }
 
-async function upsertPanelMeetingInner(mt: PanelFeishuMeeting, type: 'started' | 'ended'): Promise<void> {
-  const existing = (await listAllMeetings()).find((x) => x.feishu_meeting_id === mt.meeting_id);
+async function upsertPanelMeetingInner(mt: PanelFeishuMeeting, type: PanelMeetingUpsertType): Promise<void> {
+  const existing = await findLocalPanelMeeting(mt.meeting_id);
   const existingWs = existing ? await getWorkspace(existing.workspace_id) : null;
   // C：start_time 缺失时**不伪装成真会议 t0**——优先已存真 t0，否则只拿同步时刻占位（不标 vc_event）。
   const hasRealStart = typeof mt.start_time === 'number' && Number.isFinite(mt.start_time);
   const realT0 = hasRealStart ? mt.start_time! : (typeof existing?.vc_meeting_start_t0 === 'number' ? existing.vc_meeting_start_t0 : 0);
   const startMs = realT0 || Date.now();
-  const startIso = new Date(startMs).toISOString();
+  // 无真 t0 时不覆盖已有时间（metadata 事件常无 start_time·别把时间刷成同步时刻）。
+  const startIso = realT0 ? new Date(startMs).toISOString() : (existing?.started_at || existing?.scheduled_at || new Date(startMs).toISOString());
   const endMs = typeof mt.end_time === 'number' && mt.end_time > 0 ? mt.end_time : 0;
   // B：无 group_ids 不建飞书伪群（renderWs 拉 members 必失败），落 manual「飞书会议」桶；已在真群则复用。
   const ws = mt.group_ids?.[0]
@@ -156,11 +166,14 @@ async function upsertPanelMeetingInner(mt: PanelFeishuMeeting, type: 'started' |
     : (existingWs && existingWs.source === 'feishu' ? existingWs : await upsertPanelWorkspace('飞书会议'));
   const base = existing ?? await createMeeting(ws.workspace_id, { title: mt.topic || '飞书会议', scheduled_at: startIso });
   const ended = type === 'ended' || endMs > 0;
-  await updateMeeting(base.meeting_id, {
+  // metadata 事件不改既有 status（minute_bound/summary_ready 不该把已结束会议刷回 live、或反之）。
+  const nextStatus: MeetingStatus = type === 'metadata' && existing ? existing.status : ended ? 'ended' : 'live';
+  const minuteToken = panelMinuteToken(mt);
+  const saved = await updateMeeting(base.meeting_id, {
     workspace_id: ws.workspace_id,                 // 迁移到正确 workspace（无群→manual·后续拿到真群→迁真群）
     title: mt.topic || base.title,
     scheduled_at: startIso,
-    status: ended ? 'ended' : 'live',
+    status: nextStatus,
     started_at: startIso,
     ...(endMs ? { ended_at: new Date(endMs).toISOString() } : {}),
     feishu_meeting_id: mt.meeting_id,
@@ -170,9 +183,10 @@ async function upsertPanelMeetingInner(mt: PanelFeishuMeeting, type: 'started' |
     ...(realT0
       ? { vc_meeting_start_t0: realT0, t0_source: 'vc_event', align_state: 'event', panel_meeting_start: realT0 }
       : { t0_source: 'local_enter', align_state: 'uncalibrated' }),
-    ...(mt.minute_token ? { feishu_minute_token: mt.minute_token } : {}),
+    ...(minuteToken ? { feishu_minute_token: minuteToken } : {}),
     ...(mt.minute_url ? { feishu_minute_url: mt.minute_url } : {}),
   });
+  if (!saved) throw new Error(`本地会议写入失败（同步 panel 会议 ${mt.meeting_id}）`); // 写失败 → 上层不推 cursor·下次重放
   // 正在会中这场 → 热更 t0（仅当有真 t0·事件迟到/补发时不丢时间脊基准）
   if (liveMtg && liveMtg.id === base.meeting_id && realT0) {
     liveMtg.startedAt = realT0;
@@ -181,11 +195,44 @@ async function upsertPanelMeetingInner(mt: PanelFeishuMeeting, type: 'started' |
   }
 }
 
+/** minute_bound：把妙记 token 写回本地会议（解锁转写对轴）。缺 token=数据问题·跳过不堵流；本地写失败=抛·不推 cursor。 */
+async function applyPanelMinuteBound(mt: PanelFeishuMeeting): Promise<void> {
+  if (!mt.meeting_id) return;
+  if (!panelMinuteToken(mt)) { console.warn('[panel] minute_bound 缺 token·跳过', mt.meeting_id); return; }
+  await upsertPanelMeeting(mt, 'metadata');
+}
+
+/** summary_ready：写回元数据后按 meeting_id 拉 panel 总结缓存。拉总结失败=best-effort 吞掉（下次进 recap 再拉）；本地会议写失败=抛·不推 cursor。 */
+async function applyPanelSummaryReady(mt: PanelFeishuMeeting): Promise<void> {
+  if (!mt.meeting_id) return;
+  await upsertPanelMeeting(mt, 'metadata'); // 写会议元数据·失败抛
+  const local = await findLocalPanelMeeting(mt.meeting_id);
+  if (!local) return;
+  const prevAt = local.panel_summary?.generated_at ?? 0;
+  try {
+    const r = await refreshPanelSummaryCache(local);
+    // 后台到达「更新的」总结 → 标未读（home/detail 提醒·进 recap 时清）。重放同一份 generated_at 不变 → 不重复标。
+    if (r.summary && r.summary.generated_at > prevAt) await updateMeeting(local.meeting_id, { panel_summary_unread: true });
+  } catch (e) { console.warn('[panel] summary_ready 拉总结失败（进 recap 时再拉）：', e); }
+}
+
+/** 分发一条 panel 事件。未知类型忽略（向前兼容）。本地写失败冒泡 → syncPanelMeetings 中断 → 不推 cursor → 下次重放。 */
+async function consumePanelMeetingEvent(ev: PanelMeetingEvent): Promise<void> {
+  switch (ev.type) {
+    case 'started':
+    case 'ended': await upsertPanelMeeting(ev.meeting, ev.type); return;
+    case 'minute_bound': await applyPanelMinuteBound(ev.meeting); return;
+    case 'summary_ready': await applyPanelSummaryReady(ev.meeting); return;
+    default: return;
+  }
+}
+
 /** 拉 panel 增量会议事件 + 进行中快照，落成本地会议。失败静默（不阻断 home·退回纯本地）。 */
 async function syncPanelMeetings(): Promise<void> {
   const since = Number(localStorage.getItem(PANEL_CURSOR_KEY) || 0) || 0;
   const feed = await pollPanelMeetingEvents(since);
-  for (const ev of feed.events) await upsertPanelMeeting(ev.meeting, ev.type);
+  // 逐条消费·任一条本地写失败即抛 → 中断循环 → 不推 cursor → 下次重放（不静默丢同步）。
+  for (const ev of feed.events) await consumePanelMeetingEvent(ev);
   if (feed.cursor && feed.cursor !== since) localStorage.setItem(PANEL_CURSOR_KEY, String(feed.cursor));
   // 无 cursor / 迟到打开：补进行中会议（active·12h 内未结束）
   for (const mt of await listActivePanelMeetings()) await upsertPanelMeeting(mt, 'started');
@@ -215,6 +262,11 @@ async function renderHome(): Promise<void> {
     ? `<span class="fs-ok"><span class="d"></span>飞书已连${fsEvents.length ? ` · ${fsEvents.length} 条` : ''}</span>`
     : '';
   const tl = timeline(fsEvents);
+  // #1 会后总结可感知：summary_ready 后台到达的总结标了 panel_summary_unread → home 顶部提醒。
+  const unread = allMeetings.filter((m) => m.panel_summary_unread);
+  const unreadBar = unread.length
+    ? `<button class="hbtn" id="mh-unread" style="display:block;width:calc(100% - 36px);margin:10px 18px 0;text-align:left;font-weight:600">📋 ${unread.length} 场会议总结已同步 · 点开看 ›</button>`
+    : '';
   const schedRows = sched.map((m) => mrow(m, wsName.get(m.workspace_id))).join('')
     || (tl ? '' : `<p class="empty">还没接飞书日历，本地也没有会议。进群聊「+ 新建会议」。</p>`);
   const wsGrid = workspaces.length
@@ -224,7 +276,7 @@ async function renderHome(): Promise<void> {
   el('mv-home').innerHTML =
     `<div class="vhead"><h1>会议</h1><span class="cnt">${workspaces.length} 群 · ${allMeetings.length} 场</span><span class="sp"></span>`
     + `<button class="hbtn" id="mh-sim">模拟会议</button></div>`
-    + `<div class="mbody">`
+    + `<div class="mbody">${unreadBar}`
     + `<section class="msec"><div class="msec-h"><span class="mt">会议日程</span><span class="mb">飞书 + 本地 · 待开始/进行中</span>${fsOk}</div>${tl}${schedRows}</section>`
     + `<section class="msec"><div class="msec-h"><span class="mt">群聊书架</span><span class="mb">以群聊为单位</span></div>${wsGrid}</section>`
     + `</div>`;
@@ -233,6 +285,11 @@ async function renderHome(): Promise<void> {
     const m = await startSimMeeting();
     if (!m) { await infoSheet({ title: '模拟会议', message: '先连一个飞书群（机器人所在群会自动同步成工作区）再开模拟会议。' }); return; }
     mv = { wsId: m.workspace_id, mtgId: m.meeting_id }; setMtg('detail'); void renderDetail();
+  });
+  el('mv-home').querySelector('#mh-unread')?.addEventListener('click', () => { // 跳第一场有新总结的会议详情（其会后记录卡标「新总结」）
+    const first = unread[0];
+    if (!first) return;
+    mv = { wsId: first.workspace_id, mtgId: first.meeting_id }; setMtg('detail'); void renderDetail();
   });
   el('mv-home').querySelectorAll<HTMLElement>('.ws-card[data-ws]').forEach((c) => c.addEventListener('click', () => { mv = { wsId: c.dataset.ws }; setMtg('ws'); void renderWs(); }));
   wireRows(el('mv-home'));

@@ -47,11 +47,11 @@ export async function listRecentPanelMeetings(limit = 20, opts?: { signal?: Abor
   return r.meetings ?? [];
 }
 
-/** L1 增量事件（设备增量轮询·seq 游标）：一条 event 内嵌完整会议（带真 start_time + match）。 */
+/** L1+L5 增量事件（设备增量轮询·seq 游标）：一条 event 内嵌完整会议（带真 start_time + match + 当前 minute_token）。 */
 export interface PanelMeetingEvent {
   seq: number;
-  type: 'started' | 'ended';
-  occurred_at: number;          // epoch ms（started=会议开始 / ended=会议结束）
+  type: 'started' | 'ended' | 'minute_bound' | 'summary_ready';
+  occurred_at: number;          // epoch ms（started=会议开始 / ended=会议结束 / minute_bound=妙记绑定 / summary_ready=总结生成）
   created_at: number;           // epoch ms（panel 落库时刻）
   meeting: PanelFeishuMeeting;
 }

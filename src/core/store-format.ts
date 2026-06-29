@@ -187,7 +187,8 @@ export interface PersistedMeeting {
   // ── L5 panel 总结缓存（recap 顶部显示·离线不丢·optional 零迁移）──
   panel_summary?: PanelMeetingSummaryRecord;
   panel_summary_fetched_at?: string;
-  panel_summary_status?: 'ready' | 'not_generated' | 'missing_minute' | 'failed';
+  panel_summary_status?: 'ready' | 'not_generated' | 'missing_minute' | 'not_found' | 'failed';
+  panel_summary_unread?: boolean;   // 总结由 summary_ready 事件后台到达、用户还没进 recap 看过（home/detail 提醒用·进 recap 即清）
   created_at: string;
   updated_at: string;
 }

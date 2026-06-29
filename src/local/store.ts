@@ -561,16 +561,19 @@ export function putImageExplain(i: number, bbox: NormBBox, explanation: string):
 
 // ── 会议工作区（v4）：workspaces + meetings（CRUD，非 append-only，就地 put）──────
 
+// 写失败要让上层知道（L1 事件消费靠它决定「写确认成功才推 cursor」·防静默丢同步）。
+// 但 db 不可用（隐私模式/不支持 IndexedDB）仍降级纯内存——与全局降级一致·不抛。
 function putInto(storeName: string, rec: object): Promise<void> {
   return openDB().then((db) => {
     if (!db) return;
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       try {
         const tx = db.transaction(storeName, 'readwrite');
         tx.objectStore(storeName).put(rec);
         tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-      } catch { resolve(); }
+        tx.onerror = () => reject(tx.error ?? new Error(`IndexedDB put failed: ${storeName}`));
+        tx.onabort = () => reject(tx.error ?? new Error(`IndexedDB put aborted: ${storeName}`));
+      } catch (e) { reject(e); }
     });
   });
 }
