@@ -119,6 +119,7 @@ export function createPager(container: HTMLElement, opts: PagerOpts = {}): Pager
   // ── 自动重排：内容增长/重渲 → 重排（落位按 onGrow）；container resize → 守页重排 ──
   let ro: ResizeObserver | null = null;
   let mo: MutationObserver | null = null;
+  let onLoad: ((e: Event) => void) | null = null;
   let raf = 0;
   let pendingGrow = false;
   const schedule = (grow: boolean): void => {
@@ -134,6 +135,8 @@ export function createPager(container: HTMLElement, opts: PagerOpts = {}): Pager
     try {
       ro = new ResizeObserver(() => schedule(false));
       ro.observe(container);
+      onLoad = () => schedule(false); // 图片/iframe 解码完高度变 → 守页重排（RO 抓不到 content 内子元素尺寸变）
+      content.addEventListener('load', onLoad, true);
       mo = new MutationObserver((recs) => {
         for (const r of recs) {
           if (r.type === 'childList') {
@@ -143,12 +146,17 @@ export function createPager(container: HTMLElement, opts: PagerOpts = {}): Pager
               (n) => n instanceof HTMLElement && n.classList.contains(spacerClass),
             );
             if (onlySpacers) continue;
+            schedule(true); // 真内容增删 → 按 onGrow 落位
+            return;
           }
-          schedule(true); // 真内容变动 → 按 onGrow 落位
+          // characterData / attributes('open'=<details> 折叠) → 高度变·守当前页重排
+          schedule(false);
           return;
         }
       });
-      mo.observe(content, { childList: true, subtree: true, characterData: true });
+      // attributes:['open'] 抓 <details> 折叠（dev 流水线/设置大量用·展开后高度变·否则页数/spacer 旧）。
+      // 不观察 class/style：避按钮态/minHeight 自身变动狂刷（minHeight 是 style·本就不在过滤里）。
+      mo.observe(content, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open'] });
     } catch { /* 老 WebView 无 RO/MO：调用方手动 relayout */ }
   }
 
@@ -164,13 +172,17 @@ export function createPager(container: HTMLElement, opts: PagerOpts = {}): Pager
     info() { return { index: vIndex, count: vCount() }; },
     vh,
     pageOf(node) {
-      const cr = content.getBoundingClientRect();
+      // 页边界以 container（scroll 容器）顶为基准（paginateLayout 同基准）——不能用 content 顶，
+      // 否则漏掉容器 padding，被 spacer 推到下屏顶的块会算成上一页。
+      const er = container.getBoundingClientRect();
       const nr = node.getBoundingClientRect();
-      return Math.max(0, Math.min(vCount() - 1, Math.floor((nr.top - cr.top) / vh())));
+      const y = nr.top - er.top + container.scrollTop;
+      return Math.max(0, Math.min(vCount() - 1, Math.floor(y / vh())));
     },
     destroy() {
       ro?.disconnect();
       mo?.disconnect();
+      if (onLoad) content.removeEventListener('load', onLoad, true);
       if (raf) cancelAnimationFrame(raf);
       content.querySelectorAll('.' + spacerClass).forEach((s) => s.remove());
       content.style.minHeight = '';
@@ -197,6 +209,7 @@ export function mountPagerBar(pager: Pager, host: HTMLElement): PagerBar {
     prev.disabled = info.index <= 0;
     next.disabled = info.index >= info.count - 1;
     bar.style.display = info.count <= 1 ? 'none' : '';
+    host.classList.toggle('has-vpages', info.count > 1); // 单页时容器不留 46px（CSS 用 .has-vpages 才让底）
   };
   host.appendChild(bar);
   update(pager.info());

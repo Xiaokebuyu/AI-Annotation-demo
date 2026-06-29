@@ -566,10 +566,10 @@
   .vpager-pn{font:12px var(--mono);color:var(--mut);min-width:46px;text-align:center;}
   /* .rv 这类绝对布局面：翻页条停底，vbody 让出 46px */
   .rv .vpager-bar{position:absolute;left:0;right:0;bottom:0;background:var(--page);border-top:1px solid var(--hair);z-index:2;padding:8px 0;}
-  .rv .vbody{bottom:46px;}
+  .rv.has-vpages .vbody{bottom:46px;}  /* 仅多页时让出 46px（单页不留空隙）*/
   /* 书架翻页：卡片按行成块（替代 .grid 自动流·便于虚拟页 spacer 推行） */
   .brow{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}
   /* 翻页条停底（会议 mview / dev dv 绝对面让 46px；抽屉/浮层 flex 列自然停底加分隔线） */
-  .mview .mbody,.dv .dbody{bottom:46px;}
+  .mview.has-vpages .mbody,.dv.has-vpages .dbody{bottom:46px;}  /* 仅多页时让出 */
   .mview .vpager-bar,.dv .vpager-bar{position:absolute;left:0;right:0;bottom:0;background:var(--page);border-top:1px solid var(--hair);z-index:2;padding:8px 0;}
   #files .vpager-bar,#m-insight .vpager-bar,#mtg-side .vpager-bar{border-top:1px solid var(--hair);}
