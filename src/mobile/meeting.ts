@@ -23,6 +23,7 @@ import { infoSheet, formSheet, pickSheet } from './sheet';
 import { renderRecapCard, wireRecapCard, loadRecapView, summarizeMeeting, resetRecapView, recapHandleBack, refreshPanelSummaryCache } from './meeting-recap';
 import type { MeetingStatus, PersistedMeeting, PersistedWorkspace, PersistedDoc, PersistedMark } from '../core/store-format';
 import { pollPanelMeetingEvents, listActivePanelMeetings, type PanelFeishuMeeting, type PanelMeetingEvent } from '../integration/panel-feishu/client';
+import { syncMeetingGroupMaterials } from '../features/meeting/feishu-materials';
 
 // ── 飞书后端（feishu-service）+ 文档转换（convert-service）：同 web 默认端口；服务不在则静默退回纯本地 ──
 const FEISHU_BASE = ((import.meta.env.VITE_FEISHU_BASE_URL as string | undefined) ?? 'http://localhost:4321').replace(/\/+$/, '');
@@ -268,7 +269,7 @@ async function renderHome(): Promise<void> {
     ? `<button class="hbtn" id="mh-unread" style="display:block;width:calc(100% - 36px);margin:10px 18px 0;text-align:left;font-weight:600">📋 ${unread.length} 场会议总结已同步 · 点开看 ›</button>`
     : '';
   const schedRows = sched.map((m) => mrow(m, wsName.get(m.workspace_id))).join('')
-    || (tl ? '' : `<p class="empty">还没接飞书日历，本地也没有会议。进群聊「+ 新建会议」。</p>`);
+    || (tl ? '' : `<p class="empty">还没接飞书日历，本地也没有会议。飞书群同步后，会在群聊书架里出现。</p>`);
   const wsGrid = workspaces.length
     ? `<div class="ws-grid">${workspaces.map((w) => wsCard(w, count.get(w.workspace_id) ?? 0)).join('')}</div>`
     : `<p class="empty">还没有群聊。机器人所在的飞书群会自动同步进来。</p>`;
@@ -347,7 +348,7 @@ async function renderWs(): Promise<void> {
   const secs = buckets.map(([st, label]) => {
     const ms = meetings.filter((m) => m.status === st);
     return ms.length ? `<section class="msec"><div class="msec-h"><span class="mt">${label}</span><span class="mb">${ms.length}</span></div>${ms.map((m) => mrow(m)).join('')}</section>` : '';
-  }).join('') || `<p class="empty" style="padding:16px 18px">这个群聊还没有会议。点右上「+ 新建会议」。</p>`;
+  }).join('') || `<p class="empty" style="padding:16px 18px">这个群聊还没有会议。可以点右上「+ 新建会议」先建一场本地会议。</p>`;
 
   el('mv-ws').innerHTML =
     `<div class="mtop"><span class="bk" data-back="home">${SVG_BACK}</span><span class="ti">${esc(ws.name)}</span><span class="sp"></span><button class="hbtn" id="mw-new">+ 新建会议</button></div>`
@@ -395,6 +396,11 @@ async function renderDetail(): Promise<void> {
   const mtgCtx = 'mtg_' + m.meeting_id;
   const markLists = await Promise.all(mats.map((b) => getFoldedMarks(b.document_id).then((ms) => ms.filter((mk) => mk.context_id === mtgCtx))));
   const ws = await getWorkspace(m.workspace_id);
+  // 进会议详情自动抓群文件 → 转 PDF → 入资料书架（幂等去重·后台不阻塞渲染·有新增则重渲）。
+  if (ws?.source === 'feishu' && ws.feishu_chat_id) {
+    void syncMeetingGroupMaterials({ meetingId: m.meeting_id, chatId: ws.feishu_chat_id, feishuBase: FEISHU_BASE, convertBase: CONVERT_BASE })
+      .then((r) => { if (r.changed && mv.mtgId === m.meeting_id) void renderDetail(); });
+  }
   // 会议手记（白板物化的 diary doc）：列进手写档案区·点击=进会议回到手记
   const noteId = noteIdOf(m.meeting_id);
   const [noteDoc, noteMarks] = await Promise.all([getDoc(noteId), getFoldedMarks(noteId)]);

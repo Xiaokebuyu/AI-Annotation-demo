@@ -1,7 +1,10 @@
-import * as pdfjsLib from 'pdfjs-dist';
-import type { PDFPageProxy, PageViewport } from 'pdfjs-dist';
+// legacy build：电纸屏 WebView=Chrome 109，modern worker 用了未 polyfill 的 Promise.withResolvers
+// （主线程被别的依赖 polyfill 了、但 worker 是独立 realm 没有）→ worker 一调即抛 → 79 页 PDF 只解出 2 页 + 整页空白。
+// legacy build 把 core-js 的 Promise.withResolvers 等 polyfill 打进 worker realm，Chrome 109 上可正常解析渲染。
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import type { PDFPageProxy, PageViewport } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import type { NormBBox, OcrTextBlock } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
 import { sha256Hex, pageIdFor } from '../core/ids';
@@ -192,6 +195,32 @@ export async function openPdfFromUrl(documentId: string, filename: string, pdfUr
   const buf = await r.arrayBuffer();
   const blob = new Blob([buf.slice(0)], { type: 'application/pdf' }); // 拷贝：getDocument 可能 detach
   await loadIntoState(buf, filename, blob, documentId);
+}
+
+/**
+ * 后台导入一份 PDF（建 PersistedDoc + 落字节）但**不打开阅读器/不切视图**——群文件自动抓取用。
+ * 资料据此进 listBooks / 会议 material_doc_ids 列表；点开时走 reopenBook 才真渲染。已存库直接 'cached'。
+ * openDoc 会改模块 current（P0-4），故导入后恢复，避免静默串写到当前阅读态。
+ */
+export async function importPdfFromUrl(documentId: string, filename: string, pdfUrl: string): Promise<'cached' | 'imported'> {
+  if (await loadPdfBlob(documentId)) return 'cached'; // 去重：稳定 docId 已导入
+  const r = await fetch(pdfUrl);
+  if (!r.ok) throw new Error('import pdf ' + r.status);
+  const buf = await r.arrayBuffer();
+  const fileHash = await sha256Hex(buf.slice(0));
+  const pdf = await pdfjsLib.getDocument({
+    data: buf.slice(0),
+    cMapUrl: publicAssetUrl('cmaps/'),
+    cMapPacked: true,
+    standardFontDataUrl: publicAssetUrl('standard_fonts/'),
+  }).promise;
+  const pageCount = pdf.numPages;
+  try { void pdf.destroy(); } catch { /* noop */ }
+  const prevDoc = activeDoc(); // openDoc 改 current → 导入后还原回原活跃文档
+  await openDoc({ document_id: documentId, file_hash: fileHash, filename, page_count: pageCount });
+  setActiveDoc(prevDoc);
+  await storePdfBlob(documentId, new Blob([buf.slice(0)], { type: 'application/pdf' }));
+  return 'imported';
 }
 
 /**
