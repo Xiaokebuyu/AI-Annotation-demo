@@ -18,11 +18,20 @@ import { pageIdFor } from '../../core/ids';
 import type { PersistedMeeting } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
 import {
-  type DocumentProjection, type DocumentProjectionExportEnvelope, type ProjectionBlock,
-  type KnowledgeExportEnvelope,
-  DOC_PROJECTION_SCHEMA_VERSION, DOC_PROJECTION_EXPORT_SCHEMA_VERSION, KO_EXPORT_SCHEMA_VERSION,
-  docUri, projectionBodyHash, projectionContentHash, stampExportId, stableToken, isExportableKo,
-} from './contract';
+  buildInkloopDocUri,
+  computeDocumentProjectionBodyHash,
+  computeDocumentProjectionHash,
+  DOCUMENT_PROJECTION_EXPORT_SCHEMA_VERSION,
+  type DocumentProjection,
+  type DocumentProjectionBlock as ProjectionBlock,
+  type DocumentProjectionExportEnvelope,
+  isExportableKnowledgeObject as isExportableKo,
+  type KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope,
+} from 'ink-surface-sdk/knowledge-schema';
+import { stampExportId, stableToken } from './export-ids';
+
+const DOC_PROJECTION_SCHEMA_VERSION = 'inkloop.document_projection.v1' as const;
+const KO_EXPORT_SCHEMA_VERSION = 'inkloop.knowledge_export.v1' as const;
 
 const MEETING_DOC_PREFIX = 'mtgdoc_';
 /** 会议导出用的合成文档 id（与会议白板 mtgboard_<id> 区分：那是空白手记画布，这是「转写文档」）。 */
@@ -214,7 +223,7 @@ async function buildProjectionEnvelope(
   generated_at: string, appVersion: string, transcriptMissing: boolean, warnings: string[],
 ): Promise<DocumentProjectionExportEnvelope> {
   const baseEnvelope = (projections: DocumentProjection[]): DocumentProjectionExportEnvelope => ({
-    schema_version: DOC_PROJECTION_EXPORT_SCHEMA_VERSION,
+    schema_version: DOCUMENT_PROJECTION_EXPORT_SCHEMA_VERSION,
     export_id: stampExportId('projection', documentId, generated_at),
     generated_at,
     source: { app: 'inkloop', app_version: appVersion, document_id: documentId },
@@ -223,13 +232,13 @@ async function buildProjectionEnvelope(
   });
   if (!blocks.length) { warnings.push('无文档投影块（对方 schema 要求 blocks≥1）'); return baseEnvelope([]); }
 
-  const body_hash = await projectionBodyHash(blocks);
+  const body_hash = await computeDocumentProjectionBodyHash(blocks);
   const base: Omit<DocumentProjection, 'content_hash'> = {
     schema_version: DOC_PROJECTION_SCHEMA_VERSION,
     projection_id: `dp_${documentId}`,
     document_id: documentId,
     document_title: documentTitle,
-    document_uri: docUri(documentId),
+    document_uri: buildInkloopDocUri(documentId),
     revision_id: `rev_${body_hash.replace('sha256:', '').slice(0, 16)}`,
     generated_at,
     source: { app: 'inkloop', app_version: appVersion },
@@ -240,5 +249,5 @@ async function buildProjectionEnvelope(
     created_at: generated_at,
     updated_at: generated_at,
   };
-  return baseEnvelope([{ ...base, content_hash: await projectionContentHash(base) }]);
+  return baseEnvelope([{ ...base, content_hash: await computeDocumentProjectionHash(base) }]);
 }

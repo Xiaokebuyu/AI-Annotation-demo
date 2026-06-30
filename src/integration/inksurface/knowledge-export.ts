@@ -5,7 +5,11 @@
  */
 import { buildKnowledgeObjects, enrichExportTags } from '../../knowledge/builder';
 import type { KnowledgeObject } from '../../knowledge/knowledge-object';
-import { type KnowledgeExportEnvelope, KO_EXPORT_SCHEMA_VERSION, isExportableKo, stampExportId } from './contract';
+import {
+  isExportableKnowledgeObject as isExportableKo,
+  type KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope,
+} from 'ink-surface-sdk/knowledge-schema';
+import { stampExportId } from './export-ids';
 
 export interface ExportOpts { appVersion?: string; generatedAt?: string }
 
@@ -31,7 +35,7 @@ export async function buildKnowledgeExport(
   const exportable = await Promise.all(all.filter(isExportableKo).map((ko) => enrichExportTags(ko))); // local_only / 非可导出状态 / 空正文 都挡在外
   const skipped: SkippedKo[] = all.filter((ko) => !isExportableKo(ko)).map((ko) => ({ ko_id: ko.ko_id, kind: ko.kind, reason: skipReason(ko) }));
   const envelope: KnowledgeExportEnvelope = {
-    schema_version: KO_EXPORT_SCHEMA_VERSION,
+    schema_version: 'inkloop.knowledge_export.v1',
     export_id: stampExportId('export', documentId, generated_at),
     generated_at,
     source: { app: 'inkloop', app_version: opts.appVersion ?? '0.1.0', document_id: documentId },

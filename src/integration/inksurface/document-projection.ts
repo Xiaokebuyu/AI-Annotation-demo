@@ -12,11 +12,19 @@ import { pageIdFor } from '../../core/ids';
 import type { NormBBox } from '../../knowledge/knowledge-object';
 import type { ReflowBlock } from '../../surface/reflow';
 import {
-  type DocumentProjection, type DocumentProjectionExportEnvelope, type ProjectionBlock, type ProjectionBlockKind,
-  DOC_PROJECTION_SCHEMA_VERSION, DOC_PROJECTION_EXPORT_SCHEMA_VERSION,
-  docUri, projectionBodyHash, projectionContentHash, stampExportId, stableToken,
-} from './contract';
+  buildInkloopDocUri,
+  computeDocumentProjectionBodyHash,
+  computeDocumentProjectionHash,
+  DOCUMENT_PROJECTION_EXPORT_SCHEMA_VERSION,
+  type DocumentProjection,
+  type DocumentProjectionBlock as ProjectionBlock,
+  type DocumentProjectionExportEnvelope,
+} from 'ink-surface-sdk/knowledge-schema';
+import { stampExportId, stableToken } from './export-ids';
 import type { KnowledgeObject } from '../../knowledge/knowledge-object';
+
+type ProjectionBlockKind = ProjectionBlock['kind'];
+const DOC_PROJECTION_SCHEMA_VERSION = 'inkloop.document_projection.v1' as const;
 
 const KIND: Record<ReflowBlock['type'], ProjectionBlockKind> = { heading: 'heading', para: 'paragraph', list: 'list' };
 
@@ -107,13 +115,13 @@ export async function buildDocumentProjectionExport(
     return { envelope: emptyEnvelope(documentId, generated_at, opts.appVersion), warnings, skippedPages };
   }
 
-  const body_hash = await projectionBodyHash(blocks);
+  const body_hash = await computeDocumentProjectionBodyHash(blocks);
   const base: Omit<DocumentProjection, 'content_hash'> = {
     schema_version: DOC_PROJECTION_SCHEMA_VERSION,
     projection_id: `dp_${documentId}`,
     document_id: documentId,
     document_title: doc.filename || '(未命名)',
-    document_uri: docUri(documentId),
+    document_uri: buildInkloopDocUri(documentId),
     revision_id: `rev_${body_hash.replace('sha256:', '').slice(0, 16)}`, // 跟内容走·内容不变则同 revision
     generated_at,
     source: { app: 'inkloop', app_version: opts.appVersion ?? '0.1.0' },
@@ -125,11 +133,11 @@ export async function buildDocumentProjectionExport(
     created_at: generated_at,
     updated_at: generated_at,
   };
-  const projection: DocumentProjection = { ...base, content_hash: await projectionContentHash(base) };
+  const projection: DocumentProjection = { ...base, content_hash: await computeDocumentProjectionHash(base) };
 
   return {
     envelope: {
-      schema_version: DOC_PROJECTION_EXPORT_SCHEMA_VERSION,
+      schema_version: DOCUMENT_PROJECTION_EXPORT_SCHEMA_VERSION,
       export_id: stampExportId('projection', documentId, generated_at),
       generated_at,
       source: { app: 'inkloop', app_version: opts.appVersion ?? '0.1.0', document_id: documentId },
@@ -143,7 +151,7 @@ export async function buildDocumentProjectionExport(
 
 function emptyEnvelope(documentId: string, generated_at: string, appVersion?: string): DocumentProjectionExportEnvelope {
   return {
-    schema_version: DOC_PROJECTION_EXPORT_SCHEMA_VERSION,
+    schema_version: DOCUMENT_PROJECTION_EXPORT_SCHEMA_VERSION,
     export_id: stampExportId('projection', documentId, generated_at),
     generated_at,
     source: { app: 'inkloop', app_version: appVersion ?? '0.1.0', document_id: documentId },

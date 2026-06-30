@@ -8,7 +8,7 @@
 import { postNdjson } from '../../core/api';
 import { promptVersion } from '../../core/prompt-versions';
 import type { KnowledgeObject } from '../../knowledge/knowledge-object';
-import type { ConceptExtractFn } from './concept-layer';
+import type { ConceptExtractFn } from 'ink-surface-sdk/export-core';
 
 const MAX_CONCEPTS = 3;
 const MIN_CONFIDENCE = 0.6; // 低于此置信度的概念丢弃（牵强/勉强的不进图）

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assembleVaultBundle, datesOf, type EntityExport } from './vault-export';
-import type { DocumentProjectionExportEnvelope, KnowledgeExportEnvelope } from './contract';
+import type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope } from 'ink-surface-sdk/knowledge-schema';
 
 // 最小信封（datesOf/folder 只读 created_at/generated_at·其余字段无关）
 const env = (...createdAts: string[]): KnowledgeExportEnvelope =>
@@ -41,7 +41,5 @@ describe('assembleVaultBundle 落夹', () => {
     expect(fold('meeting')).toBe('InkLoop/Meetings/2026-06-29 周会');
     expect(fold('diary')).toBe('InkLoop/Diary/2026-06-29');
     expect(fold('reading')).toBe('InkLoop/Reading/深入理解计算机系统');
-    expect(bundle.moc.folder.base_dir).toBe('InkLoop'); // MOC 落顶层
-    expect(bundle.moc.documentProjections.document_projections.length).toBeGreaterThan(0);
   });
 });

@@ -18,7 +18,8 @@ describe('vault-publish client', () => {
     }));
     const r = await publishVaultRelease(release, { userId: 'u_demo', deviceId: 'mac' });
     expect(r.release_id).toBe('r1');
-    expect(calls[0].url).toBe('/api/panel-vault/users/u_demo/releases');
+    // 断言路径后缀（不锁整串）：core/api 在生产/设备构建会前缀 VITE_API_BASE_URL，dev 同源为空——测试对 base 中立。
+    expect(calls[0].url.endsWith('/api/panel-vault/users/u_demo/releases')).toBe(true);
     expect(calls[0].init.method).toBe('POST');
     const body = JSON.parse(String(calls[0].init.body));
     expect(body.manifest.release_hash).toBe('sha256:ab');
@@ -33,7 +34,7 @@ describe('vault-publish client', () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }));
     await publishVaultRelease(release, { userId: 'u/evil' });
-    expect(calls[0]).toBe('/api/panel-vault/users/u%2Fevil/releases');
+    expect(calls[0].endsWith('/api/panel-vault/users/u%2Fevil/releases')).toBe(true);
   });
 
   it('fetchLatestRelease → GET latest', async () => {
@@ -43,7 +44,7 @@ describe('vault-publish client', () => {
       return new Response(JSON.stringify({ release: {}, manifest: {}, assets: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }));
     await fetchLatestRelease('u_demo');
-    expect(calls[0]).toBe('/api/panel-vault/users/u_demo/releases/latest');
+    expect(calls[0].endsWith('/api/panel-vault/users/u_demo/releases/latest')).toBe(true);
   });
 
   it('非 2xx → 抛（postJson 行为）', async () => {

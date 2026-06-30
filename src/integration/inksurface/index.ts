@@ -8,7 +8,9 @@ import { getDoc } from '../../local/store';
 import { buildKnowledgeExport, type ExportOpts } from './knowledge-export';
 import { buildDocumentProjectionExport } from './document-projection';
 import { buildRuntimeAndVisual } from './runtime-surface';
-import type { KnowledgeExportEnvelope, DocumentProjectionExportEnvelope, RuntimeSurfaceBlock, InkLoopVisualModel } from './contract';
+import type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope } from 'ink-surface-sdk/knowledge-schema';
+import type { RuntimeSurfaceBlock } from 'ink-surface-sdk/runtime-schema';
+import type { InkLoopVisualModel } from 'ink-surface-sdk/surface-model';
 
 /** 导出"漏了什么"的结构化诊断——让调用方/UI 能展示哪些 KO/页/笔没进导出，杜绝"成功"假象。 */
 export interface L1Diagnostics {
@@ -58,4 +60,5 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
   };
 }
 
-export type { KnowledgeExportEnvelope, DocumentProjectionExportEnvelope, InkLoopVisualModel } from './contract';
+export type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope } from 'ink-surface-sdk/knowledge-schema';
+export type { InkLoopVisualModel } from 'ink-surface-sdk/surface-model';

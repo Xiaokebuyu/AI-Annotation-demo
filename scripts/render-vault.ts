@@ -4,8 +4,9 @@
  */
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { renderVaultMarkdown } from '../src/integration/inksurface/markdown-render';
+import { renderVaultMarkdown } from 'ink-surface-sdk/adapters/obsidian';
 import type { VaultExportBundle } from '../src/integration/inksurface/vault-export';
+import { toObsidianVaultRenderInput } from '../src/integration/inksurface/vault-render-input';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -36,7 +37,7 @@ async function main(): Promise<void> {
   } catch (err) {
     throw new Error(`Invalid bundle JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const targets = renderVaultMarkdown(bundle).map((f) => ({ markdown: f.markdown, target: targetInVault(vaultAbs, f.path) }));
+  const targets = renderVaultMarkdown(toObsidianVaultRenderInput(bundle)).map((f) => ({ markdown: f.markdown, target: targetInVault(vaultAbs, f.path) }));
 
   if (process.argv.includes('--clean')) await rm(join(vaultAbs, 'InkLoop'), { recursive: true, force: true });
   for (const t of targets) {

@@ -8,6 +8,17 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join, relative, isAbsolute } from 'node:path';
 import { assertNonEmptyVaultRelease, guardPanelVaultRest, panelVaultGuardPayload } from './server/panel-vault-guard';
 
+/** SDK 子路径 → SDK source（dev 免先 build SDK）。子路径在前、裸名在后：vite 前缀匹配·更具体的先命中。 */
+const sdkPath = (p: string): string => new URL(`../ink-surface-sdk-main/${p}`, import.meta.url).pathname;
+const sdkAliases: Record<string, string> = {
+  'ink-surface-sdk/knowledge-schema': sdkPath('packages/knowledge-schema/src/index.ts'),
+  'ink-surface-sdk/runtime-schema': sdkPath('packages/runtime-schema/src/index.ts'),
+  'ink-surface-sdk/surface-model': sdkPath('packages/surface-model/src/index.ts'),
+  'ink-surface-sdk/export-core': sdkPath('packages/export-core/src/index.ts'),
+  'ink-surface-sdk/adapters/obsidian': sdkPath('packages/adapter-obsidian/src/index.ts'),
+  'ink-surface-sdk': sdkPath('src/index.ts'),
+};
+
 /** dev-only：WS2 妙记对轴代理——浏览器 GET /api/panel-feishu/* → panel 飞书事件中枢，注入 x-inkloop-secret（留服务端）。 */
 function panelFeishuProxy(env: Record<string, string>): Plugin {
   return {
@@ -201,6 +212,7 @@ export default defineConfig(({ mode }) => {
     // 相对基址：安卓 WebViewAssetLoader 从本地 assets 加载 index.html，绝对 /assets/ 路径会错。
     // dev 下相对基址同样工作；public 资产仍服务于根，配合 renderer 的 BASE_URL 相对解析。
     base: './',
+    resolve: { alias: sdkAliases },
     server: { port: 8765, strictPort: true },
     build: {
       target: 'es2022',

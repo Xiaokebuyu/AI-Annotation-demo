@@ -8,6 +8,15 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "ink-surface-sdk": ["../ink-surface-sdk-main/src/index.ts"],
+      "ink-surface-sdk/knowledge-schema": ["../ink-surface-sdk-main/packages/knowledge-schema/src/index.ts"],
+      "ink-surface-sdk/runtime-schema": ["../ink-surface-sdk-main/packages/runtime-schema/src/index.ts"],
+      "ink-surface-sdk/surface-model": ["../ink-surface-sdk-main/packages/surface-model/src/index.ts"],
+      "ink-surface-sdk/export-core": ["../ink-surface-sdk-main/packages/export-core/src/index.ts"],
+      "ink-surface-sdk/adapters/obsidian": ["../ink-surface-sdk-main/packages/adapter-obsidian/src/index.ts"]
+    },
     "types": ["vite/client"]
   },
   "include": ["src"]

@@ -13,8 +13,9 @@
  */
 import { sha256HexStr } from '../../knowledge/builder';
 import type { Sha256 } from '../../knowledge/knowledge-object';
-import { type RenderedFile, renderVaultMarkdown } from './markdown-render';
+import { type RenderedFile, renderVaultMarkdown } from 'ink-surface-sdk/adapters/obsidian';
 import type { VaultExportBundle } from './vault-export';
+import { toObsidianVaultRenderInput } from './vault-render-input';
 
 export const VAULT_RELEASE_SCHEMA_VERSION = 'inkloop.vault_release.v1';
 
@@ -44,7 +45,7 @@ const byPath = (a: { path: string }, b: { path: string }): number => (a.path < b
 
 /** 整包打 release（纯·确定性：给定 bundle → 同一 release_hash + 同序 files）。 */
 export async function buildVaultRelease(bundle: VaultExportBundle, opts: { generatedAt?: string; appVersion?: string } = {}): Promise<VaultRelease> {
-  const rendered = renderVaultMarkdown(bundle).slice().sort(byPath);
+  const rendered = renderVaultMarkdown(toObsidianVaultRenderInput(bundle)).slice().sort(byPath);
   const files: VaultReleaseFileEntry[] = [];
   for (const f of rendered) {
     files.push({ path: f.path, content_hash: `sha256:${await sha256HexStr(f.markdown)}`, bytes: utf8Bytes(f.markdown) });

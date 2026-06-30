@@ -20,6 +20,7 @@
     "postinstall": "node scripts/copy-pdfjs-assets.mjs"
   },
   "dependencies": {
+    "ink-surface-sdk": "file:../ink-surface-sdk-main",
     "pdfjs-dist": "^4.6.82",
     "zod": "^3.23.8"
   },

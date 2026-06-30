@@ -6,13 +6,28 @@
  */
 
 import { listAllMeetings, listBooks, listDiaries } from '../../local/store';
-import { buildConceptLayer } from './concept-layer';
+import { buildConceptLayer, type ConceptKnowledgeObjectFactory, entityModeOf } from 'ink-surface-sdk/export-core';
 import { makeConceptExtractor } from './concept-extract';
 import { buildL1Export } from './index';
 import { buildMeetingL1Export } from './meeting-export';
 import { assembleVaultBundle, type EntityExport, type VaultExportBundle } from './vault-export';
-import { entityModeOf } from './vault-layout';
-import { isInkPlaceholderBody } from '../../knowledge/builder';
+import { finalize, isInkPlaceholderBody } from '../../knowledge/builder';
+
+/** 概念 KO 工厂：SDK 装配出的概念 draft → finalize 的 Draft（确定性 ko_id + content_hash·与其他 KO 同口径过 validator）。
+ *  SDK 只调本工厂、不自己建 KO（也不碰 LLM·抽取走 makeConceptExtractor）。 */
+const createConceptKo: ConceptKnowledgeObjectFactory = (draft) =>
+  finalize({
+    stableKey: draft.stableKey,
+    kind: 'concept',
+    documentId: draft.documentId,
+    documentTitle: draft.documentTitle,
+    titleOverride: draft.displayName,
+    objectRefs: [...draft.memberKoIds],
+    body: draft.bodyMarkdown,
+    provenance: { created_from: 'session' },
+    status: 'export_ready',
+    createdAt: draft.createdAt,
+  });
 
 function nonEmpty(ex: { knowledgeExport: { objects: unknown[] }; documentProjections: { document_projections: unknown[] } }): boolean {
   return ex.knowledgeExport.objects.length > 0 || ex.documentProjections.document_projections.length > 0;
@@ -63,7 +78,7 @@ export async function collectVaultBundle(
   const allKos = exports.flatMap((e) => e.knowledgeExport.objects);
   const conceptLayer = opts.concepts === false
     ? undefined
-    : await buildConceptLayer(allKos, makeConceptExtractor({ model: opts.conceptModel }));
+    : await buildConceptLayer(allKos, makeConceptExtractor({ model: opts.conceptModel }), createConceptKo);
 
   return assembleVaultBundle(exports, { generatedAt, appVersion: opts.appVersion, conceptLayer });
 }

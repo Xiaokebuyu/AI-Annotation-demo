@@ -13,7 +13,7 @@
  */
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
 import { getBookAiTurns, getDoc, getFoldedMarks, listBooks } from '../local/store';
-import { type EntityMode, taxonomyTags } from '../integration/inksurface/vault-layout';
+import { type EntityMode, taxonomyTags } from 'ink-surface-sdk/export-core';
 import {
   KO_SCHEMA_VERSION,
   type KnowledgeKind,
