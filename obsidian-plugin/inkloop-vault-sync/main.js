@@ -11,7 +11,7 @@
  * ⚠️Obsidian 不支持相对 require('./sync-core.js')（只注入 obsidian + node 内置）→ 同步核必须内联在本文件（单文件自包含）。
  *   下面这段「同步核」是 sync-core.js 的内联副本·**改逻辑两处同步**·真值以 sync-core.js + 其 11 项自测为准。
  */
-const { Plugin, PluginSettingTab, Setting, Notice, requestUrl } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Notice, requestUrl, MarkdownRenderer } = require('obsidian');
 
 // ───────────────────────── 同步核（sync-core.js 内联副本·见上注） ─────────────────────────
 const MANAGED_ROOT = 'InkLoop/';
@@ -115,10 +115,144 @@ async function sha256(text) {
   return `sha256:${[...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
+// ───────────── 富插件：预览侧把整页 fallback SVG 换成交互式重渲染（读 .inkloop sidecar；缺失则保留静态 SVG） ─────────────
+const SURFACE_SIDECAR_SCHEMA = 'inkloop.sidecar.surface.v1';
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function safeSidecarDocId(input) {
+  return String(input || '').replace(/[^A-Za-z0-9_-]/g, '_') || 'unknown';
+}
+function svgEl(name, attrs) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs || {})) if (v != null) el.setAttribute(k, String(v));
+  return el;
+}
+function finiteNum(n) { return typeof n === 'number' && Number.isFinite(n); }
+function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
+function validColor(c, tool) { return /^#[0-9a-f]{3,8}$/i.test(c || '') ? c : tool === 'highlighter' ? '#facc15' : '#1a1a1a'; }
+
+function buildSurfaceWidget(plugin, ctx, page, notes) {
+  const width = finiteNum(page && page.surface && page.surface.width) ? page.surface.width : 720;
+  const height = finiteNum(page && page.surface && page.surface.height) ? page.surface.height : 1018;
+  const root = document.createElement('div');
+  root.className = 'inkloop-surface-widget';
+
+  const svg = svgEl('svg', { class: 'inkloop-surface-svg', viewBox: `0 0 ${width} ${height}`, role: 'img' });
+  const viewport = svgEl('g', { class: 'inkloop-surface-viewport' });
+  viewport.appendChild(svgEl('rect', { x: 0, y: 0, width, height, fill: (page.surface.background && page.surface.background.color) || '#ffffff', stroke: 'rgba(0,0,0,0.14)' }));
+  if (page.surface.background && page.surface.background.kind === 'ruled') {
+    for (let y = 32; y < height; y += 32) viewport.appendChild(svgEl('line', { x1: 0, y1: y, x2: width, y2: y, stroke: 'rgba(0,0,0,0.06)' }));
+  }
+
+  for (const stroke of page.strokes || []) {
+    const pts = (stroke.points || []).filter((p) => finiteNum(p.x) && finiteNum(p.y));
+    if (!pts.length) continue;
+    const color = validColor(stroke.color, stroke.tool);
+    const sw = stroke.tool === 'highlighter' ? Math.max(8, width * 0.012) : Math.max(1.6, width * 0.0032);
+    const hasNote = !!(notes && notes[stroke.ko_id]);
+    const common = { 'data-inkloop-ko': stroke.ko_id, class: hasNote ? 'inkloop-surface-stroke has-note' : 'inkloop-surface-stroke' };
+    const el = pts.length === 1
+      ? svgEl('circle', { ...common, cx: pts[0].x, cy: pts[0].y, r: sw, fill: color, opacity: stroke.tool === 'highlighter' ? 0.35 : 0.9 })
+      : svgEl('path', { ...common, d: pts.map((p, i) => `${i ? 'L' : 'M'} ${p.x} ${p.y}`).join(' '), fill: 'none', stroke: color, 'stroke-width': sw, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', opacity: stroke.tool === 'highlighter' ? 0.35 : 0.9 });
+    viewport.appendChild(el);
+  }
+
+  svg.appendChild(viewport);
+  root.appendChild(svg);
+
+  const pop = document.createElement('div');
+  pop.className = 'inkloop-surface-note';
+  pop.hidden = true;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.textContent = '×';
+  close.className = 'inkloop-surface-note-close';
+  const title = document.createElement('div');
+  title.className = 'inkloop-surface-note-title';
+  const body = document.createElement('div');
+  body.className = 'inkloop-surface-note-body';
+  close.addEventListener('click', () => { pop.hidden = true; });
+  pop.append(close, title, body);
+  root.appendChild(pop);
+
+  let scale = 1, tx = 0, ty = 0;
+  const apply = () => viewport.setAttribute('transform', `translate(${tx} ${ty}) scale(${scale})`);
+  const clientToSvg = (ev) => {
+    const r = svg.getBoundingClientRect();
+    return { x: ((ev.clientX - r.left) * width) / Math.max(1, r.width), y: ((ev.clientY - r.top) * height) / Math.max(1, r.height) };
+  };
+
+  svg.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const p = clientToSvg(ev);
+    const wx = (p.x - tx) / scale;
+    const wy = (p.y - ty) / scale;
+    scale = clamp(scale * (ev.deltaY < 0 ? 1.12 : 0.89), 0.5, 8);
+    tx = p.x - wx * scale;
+    ty = p.y - wy * scale;
+    apply();
+  }, { passive: false });
+
+  let dragging = false, moved = false, suppressClick = false, lastX = 0, lastY = 0;
+  svg.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    dragging = true; moved = false; lastX = ev.clientX; lastY = ev.clientY;
+    if (svg.setPointerCapture) svg.setPointerCapture(ev.pointerId);
+  });
+  svg.addEventListener('pointermove', (ev) => {
+    if (!dragging) return;
+    const r = svg.getBoundingClientRect();
+    const dx = ev.clientX - lastX, dy = ev.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    tx += (dx * width) / Math.max(1, r.width);
+    ty += (dy * height) / Math.max(1, r.height);
+    lastX = ev.clientX; lastY = ev.clientY;
+    apply();
+  });
+  const endDrag = () => { if (moved) suppressClick = true; dragging = false; };
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+
+  svg.addEventListener('click', (ev) => {
+    if (suppressClick) { suppressClick = false; return; }
+    const target = ev.target && ev.target.closest ? ev.target.closest('[data-inkloop-ko]') : null;
+    const note = target ? (notes && notes[target.getAttribute('data-inkloop-ko') || '']) : null;
+    if (!note) return;
+    title.textContent = note.title || note.kind || 'InkLoop';
+    body.replaceChildren();
+    try { void MarkdownRenderer.renderMarkdown(note.body_md || '', body, (ctx && ctx.sourcePath) || '', plugin); }
+    catch (_) { body.textContent = note.body_md || ''; }
+    const box = root.getBoundingClientRect();
+    pop.style.left = `${clamp(ev.clientX - box.left + 12, 8, Math.max(8, box.width - 328))}px`;
+    pop.style.top = `${clamp(ev.clientY - box.top + 12, 8, Math.max(8, box.height - 180))}px`;
+    pop.hidden = false;
+  });
+
+  return root;
+}
+
+function installSurfaceStyles(plugin) {
+  const style = document.createElement('style');
+  style.textContent = `
+.inkloop-surface-widget{position:relative;overflow:hidden;border:1px solid var(--background-modifier-border);background:var(--background-primary);margin:8px 0}
+.inkloop-surface-svg{display:block;width:100%;height:auto;max-height:72vh;cursor:grab;touch-action:none}
+.inkloop-surface-svg:active{cursor:grabbing}
+.inkloop-surface-stroke.has-note{cursor:pointer}
+.inkloop-surface-note{position:absolute;z-index:20;width:min(320px,calc(100% - 16px));max-height:240px;overflow:auto;padding:10px 12px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);box-shadow:0 8px 24px rgba(0,0,0,.18)}
+.inkloop-surface-note-close{float:right}
+.inkloop-surface-note-title{font-weight:600;margin-right:28px;margin-bottom:6px}
+`;
+  document.head.appendChild(style);
+  plugin.register(() => style.remove());
+}
+
 module.exports = class InkloopVaultSync extends Plugin {
   async onload() {
     const data = (await this.loadData()) || {};
     this.settings = Object.assign({}, DEFAULTS, data.settings || {});
+    this.surfaceSidecarCache = new Map();
+    installSurfaceStyles(this);
+    this.registerMarkdownPostProcessor((el, ctx) => this.enhanceInkLoopSurfaces(el, ctx));
     this.addCommand({ id: 'inkloop-sync', name: 'InkLoop: 同步知识库', callback: () => this.runSync() });
     this.addSettingTab(new InkloopSettingTab(this.app, this));
   }
@@ -126,6 +260,44 @@ module.exports = class InkloopVaultSync extends Plugin {
   async saveSettings() {
     const data = (await this.loadData()) || {};
     await this.saveData({ ...data, settings: this.settings });
+  }
+
+  /** 读某 doc 的 surface sidecar（缓存 promise；缺失/JSON错/schema错 → null，调用方保留静态 SVG fallback）。 */
+  async readSurfaceSidecar(docId) {
+    const path = `InkLoop/.inkloop/docs/${safeSidecarDocId(docId)}/surface.json`;
+    if (this.surfaceSidecarCache.has(path)) return this.surfaceSidecarCache.get(path);
+    const promise = (async () => {
+      const adapter = this.app.vault.adapter;
+      if (!(await adapter.exists(path))) return null;
+      const parsed = JSON.parse(await adapter.read(path));
+      if (!parsed || parsed.schema !== SURFACE_SIDECAR_SCHEMA || !Array.isArray(parsed.pages)) return null;
+      return parsed;
+    })().catch((e) => { console.warn('[InkLoop] surface sidecar fallback kept:', path, e); return null; });
+    this.surfaceSidecarCache.set(path, promise);
+    return promise;
+  }
+
+  enhanceInkLoopSurfaces(el, ctx) {
+    for (const node of el.querySelectorAll('.inkloop-page-surface-fallback[data-inkloop-doc][data-inkloop-page]')) {
+      if (node.dataset.inkloopEnhanced) continue;
+      node.dataset.inkloopEnhanced = '1';
+      void this.enhanceInkLoopSurface(node, ctx);
+    }
+  }
+
+  async enhanceInkLoopSurface(node, ctx) {
+    const docId = node.getAttribute('data-inkloop-doc');
+    const pageIndex = Number(node.getAttribute('data-inkloop-page'));
+    if (!docId || !Number.isFinite(pageIndex)) return;
+    const sidecar = await this.readSurfaceSidecar(docId);
+    if (!sidecar) return; // 缺失/失败 → 保留原静态 SVG（绝不弄成空白）
+    const surface = node.getAttribute('data-inkloop-surface');
+    const coord = node.getAttribute('data-inkloop-coord-space');
+    const pages = sidecar.pages.filter((p) => p.page_index === pageIndex);
+    const page = pages.find((p) => p.surface && p.surface.capture_surface === surface && p.surface.coord_space === coord) || pages[0];
+    if (!page) return;
+    node.replaceChildren(buildSurfaceWidget(this, ctx, page, sidecar.notes || {}));
+    node.classList.add('inkloop-page-surface-enhanced');
   }
 
   async runSync() {
@@ -187,6 +359,7 @@ module.exports = class InkloopVaultSync extends Plugin {
         },
       });
       await this.saveData({ settings: this.settings, syncState: result.newState });
+      if (this.surfaceSidecarCache) this.surfaceSidecarCache.clear(); // sidecar 可能刚更新，清缓存下次重读
       const r = result;
       const msg = `InkLoop 同步完成：下载 ${r.downloaded.length}·删 ${r.deleted.length}·冲突 ${r.conflicts.length}·失败 ${r.failed.length}·拒绝 ${r.rejected.length}`;
       new Notice(msg, 8000);
