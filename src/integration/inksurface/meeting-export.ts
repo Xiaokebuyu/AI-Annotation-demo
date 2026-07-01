@@ -15,7 +15,7 @@ import { parseSrtTranscript } from '../panel-feishu/align';
 import { buildSegments, buildSegmentMarks, type RecapSegment } from '../panel-feishu/segment';
 import { finalize, clampNormBBox, enrichExportTags, entityFactsFrom, INK_PLACEHOLDER_DRAWING, INK_PLACEHOLDER_HANDWRITING, type EntityMembershipFact } from '../../knowledge/builder';
 import { pageIdFor } from '../../core/ids';
-import type { LedgerEntityRef, PersistedMeeting } from '../../core/store-format';
+import type { LedgerEntityRef, PersistedMeeting, PersistedStroke } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
 import {
   buildInkloopDocUri,
@@ -29,6 +29,7 @@ import {
   type KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope,
   type KoRelationGroup,
 } from 'ink-surface-sdk/knowledge-schema';
+import type { InkLoopAnnotation, InkLoopVisualBlock, InkLoopVisualModel } from 'ink-surface-sdk/surface-model';
 import { stampExportId, stableToken } from './export-ids';
 
 const DOC_PROJECTION_SCHEMA_VERSION = 'inkloop.document_projection.v1' as const;
@@ -55,6 +56,7 @@ export interface MeetingL1Export {
   };
   entityFacts: EntityMembershipFact[]; // 存储原生拓扑：会议手写笔的实体关联事实（vault-collect 跨实体聚合用）
   koRelationFacts: KoRelationGroup[]; // 存储原生拓扑：本场会议手写笔的「同场采集」关系事实（same_context）
+  visualModel: InkLoopVisualModel; // 逐笔原始墨迹（按 ko_id 挂在 annotation 上），用于叶子内嵌 SVG 复现笔迹
 }
 
 const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
@@ -62,6 +64,24 @@ const finiteMs = (...xs: Array<number | null | undefined>): number => { for (con
 const clk = (ms: number): string => { const s = Math.round(Math.abs(ms) / 1000); const neg = ms < 0 && s > 0; return `${neg ? '-' : ''}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const rng = (a: number, b: number): string => `${clk(a)}–${clk(b)}`;
 const inkBody = (text: string, feat: string): string => text.trim() || (feat === 'drawing' ? INK_PLACEHOLDER_DRAWING : INK_PLACEHOLDER_HANDWRITING);
+
+const visualToolOf = (tool: PersistedStroke['tool']): 'pen' | 'highlighter' => (tool === 'highlighter' ? 'highlighter' : 'pen');
+const isVisibleStroke = (s: PersistedStroke): boolean => s.tool === 'pen' || s.tool === 'aipen' || s.tool === 'highlighter';
+
+/** mark 笔画 → visual/surface strokes（原样透传点，不做块内坐标变换——同 runtime-surface.ts 的口径，
+ *  但会议块是合成竖排 bbox、没有真实页几何可换算，所以省掉那步）。 */
+function markInkStrokes(strokes: PersistedStroke[] | undefined, color: string): Pick<InkLoopAnnotation, 'visual_strokes' | 'surface_strokes'> {
+  const visible = (strokes ?? []).filter(isVisibleStroke);
+  const visual_strokes = visible.filter((s) => s.points.length > 0).map((s) => ({
+    tool: visualToolOf(s.tool), color, coord_space: s.coord_space ?? 'page_norm', capture_surface: s.capture_surface ?? 'page', points: s.points,
+  }));
+  const surfaceOnes = visible.filter((s) => (s.surface_points?.length ?? 0) > 0);
+  const surface_strokes = surfaceOnes.map((s) => ({
+    tool: visualToolOf(s.tool), color, capture_surface: s.capture_surface ?? 'page', coord_space: s.surface_coord_space ?? s.coord_space ?? 'page_norm',
+    bbox: s.surface_bbox, points: (s.surface_points ?? []).map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure })),
+  }));
+  return { visual_strokes, ...(surface_strokes.length ? { surface_strokes } : {}) };
+}
 
 /** 把一场会议折成 L1 导出（KO 包 + 文档投影），可过对方 validator + 走 obsidian-fs CLI。 */
 /** store wrapper：从 IndexedDB 取数（会议 + 缓存转写 + 时间脊手写）→ 调纯核心。浏览器/设备用。 */
@@ -83,6 +103,12 @@ export async function buildMeetingL1Export(meetingId: string, opts: MeetingExpor
     page_index: mk.page_index,
     entity_refs: mk.entity_refs,
     topic_refs: mk.topic_refs,
+    strokes: mk.strokes,
+    color: mk.color,
+    coord_space: mk.coord_space,
+    capture_surface: mk.capture_surface,
+    surface_bbox: mk.surface_bbox,
+    surface_coord_space: mk.surface_coord_space,
   }));
   return assembleMeetingL1Export({ meeting, cues, marks }, opts);
 }
@@ -94,6 +120,8 @@ export interface MeetingExportInput {
   marks: {
     mark_id: string; entry_id?: string; abs_timestamp: number; feature_type?: string; marked_text?: string; page_index?: number;
     entity_refs?: LedgerEntityRef[]; topic_refs?: LedgerEntityRef[]; // 存储原生拓扑：会中手写笔的实体声明（P4 采集入口写入·目前多数缺）
+    // 笔迹 SVG 内嵌导出用：原样透传笔画点（不做块内坐标变换——会议块是合成竖排 bbox，没有真实页几何可换算）。
+    strokes?: PersistedStroke[]; color?: string; coord_space?: string; capture_surface?: string; surface_bbox?: readonly number[]; surface_coord_space?: string;
   }[];
 }
 
@@ -181,10 +209,13 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
   // 不为此改它的输出形状）——按 mark_id 回查原始账本条目的 refs + 真实 entry_id（provenance 该指真实账本行，
   // 不是 mark_id；entry_id 缺时退回 mark_id，兼容测试合成数据）。
   const refsByMarkId = new Map(input.marks.map((m) => [m.mark_id, { entity_refs: m.entity_refs, topic_refs: m.topic_refs, entryId: m.entry_id ?? m.mark_id }] as const));
+  // 同上：strokes 也在 buildSegmentMarks 窄化时丢了，按 mark_id 回查原始笔画（笔迹 SVG 内嵌导出用）。
+  const inkByMarkId = new Map(input.marks.map((m) => [m.mark_id, { strokes: m.strokes, color: m.color }] as const));
 
   let annotationKoCount = 0;
   const entityFacts: EntityMembershipFact[] = [];
   const annotationKoIds: string[] = []; // 存储原生拓扑：本场会议全部手写笔的 ko_id（用于下面产 same_context 关系组）
+  const annotationsByBlock = new Map<string, InkLoopAnnotation[]>(); // 笔迹 SVG 内嵌导出：block_id → 挂在这个块上的 annotation
   const blockById = new Map(blocks.map((b) => [b.block_id, b] as const));
   for (const mk of segMarks) {
     const si = segOfMark.get(mk.mark_id);
@@ -210,6 +241,15 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     const sourceEntryId = refs?.entryId ?? mk.mark_id;
     entityFacts.push(...entityFactsFrom(refs?.entity_refs, ko.ko_id, documentId, sourceEntryId, createdAt));
     entityFacts.push(...entityFactsFrom(refs?.topic_refs, ko.ko_id, documentId, sourceEntryId, createdAt));
+
+    const ink = inkByMarkId.get(mk.mark_id);
+    if (ink?.strokes?.length) {
+      const targetBlockId = anchorBlock?.block_id ?? blocks[0]?.block_id;
+      if (targetBlockId) {
+        const annotation: InkLoopAnnotation = { ko_id: ko.ko_id, kind: ko.kind, title: ko.title, status: ko.status, render_mode: 'stroke_only', ...markInkStrokes(ink.strokes, ink.color ?? '#1A1A1A') };
+        (annotationsByBlock.get(targetBlockId) ?? annotationsByBlock.set(targetBlockId, []).get(targetBlockId)!).push(annotation);
+      }
+    }
   }
 
   // ⑤ 过导出闸 + taxonomy 标签富化（待办1·mode=meeting/会议 slug/会议日期 都从 KO 自身派生·createdAt 已是会议日期）+ 信封。
@@ -218,6 +258,14 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
   if (skippedKoCount) warnings.push(`${skippedKoCount} 个 KO 被导出闸挡掉（隐私/状态/空正文）`);
   const exportableIds = new Set(exportable.map((ko) => ko.ko_id));
   const exportedEntityFacts = entityFacts.filter((f) => exportableIds.has(f.ko_id)); // 被闸挡掉的 KO，其实体关联也不进导出图
+
+  const visualBlocks: InkLoopVisualBlock[] = blocks.map((b) => ({
+    id: b.block_id, kind: b.kind, region: b.region,
+    page: b.source?.page_index != null ? String(b.source.page_index) : undefined,
+    content: b.text_md,
+    annotations: (annotationsByBlock.get(b.block_id) ?? []).filter((a) => exportableIds.has(a.ko_id)), // 被闸挡掉的 KO，其笔迹也不进导出
+  }));
+  const visualModel: InkLoopVisualModel = { documentTitle, blocks: visualBlocks };
 
   // same_context 关系组：本场会议全部手写笔（跨白板+资料，folded by context_id 已保证同场）折出的 KO 互标「同场采集」。
   const contextKoIds = [...new Set(annotationKoIds)].filter((id) => exportableIds.has(id)).sort();
@@ -248,6 +296,7 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     diagnostics: { cueCount: cues.length, markCount: segMarks.length, segmentCount: segments.length, summaryIncluded, annotationKoCount, skippedKoCount, transcriptMissing },
     entityFacts: exportedEntityFacts,
     koRelationFacts,
+    visualModel,
   };
 }
 

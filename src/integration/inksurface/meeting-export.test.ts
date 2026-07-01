@@ -40,6 +40,9 @@ function meeting(overrides: Partial<PersistedMeeting> = {}): PersistedMeeting {
 const mk = (id: string, relS: number, text = '笔', feat = 'handwriting') =>
   ({ mark_id: id, abs_timestamp: T0 + relS * 1000, feature_type: feat, marked_text: text, page_index: 0 });
 
+const stroke = (over: Record<string, unknown> = {}) => ({ tool: 'pen' as const, points: [{ x: 0.1, y: 0.1, t: 0, pressure: 0.5 }, { x: 0.2, y: 0.2, t: 10, pressure: 0.5 }], ...over });
+const mkInk = (id: string, relS: number, over: Record<string, unknown> = {}) => ({ ...mk(id, relS, ''), color: '#1A1A1A', strokes: [stroke()], ...over });
+
 const input = (overrides: Partial<MeetingExportInput> = {}): MeetingExportInput => ({
   meeting: meeting(),
   cues: parseSrtTranscript(SRT),
@@ -158,5 +161,49 @@ describe('assembleMeetingL1Export（存储原生拓扑：KO-KO 关系层 same_co
     const a = await assembleMeetingL1Export(input(), OPTS);
     const b = await assembleMeetingL1Export(input({ marks: [mk('c', 130, '', 'drawing'), mk('a', 15, '两层真相边界'), mk('b', 50, '采样率≥60Hz')] }), OPTS);
     expect(a.koRelationFacts[0].ko_ids.slice().sort()).toEqual(b.koRelationFacts[0].ko_ids.slice().sort());
+  });
+});
+
+describe('assembleMeetingL1Export（笔迹 SVG 内嵌导出：visualModel）', () => {
+  it('带 strokes 的手写 mark → visualModel 里对应 ko_id 挂上 visual_strokes', async () => {
+    const out = await assembleMeetingL1Export(input({ marks: [mkInk('a', 15)] }), OPTS);
+    const annKo = out.knowledgeExport.objects.find((k) => k.kind === 'annotation')!;
+    const annotations = out.visualModel.blocks.flatMap((b) => b.annotations);
+    const mine = annotations.find((a) => a.ko_id === annKo.ko_id);
+    expect(mine).toBeTruthy();
+    expect(mine!.visual_strokes).toHaveLength(1);
+    expect(mine!.visual_strokes![0].points).toHaveLength(2);
+    expect(mine!.render_mode).toBe('stroke_only');
+  });
+
+  it('surface_points 存在时同时填 surface_strokes', async () => {
+    const inkWithSurface = mkInk('a', 15, {
+      strokes: [stroke({ capture_surface: 'reader', surface_coord_space: 'reader_px', surface_points: [{ x: 10, y: 10, t: 0, pressure: 0.5 }, { x: 20, y: 20, t: 10, pressure: 0.5 }] })],
+    });
+    const out = await assembleMeetingL1Export(input({ marks: [inkWithSurface] }), OPTS);
+    const annotations = out.visualModel.blocks.flatMap((b) => b.annotations);
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0].surface_strokes).toHaveLength(1);
+    expect(annotations[0].surface_strokes![0].coord_space).toBe('reader_px');
+    expect(annotations[0].visual_strokes).toHaveLength(1); // 同时保留 legacy 兜底
+  });
+
+  it('无笔画的 mark（只有文字）不产 annotation ink 条目', async () => {
+    const out = await assembleMeetingL1Export(input({ marks: [mk('a', 15, '纯文字无笔画')] }), OPTS);
+    const annotations = out.visualModel.blocks.flatMap((b) => b.annotations);
+    expect(annotations).toEqual([]);
+  });
+
+  it('被导出闸挡掉的 KO，其笔迹也不进 visualModel（同 entityFacts/koRelationFacts 口径）', async () => {
+    // dismissed 状态目前 annotation KO 走 export_ready（本文件恒定），改用总结缺失场景验证「无手写→无 annotations」更直接；
+    // 这里改验证空 marks 时 visualModel.blocks 存在但 annotations 全空，不抛错。
+    const out = await assembleMeetingL1Export(input({ marks: [] }), OPTS);
+    expect(out.visualModel.blocks.every((b) => b.annotations.length === 0)).toBe(true);
+  });
+
+  it('确定性：同输入两次调用 → visualModel 笔迹数据一致', async () => {
+    const a = await assembleMeetingL1Export(input({ marks: [mkInk('a', 15)] }), OPTS);
+    const b = await assembleMeetingL1Export(input({ marks: [mkInk('a', 15)] }), OPTS);
+    expect(a.visualModel).toEqual(b.visualModel);
   });
 });

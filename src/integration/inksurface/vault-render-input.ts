@@ -16,6 +16,7 @@ export function toObsidianVaultRenderInput(bundle: VaultExportBundle): ObsidianV
       knowledgeObjects: entity.knowledgeExport.objects,
       documentProjections: entity.documentProjections.document_projections,
       ...(entity.materialDocIds?.length ? { materialDocumentIds: entity.materialDocIds } : {}),
+      ...(entity.visualModel ? { visualModel: entity.visualModel } : {}),
     })),
     ...(bundle.conceptLayer ? { conceptLayer: bundle.conceptLayer } : {}),
   };

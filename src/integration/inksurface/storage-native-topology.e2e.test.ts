@@ -19,6 +19,7 @@ import type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as
 import { assembleVaultBundle, type EntityExport } from './vault-export';
 import { toObsidianVaultRenderInput } from './vault-render-input';
 import { assembleMeetingL1Export, type MeetingExportInput } from './meeting-export';
+import { dropInkPlaceholders } from './vault-collect';
 
 function mark(over: Partial<PersistedMark>): PersistedMark {
   return {
@@ -235,5 +236,70 @@ describe('内容拓扑②端到端：KO-KO 关系层 → leaf 互链「同源笔
     const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
     const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
     expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+  });
+});
+
+describe('内容拓扑③端到端：普通笔无 OCR 的占位 KO → dropInkPlaceholders 放行 → 叶子内嵌 <svg> 复现笔迹', () => {
+  it('阅读实体一条纯图形占位 KO（body 恰等占位串）：过去会被 dropInkPlaceholders 整条丢弃，现在因为 visualModel 挂了真笔迹被放行且渲出 <svg>', async () => {
+    // builder 侧产生的占位 body 是"恰等"占位串（不像 meeting 侧带时间后缀），dropInkPlaceholders 的过滤/放行
+    // 判据在这条路径上才真正是关键分歧点。
+    const drawing = mark({ mark_id: 'm1', document_id: 'doc_ink', feature_type: 'drawing', marked_text: '' });
+    const proj = await assembleKnowledgeProjection({ document_id: 'doc_ink', document_title: '画了一笔的书', marks: [drawing], aiTurns: noAiTurns });
+    const placeholderKo = proj.objects[0];
+    expect(placeholderKo.body_md).toBe('（图形标注 / 圈画）'); // 前置条件：确实是恰等占位串
+
+    const visualModel = {
+      documentTitle: '画了一笔的书',
+      blocks: [{
+        id: 'b1', kind: 'paragraph' as const, region: 'editable', content: '',
+        annotations: [{
+          ko_id: placeholderKo.ko_id, kind: 'annotation', title: 'x',
+          visual_strokes: [{ tool: 'pen' as const, coord_space: 'block_norm' as const, points: [{ x: 0.1, y: 0.1 }, { x: 0.4, y: 0.3 }] }],
+        }],
+      }],
+    };
+
+    const bookExport: EntityExport = {
+      mode: 'reading',
+      documentId: 'doc_ink',
+      documentTitle: '画了一笔的书',
+      knowledgeExport: { objects: proj.objects } as unknown as KnowledgeExportEnvelope,
+      documentProjections: emptyProjections,
+      visualModel,
+    };
+
+    const kept = dropInkPlaceholders(bookExport);
+    expect(kept.knowledgeExport.objects.map((o) => o.ko_id)).toEqual([placeholderKo.ko_id]); // 没被整条丢弃
+
+    const bundle = await assembleVaultBundle([kept], { generatedAt: '2026-06-30T00:00:00Z' });
+    const files = renderVaultMarkdown(toObsidianVaultRenderInput(bundle));
+
+    const leaf = files.find((f) => f.markdown.includes('> [!'));
+    expect(leaf).toBeTruthy();
+    expect(leaf!.markdown).toContain('<svg');
+    expect(leaf!.markdown).not.toContain('<!-- inkloop:annotation-json'); // 零 sidecar/零协作方插件式 HTML 注释
+
+    const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
+    const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
+    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+  });
+
+  it('同一占位 KO 但 visualModel 没挂笔迹（或压根没有 visualModel）：照旧被 dropInkPlaceholders 整条丢弃（笔迹豁免只对真有笔迹的情况生效）', async () => {
+    const drawing = mark({ mark_id: 'm1', document_id: 'doc_ink2', feature_type: 'drawing', marked_text: '' });
+    const proj = await assembleKnowledgeProjection({ document_id: 'doc_ink2', document_title: '空书', marks: [drawing], aiTurns: noAiTurns });
+
+    const withoutVisualModel: EntityExport = {
+      mode: 'reading', documentId: 'doc_ink2', documentTitle: '空书',
+      knowledgeExport: { objects: proj.objects } as unknown as KnowledgeExportEnvelope,
+      documentProjections: emptyProjections,
+    };
+    expect(dropInkPlaceholders(withoutVisualModel).knowledgeExport.objects).toEqual([]);
+
+    const withEmptyVisualModel: EntityExport = {
+      ...withoutVisualModel,
+      knowledgeExport: { objects: [...proj.objects] } as unknown as KnowledgeExportEnvelope, // 重新给一份未被上一次过滤修改过的 objects
+      visualModel: { documentTitle: '空书', blocks: [] },
+    };
+    expect(dropInkPlaceholders(withEmptyVisualModel).knowledgeExport.objects).toEqual([]);
   });
 });

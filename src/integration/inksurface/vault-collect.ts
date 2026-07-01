@@ -19,6 +19,7 @@ import { buildMeetingL1Export } from './meeting-export';
 import { assembleVaultBundle, type EntityExport, type VaultExportBundle } from './vault-export';
 import { finalize, isInkPlaceholderBody, projectEntities, type EntityMembershipFact } from '../../knowledge/builder';
 import type { KoRelationGroup } from 'ink-surface-sdk/knowledge-schema';
+import type { InkLoopVisualModel } from 'ink-surface-sdk/surface-model';
 
 /** 概念 KO 工厂：SDK 装配出的概念 draft → finalize 的 Draft（确定性 ko_id + content_hash·与其他 KO 同口径过 validator）。
  *  SDK 只调本工厂、不自己建 KO（也不碰 LLM·抽取走 makeConceptExtractor）。 */
@@ -40,19 +41,37 @@ function nonEmpty(ex: { knowledgeExport: { objects: unknown[] }; documentProject
   return ex.knowledgeExport.objects.length > 0 || ex.documentProjections.document_projections.length > 0;
 }
 
+function strokeKoIds(model: InkLoopVisualModel | undefined): Set<string> {
+  return new Set(
+    (model?.blocks ?? []).flatMap((block) =>
+      (block.annotations ?? [])
+        .filter((a) => (a.surface_strokes ?? []).some((s) => s.points.length > 0) || (a.visual_strokes ?? []).some((s) => s.points.length > 0))
+        .map((a) => a.ko_id),
+    ),
+  );
+}
+
 /**
- * ⚠️过渡过滤（笔迹重现 SVG 上线即移除）：丢掉内容为空的笔迹占位 KO（纯涂鸦圈画 / 未识别手写·body_md 恰为占位串）。
- * 否则空白页涂鸦在 Obsidian 刷屏（实测一篇日记 100+ 个占位淹没真内容）。笔迹仍在账本·不丢·将来渲成墨迹再恢复。
+ * 丢掉内容为空的笔迹占位 KO（纯涂鸦圈画 / 未识别手写·body_md 恰为占位串）。否则空白页涂鸦在 Obsidian 刷屏
+ * （实测一篇日记 100+ 个占位淹没真内容）。笔迹仍在账本·不丢。
  * 在 nonEmpty 判定**之前**过滤 → 纯涂鸦实体（过滤后无 KO 且无 projection）自然跳过、不留空壳。
  * 会议侧 body=占位+「（约 X 处手写）」带时间上下文·不恰等占位·不命中·不误伤。详见记忆 inkloop-obsidian-clean-vault。
- * ⚠️例外（存储原生拓扑）：占位 KO 若带 entity_refs/topic_refs（用户明确"归类"过这条笔迹），不能被这条过滤悄悄吞掉——
- * 那是用户显式声明的关系，过滤掉=无声丢失。判据＝该 KO 是否有对应的 entityFacts。
+ * ⚠️两个例外（占位 KO 命中任一都不过滤）：
+ *   · entity_refs/topic_refs（用户明确"归类"过这条笔迹）——那是用户显式声明的关系，过滤掉=无声丢失。
+ *   · visualModel 里挂了真笔迹（surface_strokes/visual_strokes 非空）——SVG 内嵌导出已上线，即使 marked_text
+ *     为空，Obsidian 里也能直接看到真实笔迹图，不该被当无内容占位吞掉。
  */
-export function dropInkPlaceholders<T extends { knowledgeExport: { objects: { ko_id: string; body_md: string }[] }; entityFacts?: EntityMembershipFact[]; koRelationFacts?: KoRelationGroup[] }>(ex: T): T {
+export function dropInkPlaceholders<T extends {
+  knowledgeExport: { objects: { ko_id: string; body_md: string }[] };
+  entityFacts?: EntityMembershipFact[];
+  koRelationFacts?: KoRelationGroup[];
+  visualModel?: InkLoopVisualModel;
+}>(ex: T): T {
   const refKoIds = new Set((ex.entityFacts ?? []).map((f) => f.ko_id));
+  const inkKoIds = strokeKoIds(ex.visualModel);
   const kept = new Set<string>();
   ex.knowledgeExport.objects = ex.knowledgeExport.objects.filter((ko) => {
-    const keep = !isInkPlaceholderBody(ko.body_md) || refKoIds.has(ko.ko_id);
+    const keep = !isInkPlaceholderBody(ko.body_md) || refKoIds.has(ko.ko_id) || inkKoIds.has(ko.ko_id);
     if (keep) kept.add(ko.ko_id);
     return keep;
   });
@@ -61,6 +80,9 @@ export function dropInkPlaceholders<T extends { knowledgeExport: { objects: { ko
     ex.koRelationFacts = ex.koRelationFacts
       .map((g) => ({ ...g, ko_ids: g.ko_ids.filter((id) => kept.has(id)) }))
       .filter((g) => g.ko_ids.length >= 2);
+  }
+  if (ex.visualModel) {
+    ex.visualModel = { ...ex.visualModel, blocks: ex.visualModel.blocks.map((b) => ({ ...b, annotations: b.annotations.filter((a) => kept.has(a.ko_id)) })) };
   }
   return ex;
 }
@@ -117,19 +139,19 @@ export async function collectVaultBundle(
     if (entityModeOf(b.document_id) !== 'reading') continue;
     const ex = dropInkPlaceholders(await buildL1Export(b.document_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'reading', documentId: b.document_id, documentTitle: b.filename || b.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: b.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts });
+      exports.push({ mode: 'reading', documentId: b.document_id, documentTitle: b.filename || b.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: b.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts, visualModel: ex.visualModel });
     }
   }
   for (const d of await listDiaries()) {
     const ex = dropInkPlaceholders(await buildL1Export(d.document_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'diary', documentId: d.document_id, documentTitle: d.filename || d.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: d.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts });
+      exports.push({ mode: 'diary', documentId: d.document_id, documentTitle: d.filename || d.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: d.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts, visualModel: ex.visualModel });
     }
   }
   for (const m of await listAllMeetings()) {
     const ex = dropInkPlaceholders(await buildMeetingL1Export(m.meeting_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort(), koRelationFacts: ex.koRelationFacts });
+      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort(), koRelationFacts: ex.koRelationFacts, visualModel: ex.visualModel });
     }
   }
 
@@ -179,11 +201,11 @@ export async function collectVaultEntity(ref: VaultEntityRef, opts: { generatedA
     if (!m) throw new Error(`会议不存在或已被删除：${ref.meetingId}`);
     const ex = dropInkPlaceholders(await buildMeetingL1Export(ref.meetingId, o));
     if (!nonEmpty(ex)) return null;
-    return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort(), koRelationFacts: ex.koRelationFacts };
+    return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort(), koRelationFacts: ex.koRelationFacts, visualModel: ex.visualModel };
   }
   const doc = await getDoc(ref.documentId);
   if (!doc) throw new Error(`文档不存在或已被删除：${ref.documentId}`);
   const ex = dropInkPlaceholders(await buildL1Export(ref.documentId, o));
   if (!nonEmpty(ex)) return null;
-  return { mode: ref.mode, documentId: ref.documentId, documentTitle: doc.filename || ref.documentId, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: doc.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts };
+  return { mode: ref.mode, documentId: ref.documentId, documentTitle: doc.filename || ref.documentId, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: doc.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts, visualModel: ex.visualModel };
 }

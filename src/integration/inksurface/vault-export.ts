@@ -14,6 +14,7 @@ import type {
   KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope,
   KoRelationGroup,
 } from 'ink-surface-sdk/knowledge-schema';
+import type { InkLoopVisualModel } from 'ink-surface-sdk/surface-model';
 import type { EntityMembershipFact } from '../../knowledge/builder';
 
 /** 一个实体的 L1 导出切片（buildL1Export / buildMeetingL1Export 产出的子集）。 */
@@ -28,6 +29,7 @@ export interface EntityExport {
   entityFacts?: EntityMembershipFact[]; // 存储原生拓扑：本实体可导出 KO 的实体关联事实（vault-collect 跨实体聚合用；assembleVaultBundle 透传进 bundle JSON，但渲染器只读 conceptLayer，不读这个字段）
   materialDocIds?: string[]; // 仅 meeting 有意义：本场会议引用过的资料文档 id（来自 PersistedMeeting.material_doc_ids）
   koRelationFacts?: KoRelationGroup[]; // 存储原生拓扑：本实体可导出 KO 的 KO-KO 关系事实（vault-collect 跨实体聚合用；同 entityFacts，渲染器只读 conceptLayer）
+  visualModel?: InkLoopVisualModel; // 逐笔原始墨迹（按 ko_id 挂在 annotation 上），渲染器据此在叶子内嵌 SVG 复现笔迹
 }
 
 export interface VaultBundleEntity extends EntityExport {
