@@ -14,7 +14,7 @@
 import type { LedgerEntityRef, PersistedAiTurn, PersistedEntity, PersistedMark } from '../core/store-format';
 import { getBookAiTurns, getDoc, getFoldedMarks, listBooks } from '../local/store';
 import { type EntityMode, taxonomyTags } from 'ink-surface-sdk/export-core';
-import type { EntityMembership, KnowledgeEntity } from 'ink-surface-sdk/knowledge-schema';
+import type { EntityMembership, KnowledgeEntity, KoRelationGroup } from 'ink-surface-sdk/knowledge-schema';
 import {
   KO_SCHEMA_VERSION,
   type KnowledgeKind,
@@ -231,6 +231,7 @@ export function entityFactsFrom(refs: LedgerEntityRef[] | undefined, koId: strin
 export interface KnowledgeProjection {
   objects: KnowledgeObject[];
   entityFacts: EntityMembershipFact[];
+  koRelationFacts: KoRelationGroup[]; // 存储原生拓扑（KO-KO 关系层）：同一 AI 回复锚定的兄弟 mark 产的 KO 分组
 }
 
 /**
@@ -246,6 +247,14 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
   const consumed = new Set<string>();
   const out: KnowledgeObject[] = [];
   const entityFacts: EntityMembershipFact[] = [];
+  // 存储原生拓扑（KO-KO 关系层）：记录每个 mark_id 最终折成了哪些 ko_id（ai_turn 消费的 anchor mark → ai KO；
+  // 未消费的独立 mark → 自己的 excerpt/annotation KO），用于下面把「同一 ai_turn 锚定的多个 mark」串成 same_ai_turn 关系组。
+  const koIdsByMarkId = new Map<string, string[]>();
+  const addMarkKo = (markId: string, id: string): void => {
+    const ids = koIdsByMarkId.get(markId) ?? [];
+    if (!ids.includes(id)) ids.push(id);
+    koIdsByMarkId.set(markId, ids);
+  };
 
   // 1) ai_turns → ai_note / qa（成功产出才把锚 mark 记为"已消费"，并进本条不再单独导出）
   for (const t of aiTurns) {
@@ -293,6 +302,7 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
       entityFacts.push(...entityFactsFrom(m.entity_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
       entityFacts.push(...entityFactsFrom(m.topic_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
     }
+    for (const markId of anchorIds) if (markById.has(markId)) addMarkKo(markId, ko.ko_id);
   }
 
   // 2) 独立 mark → excerpt / annotation
@@ -324,11 +334,40 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
     out.push(ko);
     entityFacts.push(...entityFactsFrom(m.entity_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
     entityFacts.push(...entityFactsFrom(m.topic_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
+    addMarkKo(m.mark_id, ko.ko_id);
+  }
+
+  const objects = out.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.ko_id.localeCompare(b.ko_id));
+  const koOrder = new Map(objects.map((ko, index) => [ko.ko_id, index] as const));
+  const byKoOrder = (a: string, b: string): number => (koOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (koOrder.get(b) ?? Number.MAX_SAFE_INTEGER) || a.localeCompare(b);
+
+  // same_ai_turn 关系组：同一 ai_turn 锚定 ≥2 个 mark 时，把这些 mark 折成的 KO 串成一组「同源笔记」。
+  // 注：大多数场景一次 AI 回复只产 1 条 KO（consumed anchor marks 被折进同一条 ai_note/qa），这条关系
+  // 组常年只有 0-1 个成员、不会渲出可见互链——只有 dismissed 等边缘情况才会出现 ≥2 个独立 KO（已知降级，
+  // 用户已确认接受·不为此改「一次问答只产一条笔记」的消费逻辑）。
+  const koRelationFacts: KoRelationGroup[] = [];
+  for (const t of aiTurns) {
+    if (t.overlay_state === 'folded') continue;
+    const mark_ids = [...new Set(t.anchor?.mark_ids ?? [])].filter((id) => markById.has(id)).sort();
+    if (mark_ids.length < 2) continue;
+    const ko_ids = [...new Set(mark_ids.flatMap((id) => koIdsByMarkId.get(id) ?? []))].sort(byKoOrder);
+    if (ko_ids.length < 2) continue;
+    koRelationFacts.push({
+      schema_version: 'inkloop.ko_relation_group.v1',
+      relation_id: `rel:same_ai_turn:${document_id}:${t.overlay_id}`,
+      kind: 'same_ai_turn',
+      source: 'ai_turn_anchor',
+      confidence: 'deterministic',
+      ko_ids,
+      evidence: { document_id, source_entry_id: t.entry_id, overlay_id: t.overlay_id, mark_ids },
+      created_at: t.source_created_at ?? t.created_at,
+    });
   }
 
   return {
-    objects: out.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.ko_id.localeCompare(b.ko_id)),
+    objects,
     entityFacts: entityFacts.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.entity_id.localeCompare(b.entity_id) || a.ko_id.localeCompare(b.ko_id)),
+    koRelationFacts,
   };
 }
 

@@ -131,3 +131,32 @@ describe('assembleMeetingL1Export（会议→L1）', () => {
     expect(out.knowledgeExport.objects.filter((k) => k.kind === 'annotation')).toHaveLength(3);
   });
 });
+
+describe('assembleMeetingL1Export（存储原生拓扑：KO-KO 关系层 same_context，零 LLM）', () => {
+  it('本场会议 ≥2 条手写 KO → 一条 same_context 关系组，串起全部手写 KO', async () => {
+    const out = await assembleMeetingL1Export(input(), OPTS);
+    const annIds = out.knowledgeExport.objects.filter((k) => k.kind === 'annotation').map((k) => k.ko_id);
+    expect(out.koRelationFacts).toHaveLength(1);
+    const group = out.koRelationFacts[0];
+    // meeting_id 本身已带 'mtg_' 前缀（shortId('mtg')·同 getFoldedMarksByContext 既有的 `mtg_${meetingId}` 双前缀约定一致）。
+    expect(group).toMatchObject({ kind: 'same_context', source: 'meeting_context', confidence: 'experimental', relation_id: 'rel:same_context:mtg_mtg_demo1' });
+    expect(new Set(group.ko_ids)).toEqual(new Set(annIds));
+    expect(group.evidence).toEqual({ context_id: 'mtg_mtg_demo1' });
+  });
+
+  it('只有 1 条手写 KO 时不产关系组', async () => {
+    const out = await assembleMeetingL1Export(input({ marks: [mk('a', 15, '唯一一笔')] }), OPTS);
+    expect(out.koRelationFacts).toEqual([]);
+  });
+
+  it('没有手写（只有转写）时不产关系组', async () => {
+    const out = await assembleMeetingL1Export(input({ marks: [] }), OPTS);
+    expect(out.koRelationFacts).toEqual([]);
+  });
+
+  it('确定性：ko_ids 不随 marks 输入顺序漂移', async () => {
+    const a = await assembleMeetingL1Export(input(), OPTS);
+    const b = await assembleMeetingL1Export(input({ marks: [mk('c', 130, '', 'drawing'), mk('a', 15, '两层真相边界'), mk('b', 50, '采样率≥60Hz')] }), OPTS);
+    expect(a.koRelationFacts[0].ko_ids.slice().sort()).toEqual(b.koRelationFacts[0].ko_ids.slice().sort());
+  });
+});

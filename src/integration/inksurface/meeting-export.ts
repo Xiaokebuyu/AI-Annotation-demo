@@ -12,7 +12,7 @@
  */
 import { getMeeting, getCachedMinute, getFoldedMarksByContext } from '../../local/store';
 import { parseSrtTranscript } from '../panel-feishu/align';
-import { buildSegments, buildSegmentMarks, digestCacheKey, type RecapSegment } from '../panel-feishu/segment';
+import { buildSegments, buildSegmentMarks, type RecapSegment } from '../panel-feishu/segment';
 import { finalize, clampNormBBox, enrichExportTags, entityFactsFrom, INK_PLACEHOLDER_DRAWING, INK_PLACEHOLDER_HANDWRITING, type EntityMembershipFact } from '../../knowledge/builder';
 import { pageIdFor } from '../../core/ids';
 import type { LedgerEntityRef, PersistedMeeting } from '../../core/store-format';
@@ -27,6 +27,7 @@ import {
   type DocumentProjectionExportEnvelope,
   isExportableKnowledgeObject as isExportableKo,
   type KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope,
+  type KoRelationGroup,
 } from 'ink-surface-sdk/knowledge-schema';
 import { stampExportId, stableToken } from './export-ids';
 
@@ -53,6 +54,7 @@ export interface MeetingL1Export {
     transcriptMissing: boolean;
   };
   entityFacts: EntityMembershipFact[]; // 存储原生拓扑：会议手写笔的实体关联事实（vault-collect 跨实体聚合用）
+  koRelationFacts: KoRelationGroup[]; // 存储原生拓扑：本场会议手写笔的「同场采集」关系事实（same_context）
 }
 
 const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
@@ -120,7 +122,7 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
   // ③ 文档投影块：段 → heading + 各 cue para。同步收集「段 idx → heading 块 id」。
   const pageId = pageIdFor(documentId, 0);
   const rawBlocks: { block: BlockShell; segIndex: number; isHeading: boolean }[] = [];
-  const digestOf = (s: RecapSegment): string => (m.segment_digests?.[digestCacheKey(s)] || s.heuristicSummary || '（这段）').trim();
+  const digestOf = (s: RecapSegment): string => (s.heuristicSummary || '（这段）').trim();
 
   for (let si = 0; si < segments.length; si++) {
     const s = segments[si];
@@ -182,6 +184,7 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
 
   let annotationKoCount = 0;
   const entityFacts: EntityMembershipFact[] = [];
+  const annotationKoIds: string[] = []; // 存储原生拓扑：本场会议全部手写笔的 ko_id（用于下面产 same_context 关系组）
   const blockById = new Map(blocks.map((b) => [b.block_id, b] as const));
   for (const mk of segMarks) {
     const si = segOfMark.get(mk.mark_id);
@@ -201,6 +204,7 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     });
     kos.push(ko);
     annotationKoCount++;
+    annotationKoIds.push(ko.ko_id);
     if (anchorBlock) anchorBlock.knowledge_object_ids = [...new Set([...anchorBlock.knowledge_object_ids, ko.ko_id])].sort();
     const refs = refsByMarkId.get(mk.mark_id);
     const sourceEntryId = refs?.entryId ?? mk.mark_id;
@@ -214,6 +218,19 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
   if (skippedKoCount) warnings.push(`${skippedKoCount} 个 KO 被导出闸挡掉（隐私/状态/空正文）`);
   const exportableIds = new Set(exportable.map((ko) => ko.ko_id));
   const exportedEntityFacts = entityFacts.filter((f) => exportableIds.has(f.ko_id)); // 被闸挡掉的 KO，其实体关联也不进导出图
+
+  // same_context 关系组：本场会议全部手写笔（跨白板+资料，folded by context_id 已保证同场）折出的 KO 互标「同场采集」。
+  const contextKoIds = [...new Set(annotationKoIds)].filter((id) => exportableIds.has(id)).sort();
+  const koRelationFacts: KoRelationGroup[] = contextKoIds.length < 2 ? [] : [{
+    schema_version: 'inkloop.ko_relation_group.v1',
+    relation_id: `rel:same_context:mtg_${meetingId}`,
+    kind: 'same_context',
+    source: 'meeting_context',
+    confidence: 'experimental',
+    ko_ids: contextKoIds,
+    evidence: { context_id: `mtg_${meetingId}` },
+    created_at: createdAt,
+  }];
 
   const knowledgeExport: KnowledgeExportEnvelope = {
     schema_version: KO_EXPORT_SCHEMA_VERSION,
@@ -230,6 +247,7 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     knowledgeExport, documentProjections, warnings,
     diagnostics: { cueCount: cues.length, markCount: segMarks.length, segmentCount: segments.length, summaryIncluded, annotationKoCount, skippedKoCount, transcriptMissing },
     entityFacts: exportedEntityFacts,
+    koRelationFacts,
   };
 }
 

@@ -11,13 +11,14 @@
  * 断言：两本书里对应的笔记互相 [[wikilink]]，且没有一次 LLM/网络调用发生过（这条链路里根本不存在调用点）。
  */
 import { describe, expect, it } from 'vitest';
-import type { PersistedAiTurn, PersistedEntity, PersistedMark } from '../../core/store-format';
+import type { PersistedAiTurn, PersistedEntity, PersistedMark, PersistedMeeting } from '../../core/store-format';
 import { assembleKnowledgeProjection, type BuilderInput, projectEntities } from '../../knowledge/builder';
 import { buildConceptLayerFromStoredMemberships } from 'ink-surface-sdk/export-core';
 import { renderVaultMarkdown, type ObsidianVaultEntityInput } from 'ink-surface-sdk/adapters/obsidian';
 import type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope } from 'ink-surface-sdk/knowledge-schema';
 import { assembleVaultBundle, type EntityExport } from './vault-export';
 import { toObsidianVaultRenderInput } from './vault-render-input';
+import { assembleMeetingL1Export, type MeetingExportInput } from './meeting-export';
 
 function mark(over: Partial<PersistedMark>): PersistedMark {
   return {
@@ -152,5 +153,87 @@ describe('内容拓扑①端到端：会议 material_doc_ids → 渲出 hub-to-h
     const meetingHub = files.find((f) => f.path === 'InkLoop/Meetings/2026-06-30 周会 2/周会 2.md');
     expect(meetingHub).toBeTruthy();
     expect(meetingHub!.markdown).not.toContain('## 引用资料');
+  });
+});
+
+describe('内容拓扑②端到端：KO-KO 关系层 → leaf 互链「同源笔记」/「同场采集笔记」，零 Concepts/ hub 污染', () => {
+  it('same_ai_turn：dismissed ai_turn + 两个带 refs 的锚 mark → 3 个 KO 互标「同源笔记」', async () => {
+    const m1 = mark({ mark_id: 'm1', document_id: 'doc_b', marked_text: '缓存一致性', entity_refs: [{ entity_id: 'x', source: 'declared' }] });
+    const m2 = mark({ mark_id: 'm2', document_id: 'doc_b', marked_text: 'MESI 协议', entity_refs: [{ entity_id: 'y', source: 'declared' }] });
+    const t: PersistedAiTurn = {
+      entry_id: 'ent_t1', document_id: 'doc_b', page_id: 'p0', page_index: 0, seq: 2,
+      created_at: '2026-06-30T00:00:00.000Z', overlay_id: 'ov1',
+      overlay: { overlay_id: 'ov1', trace_id: 't', page_id: 'p0', result_id: 'r', overlay_type: 'note', geometry: { anchor_bbox: [0.1, 0.1, 0.2, 0.02] }, display_text: 'reply', dismissible: true, created_at: '2026-06-30T00:00:00.000Z', state: 'shown', result_type: 'inspiration' },
+      overlay_state: 'dismissed', user_edited_text: null, ai_reply: '回复',
+      anchor: { surface_id: 's', mark_ids: ['m1', 'm2'], object_refs: [] },
+      inference_view: {} as unknown as PersistedAiTurn['inference_view'],
+      prompt_snapshot: '', system_prompt_hash: 'annotator@v1', settings_snapshot: { inferModel: 'kimi', reflowProvider: 'x' },
+      trigger: 'idle', model: 'kimi', supersedes: null,
+    };
+
+    const proj = await assembleKnowledgeProjection({ document_id: 'doc_b', document_title: '书 B', marks: [m1, m2], aiTurns: [t] });
+    const conceptLayer = buildConceptLayerFromStoredMemberships(proj.objects, [], [], proj.koRelationFacts);
+
+    const entities: ObsidianVaultEntityInput[] = [
+      { documentId: 'doc_b', documentTitle: '书 B', mode: 'reading', dates: ['2026-06-30'], knowledgeObjects: proj.objects, documentProjections: [] },
+    ];
+    const files = renderVaultMarkdown({ entities, conceptLayer });
+
+    const excerpt1 = files.find((f) => f.markdown.includes('> [!') && f.markdown.includes('缓存一致性'));
+    const excerpt2 = files.find((f) => f.markdown.includes('> [!') && f.markdown.includes('MESI 协议'));
+    expect(excerpt1).toBeTruthy();
+    expect(excerpt2).toBeTruthy();
+    expect(excerpt1!.markdown).toContain('**同源笔记**');
+    expect(excerpt2!.markdown).toContain('**同源笔记**');
+    expect(files.some((f) => f.path.startsWith('InkLoop/Concepts/'))).toBe(false); // 关系层不产 hub
+
+    const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
+    const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
+    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+  });
+
+  it('same_context：一场会议的多条手写 KO 端到端渲出「同场采集笔记」互链', async () => {
+    const meeting: PersistedMeeting = {
+      meeting_id: 'mtg_e2e1', workspace_id: 'ws_1', title: '端到端会议',
+      scheduled_at: '2026-06-30T03:00:00.000Z', status: 'ended',
+      started_at: '2026-06-30T03:00:00.000Z', ended_at: '2026-06-30T03:30:00.000Z',
+      material_doc_ids: [], align_state: 'approx',
+      created_at: '2026-06-30T03:00:00.000Z', updated_at: '2026-06-30T03:00:00.000Z',
+    };
+    const meetingInput: MeetingExportInput = {
+      meeting,
+      cues: [],
+      marks: [
+        { mark_id: 'a', abs_timestamp: 0, feature_type: 'handwriting', marked_text: '甲笔记', page_index: 0 },
+        { mark_id: 'b', abs_timestamp: 1000, feature_type: 'handwriting', marked_text: '乙笔记', page_index: 0 },
+      ],
+    };
+    const meetingOut = await assembleMeetingL1Export(meetingInput, { generatedAt: '2026-06-30T00:00:00.000Z' });
+
+    const meetingExport: EntityExport = {
+      mode: 'meeting',
+      documentId: meetingOut.documentId,
+      documentTitle: meetingOut.documentTitle,
+      knowledgeExport: meetingOut.knowledgeExport,
+      documentProjections: meetingOut.documentProjections,
+      activityDate: meeting.started_at,
+      koRelationFacts: meetingOut.koRelationFacts,
+    };
+
+    const conceptLayer = buildConceptLayerFromStoredMemberships(meetingOut.knowledgeExport.objects, [], [], meetingExport.koRelationFacts);
+    const bundle = await assembleVaultBundle([meetingExport], { generatedAt: '2026-06-30T00:00:00Z', conceptLayer });
+    const files = renderVaultMarkdown(toObsidianVaultRenderInput(bundle));
+
+    const leaf1 = files.find((f) => f.markdown.includes('> [!') && f.markdown.includes('甲笔记'));
+    const leaf2 = files.find((f) => f.markdown.includes('> [!') && f.markdown.includes('乙笔记'));
+    expect(leaf1).toBeTruthy();
+    expect(leaf2).toBeTruthy();
+    expect(leaf1!.markdown).toContain('**同场采集笔记**');
+    expect(leaf2!.markdown).toContain('**同场采集笔记**');
+    expect(files.some((f) => f.path.startsWith('InkLoop/Concepts/'))).toBe(false);
+
+    const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
+    const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
+    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
   });
 });

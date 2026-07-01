@@ -432,6 +432,59 @@ describe('assembleKnowledgeProjection（存储原生拓扑：账本 entity_refs 
   });
 });
 
+describe('assembleKnowledgeProjection（存储原生拓扑：KO-KO 关系层 same_ai_turn，零 LLM）', () => {
+  it('常见场景：一次 AI 回复消费 2 个锚 mark → 只产 1 条 ai_note KO，不足 2 个 KO，不产关系组（已知降级，非 bug）', async () => {
+    const m1 = mark({ mark_id: 'm1', marked_text: 'a' });
+    const m2 = mark({ mark_id: 'm2', marked_text: 'b' });
+    const t = aiTurn({ overlay_id: 'ov1', ai_reply: '回复', anchor: { surface_id: 's', mark_ids: ['m1', 'm2'], object_refs: [] } });
+    const proj = await assembleKnowledgeProjection(input([m1, m2], [t]));
+
+    expect(proj.objects).toHaveLength(1); // 两个锚 mark 都被这一条 ai_note 消费
+    expect(proj.koRelationFacts).toEqual([]);
+  });
+
+  it('边缘情况：dismissed 的 ai_turn + 两个锚 mark 都自带 entity_refs（不被消费）→ 3 个独立 KO 互标 same_ai_turn', async () => {
+    const m1 = mark({ mark_id: 'm1', marked_text: '缓存一致性', entity_refs: [ref('cache-coherence')] });
+    const m2 = mark({ mark_id: 'm2', marked_text: 'MESI 协议', entity_refs: [ref('mesi')] });
+    const t = aiTurn({ overlay_id: 'ov1', overlay_state: 'dismissed', ai_reply: '回复', anchor: { surface_id: 's', mark_ids: ['m1', 'm2'], object_refs: [] } });
+    const proj = await assembleKnowledgeProjection(input([m1, m2], [t]));
+
+    expect(proj.objects).toHaveLength(3); // dismissed 的 ai_note（不可导出）+ m1/m2 各自的 excerpt
+    expect(proj.koRelationFacts).toHaveLength(1);
+    const group = proj.koRelationFacts[0];
+    expect(group).toMatchObject({ kind: 'same_ai_turn', source: 'ai_turn_anchor', confidence: 'deterministic' });
+    expect(group.relation_id).toBe('rel:same_ai_turn:doc_test:ov1');
+    expect(group.ko_ids).toHaveLength(3);
+    expect(new Set(group.ko_ids)).toEqual(new Set(proj.objects.map((ko) => ko.ko_id)));
+    expect(group.evidence).toMatchObject({ document_id: 'doc_test', mark_ids: ['m1', 'm2'] });
+  });
+
+  it('只有 1 个锚 mark 时不产关系组（关系至少要两端）', async () => {
+    const m1 = mark({ mark_id: 'm1', marked_text: 'a', entity_refs: [ref('x')] });
+    const t = aiTurn({ overlay_id: 'ov1', overlay_state: 'dismissed', ai_reply: '回复', anchor: { surface_id: 's', mark_ids: ['m1'], object_refs: [] } });
+    const proj = await assembleKnowledgeProjection(input([m1], [t]));
+    expect(proj.koRelationFacts).toEqual([]);
+  });
+
+  it('folded 的 ai_turn（写给自己·不导出）不产关系组，即使锚了多个 mark', async () => {
+    const m1 = mark({ mark_id: 'm1', marked_text: '甲', entity_refs: [ref('x')] });
+    const m2 = mark({ mark_id: 'm2', marked_text: '乙', entity_refs: [ref('y')] });
+    const t = aiTurn({ overlay_id: 'ov1', overlay_state: 'folded', ai_reply: '回复', anchor: { surface_id: 's', mark_ids: ['m1', 'm2'], object_refs: [] } });
+    const proj = await assembleKnowledgeProjection(input([m1, m2], [t]));
+    expect(proj.koRelationFacts).toEqual([]);
+  });
+
+  it('确定性：ko_ids 按 KO 顺序排序，不随 marks/aiTurns 输入顺序漂移', async () => {
+    const m1 = mark({ mark_id: 'm1', marked_text: '甲', entity_refs: [ref('x')] });
+    const m2 = mark({ mark_id: 'm2', marked_text: '乙', entity_refs: [ref('y')] });
+    const t = aiTurn({ overlay_id: 'ov1', overlay_state: 'dismissed', ai_reply: '回复', anchor: { surface_id: 's', mark_ids: ['m1', 'm2'], object_refs: [] } });
+
+    const projA = await assembleKnowledgeProjection(input([m1, m2], [t]));
+    const projB = await assembleKnowledgeProjection(input([m2, m1], [t]));
+    expect(projA.koRelationFacts[0].ko_ids).toEqual(projB.koRelationFacts[0].ko_ids);
+  });
+});
+
 function entity(id: string, over: Partial<PersistedEntity> = {}): PersistedEntity {
   return { entity_id: id, normalized_key: id, display: id, kind: 'entity', provenance: { document_ids: [], entries: [] }, created_at: '2026-06-01T00:00:00.000Z', updated_at: '2026-06-01T00:00:00.000Z', ...over };
 }

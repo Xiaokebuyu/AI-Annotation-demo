@@ -18,6 +18,7 @@ import { buildL1Export } from './index';
 import { buildMeetingL1Export } from './meeting-export';
 import { assembleVaultBundle, type EntityExport, type VaultExportBundle } from './vault-export';
 import { finalize, isInkPlaceholderBody, projectEntities, type EntityMembershipFact } from '../../knowledge/builder';
+import type { KoRelationGroup } from 'ink-surface-sdk/knowledge-schema';
 
 /** 概念 KO 工厂：SDK 装配出的概念 draft → finalize 的 Draft（确定性 ko_id + content_hash·与其他 KO 同口径过 validator）。
  *  SDK 只调本工厂、不自己建 KO（也不碰 LLM·抽取走 makeConceptExtractor）。 */
@@ -47,7 +48,7 @@ function nonEmpty(ex: { knowledgeExport: { objects: unknown[] }; documentProject
  * ⚠️例外（存储原生拓扑）：占位 KO 若带 entity_refs/topic_refs（用户明确"归类"过这条笔迹），不能被这条过滤悄悄吞掉——
  * 那是用户显式声明的关系，过滤掉=无声丢失。判据＝该 KO 是否有对应的 entityFacts。
  */
-export function dropInkPlaceholders<T extends { knowledgeExport: { objects: { ko_id: string; body_md: string }[] }; entityFacts?: EntityMembershipFact[] }>(ex: T): T {
+export function dropInkPlaceholders<T extends { knowledgeExport: { objects: { ko_id: string; body_md: string }[] }; entityFacts?: EntityMembershipFact[]; koRelationFacts?: KoRelationGroup[] }>(ex: T): T {
   const refKoIds = new Set((ex.entityFacts ?? []).map((f) => f.ko_id));
   const kept = new Set<string>();
   ex.knowledgeExport.objects = ex.knowledgeExport.objects.filter((ko) => {
@@ -56,6 +57,11 @@ export function dropInkPlaceholders<T extends { knowledgeExport: { objects: { ko
     return keep;
   });
   if (ex.entityFacts) ex.entityFacts = ex.entityFacts.filter((f) => kept.has(f.ko_id));
+  if (ex.koRelationFacts) {
+    ex.koRelationFacts = ex.koRelationFacts
+      .map((g) => ({ ...g, ko_ids: g.ko_ids.filter((id) => kept.has(id)) }))
+      .filter((g) => g.ko_ids.length >= 2);
+  }
   return ex;
 }
 
@@ -111,19 +117,19 @@ export async function collectVaultBundle(
     if (entityModeOf(b.document_id) !== 'reading') continue;
     const ex = dropInkPlaceholders(await buildL1Export(b.document_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'reading', documentId: b.document_id, documentTitle: b.filename || b.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: b.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts });
+      exports.push({ mode: 'reading', documentId: b.document_id, documentTitle: b.filename || b.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: b.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts });
     }
   }
   for (const d of await listDiaries()) {
     const ex = dropInkPlaceholders(await buildL1Export(d.document_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'diary', documentId: d.document_id, documentTitle: d.filename || d.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: d.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts });
+      exports.push({ mode: 'diary', documentId: d.document_id, documentTitle: d.filename || d.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: d.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts });
     }
   }
   for (const m of await listAllMeetings()) {
     const ex = dropInkPlaceholders(await buildMeetingL1Export(m.meeting_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort() });
+      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort(), koRelationFacts: ex.koRelationFacts });
     }
   }
 
@@ -136,9 +142,10 @@ export async function collectVaultBundle(
   let storedLayer: ConceptLayer | undefined;
   if (opts.storedEntities !== false) {
     const allEntityFacts = exports.flatMap((e) => e.entityFacts ?? []);
+    const allKoRelationFacts = exports.flatMap((e) => e.koRelationFacts ?? []);
     const registry = await listCanonicalEntities();
     const { entities, memberships } = projectEntities(allEntityFacts, registry);
-    storedLayer = buildConceptLayerFromStoredMemberships(allKos, entities, memberships);
+    storedLayer = buildConceptLayerFromStoredMemberships(allKos, entities, memberships, allKoRelationFacts);
   }
 
   // 概念层（语义跨链·可选）：收齐全部实体的 KO 后跑一遍 LLM 抽概念 → 跨文档桥成概念枢纽。
@@ -172,11 +179,11 @@ export async function collectVaultEntity(ref: VaultEntityRef, opts: { generatedA
     if (!m) throw new Error(`会议不存在或已被删除：${ref.meetingId}`);
     const ex = dropInkPlaceholders(await buildMeetingL1Export(ref.meetingId, o));
     if (!nonEmpty(ex)) return null;
-    return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort() };
+    return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort(), koRelationFacts: ex.koRelationFacts };
   }
   const doc = await getDoc(ref.documentId);
   if (!doc) throw new Error(`文档不存在或已被删除：${ref.documentId}`);
   const ex = dropInkPlaceholders(await buildL1Export(ref.documentId, o));
   if (!nonEmpty(ex)) return null;
-  return { mode: ref.mode, documentId: ref.documentId, documentTitle: doc.filename || ref.documentId, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: doc.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts };
+  return { mode: ref.mode, documentId: ref.documentId, documentTitle: doc.filename || ref.documentId, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: doc.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts, koRelationFacts: ex.koRelationFacts };
 }

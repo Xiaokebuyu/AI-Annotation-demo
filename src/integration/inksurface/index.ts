@@ -9,7 +9,7 @@ import { buildKnowledgeExport, type ExportOpts } from './knowledge-export';
 import { buildDocumentProjectionExport } from './document-projection';
 import { buildRuntimeAndVisual } from './runtime-surface';
 import type { EntityMembershipFact } from '../../knowledge/builder';
-import type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope } from 'ink-surface-sdk/knowledge-schema';
+import type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope, KoRelationGroup } from 'ink-surface-sdk/knowledge-schema';
 import type { RuntimeSurfaceBlock } from 'ink-surface-sdk/runtime-schema';
 import type { InkLoopVisualModel } from 'ink-surface-sdk/surface-model';
 
@@ -32,6 +32,7 @@ export interface L1Export {
   warnings: string[];
   diagnostics: L1Diagnostics;
   entityFacts: EntityMembershipFact[]; // 存储原生拓扑：本书可导出 KO 的实体关联事实（vault-collect 跨实体聚合用）
+  koRelationFacts: KoRelationGroup[]; // 存储原生拓扑：本书可导出 KO 的 KO-KO 关系事实（同一 ai_turn 锚定的兄弟 mark）
 }
 
 export async function buildL1Export(documentId: string, opts: ExportOpts = {}): Promise<L1Export> {
@@ -41,7 +42,7 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
   const doc = await getDoc(documentId);
   const documentTitle = doc?.filename || '(未命名)';
 
-  const { envelope: knowledgeExport, exportable, skipped: skippedKos, entityFacts } = await buildKnowledgeExport(documentId, o);
+  const { envelope: knowledgeExport, exportable, skipped: skippedKos, entityFacts, koRelationFacts } = await buildKnowledgeExport(documentId, o);
   const { envelope: documentProjections, warnings: projWarn, skippedPages } = await buildDocumentProjectionExport(documentId, exportable, o);
   const blocks = documentProjections.document_projections[0]?.blocks ?? [];
   const { surfaceBlocks, visualModel, warnings: rtWarn, orphanInk, unplacedInk } = await buildRuntimeAndVisual(documentId, documentTitle, blocks, exportable);
@@ -60,6 +61,7 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
     warnings,
     diagnostics: { skippedKos, skippedPages, orphanInk, unplacedInk, exportableKoCount: exportable.length },
     entityFacts,
+    koRelationFacts,
   };
 }
 
