@@ -212,9 +212,18 @@ export interface EntityMembershipFact {
   created_at: string; // 决定 entity 首次出现时间的排序键；取 ref 所在条目的 source_created_at ?? created_at
 }
 
-/** refs（mark/ai_turn 的 entity_refs 或 topic_refs）→ 事实数组。builder 内外都用它映射，别重复实现同一逻辑（如 meeting-export）。 */
+/** refs（mark/ai_turn 的 entity_refs 或 topic_refs）→ 事实数组。builder 内外都用它映射，别重复实现同一逻辑（如 meeting-export）。
+ *  · review_state='rejected' 的 ref 不产事实——用户明确拒绝过的建议不能变成"确定性拓扑"里的真相。
+ *  · entity_id 兜底走 normalizeEntityId：契约上写 refs 的一方该已归一化，这里防御一手（防未来生产者疏漏，
+ *    让同一实体的不同大小写/裸 display 拆成多个 hub）。 */
 export function entityFactsFrom(refs: LedgerEntityRef[] | undefined, koId: string, documentId: string, sourceEntryId: string, createdAt: string): EntityMembershipFact[] {
-  return (refs ?? []).map((ref) => ({ entity_id: ref.entity_id, display: ref.display, ko_id: koId, source_document_id: documentId, source_entry_id: sourceEntryId, source: ref.source, created_at: createdAt }));
+  return (refs ?? [])
+    .filter((ref) => ref.review_state !== 'rejected')
+    .flatMap((ref) => {
+      const rawId = (ref.entity_id || ref.display || '').trim();
+      if (!rawId) return [];
+      return [{ entity_id: normalizeEntityId(rawId), display: ref.display, ko_id: koId, source_document_id: documentId, source_entry_id: sourceEntryId, source: ref.source, created_at: createdAt }];
+    });
 }
 
 /* ── 纯转换核心 ──────────────────────────────────────────────────────────── */
@@ -246,8 +255,16 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
     if (!body) continue; // 空内容轮不产 KO，且**不消费**锚 mark → 该 mark 仍由下方循环单独导出（不丢）
     const anchorIds = t.anchor?.mark_ids ?? [];
     const anchorMarks = anchorIds.map((id) => markById.get(id)).filter((m): m is PersistedMark => !!m);
-    for (const m of anchorMarks) consumed.add(m.mark_id); // 确认会产出后再消费
+    // dismissed 的 KO 不可导出（见 knowledge-export.ts isExportableKo）——若锚 mark 自己声明过 entity_refs/topic_refs，
+    // 别把它一起消费掉：那样 mark 的内容+它自己的拓扑声明会随 dismissed 的 AI KO 一起从导出里无声消失。
+    // 用户拒绝的是 AI 的回复，不是自己写的那笔、更不是自己标的关系。可导出（shown/accepted/edited）时消费如常。
+    const turnWillExport = t.overlay_state !== 'dismissed';
+    for (const m of anchorMarks) {
+      const markHasOwnRefs = (m.entity_refs?.length ?? 0) > 0 || (m.topic_refs?.length ?? 0) > 0;
+      if (turnWillExport || !markHasOwnRefs) consumed.add(m.mark_id);
+    }
     const anchorMark = anchorMarks[0];
+    const turnCreatedAt = t.source_created_at ?? t.created_at;
     const ko = await finalize({
       stableKey: `ai_turn:${document_id}:${t.overlay_id}`, // 含 doc 命名空间·防全库聚合短 id 跨书碰撞
       kind: t.trigger === 'discussion' ? 'qa' : 'ai_note',
@@ -266,10 +283,9 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
         ai_turn_ids: [t.entry_id],
       },
       status: statusFromOverlay(t.overlay_state),
-      createdAt: t.created_at,
+      createdAt: turnCreatedAt, // source_created_at 兜底：补写 refs 的 revision 不该让既有 KO 的 created_at（进 content_hash）漂移
     });
     out.push(ko);
-    const turnCreatedAt = t.source_created_at ?? t.created_at;
     entityFacts.push(...entityFactsFrom(t.entity_refs, ko.ko_id, document_id, t.entry_id, turnCreatedAt));
     entityFacts.push(...entityFactsFrom(t.topic_refs, ko.ko_id, document_id, t.entry_id, turnCreatedAt));
     for (const m of anchorMarks) {
@@ -289,6 +305,7 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
     const inkBody = (m.feature_type === 'drawing' ? INK_PLACEHOLDER_DRAWING : INK_PLACEHOLDER_HANDWRITING);
     const body = kind === 'excerpt' ? m.marked_text || '' : transcript || (m.marked_text || '').trim() || inkBody;
     if (!body) continue; // 仅 excerpt 无所标原文时为空→跳；annotation 永有占位正文（不丢手写）
+    const markCreatedAt = m.source_created_at ?? m.created_at;
     const ko = await finalize({
       stableKey: `mark:${document_id}:${m.mark_id}`,
       kind,
@@ -302,10 +319,9 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
       body,
       provenance: { created_from: 'mark', mark_ids: [m.mark_id] },
       status: 'export_ready',
-      createdAt: m.created_at,
+      createdAt: markCreatedAt, // source_created_at 兜底：补写 refs 的 revision 不该让既有 KO 的 created_at（进 content_hash）漂移
     });
     out.push(ko);
-    const markCreatedAt = m.source_created_at ?? m.created_at;
     entityFacts.push(...entityFactsFrom(m.entity_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
     entityFacts.push(...entityFactsFrom(m.topic_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
   }
@@ -321,15 +337,17 @@ export async function assembleKnowledgeObjects(input: BuilderInput): Promise<Kno
   return (await assembleKnowledgeProjection(input)).objects;
 }
 
-/** 沿 status='merged'+merged_into 链走到底，解析出当前活着的 canonical entity_id（环守卫：撞环就地停）。 */
+/** 沿 status='merged'+merged_into 链走到底，解析出当前活着的 canonical entity_id。
+ *  环守卫：正常数据不会有环（合并该是无环的），但若脏数据出现环，收敛到环内字典序最小的 id——
+ *  不管从环上哪个成员开始解析，结果都一样，不会把同一个环撕成两个不同的"活"实体。 */
 function resolveEntityRef(entityId: string, registryById: Map<string, PersistedEntity>): string {
   let current = entityId;
-  const seen = new Set<string>();
+  const path: string[] = [];
   for (;;) {
+    if (path.includes(current)) return [...path].sort()[0]; // 环：确定性收敛，不死循环
+    path.push(current);
     const rec = registryById.get(current);
     if (!rec || rec.status !== 'merged' || !rec.merged_into) return current;
-    if (seen.has(current)) return current; // 环：放弃继续解析，停在当前，不死循环
-    seen.add(current);
     current = rec.merged_into;
   }
 }

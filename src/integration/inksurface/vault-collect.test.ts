@@ -61,4 +61,21 @@ describe('mergeConceptLayers（存储原生拓扑层 + legacy LLM 概念层 → 
     const merged = mergeConceptLayers(stored, llm)!;
     expect(merged.assignmentsByKo.ko1).toEqual(['一致性', '缓存']); // 去重，不重复
   });
+
+  // 同名 hub（存储实体 + LLM 概念独立发现同一个显示名）必须去重成一条：否则 SDK 渲染器按 title 建 Map 时
+  // 后写覆盖前写，两条 hub 循环各写一份文件却互相踩踏——一份路径分配了却没人用，另一份被两次写入互相覆盖。
+  it('同名 hub 去重：只保留一条，优先带 entity_id 的那条（存储原生更权威）', () => {
+    const stored = layer({ hubs: [{ entity_id: 'attention', title: '注意力机制' }], membersByConcept: { 注意力机制: ['ko1'] } });
+    const llm = layer({ hubs: [{ title: '注意力机制' }], concepts: [{ title: '注意力机制' } as never], membersByConcept: { 注意力机制: ['ko2'] } });
+    const merged = mergeConceptLayers(stored, llm)!;
+    expect(merged.hubs).toHaveLength(1); // 不是 2——这是本次要修的重复 hub bug
+    expect(merged.hubs![0]).toEqual({ entity_id: 'attention', title: '注意力机制' }); // 保留带 entity_id 的那条
+  });
+
+  it('同名但大小写/全半角不同也算同一 hub（NFKC 归一后比较）', () => {
+    const stored = layer({ hubs: [{ title: 'Cache Coherence' }] });
+    const llm = layer({ hubs: [{ title: 'ｃache coherence' }] }); // 全角 c
+    const merged = mergeConceptLayers(stored, llm)!;
+    expect(merged.hubs).toHaveLength(1);
+  });
 });

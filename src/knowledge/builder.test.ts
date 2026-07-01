@@ -6,6 +6,7 @@ import {
   assembleKnowledgeProjection,
   type BuilderInput,
   enrichExportTags,
+  entityFactsFrom,
   finalize,
   INK_PLACEHOLDER_DRAWING,
   INK_PLACEHOLDER_HANDWRITING,
@@ -469,11 +470,12 @@ describe('projectEntities（facts + registry → 确定性 KnowledgeEntity[]/Ent
     expect(entities.map((e) => e.entity_id)).toEqual(['c']);
   });
 
-  it('合并链成环：不死循环，就地停在当前 id（防御性——正常数据不会出现环）', () => {
-    const facts = [fact('a', 'ko1')];
+  it('合并链成环：不死循环，且不管从环上哪个成员起解析都收敛到同一个 id（防御性——正常数据不会出现环，但脏数据不能把一个环撕成两个"活"实体）', () => {
     const registry = [entity('a', { status: 'merged', merged_into: 'b' }), entity('b', { status: 'merged', merged_into: 'a' })];
-    const { entities } = projectEntities(facts, registry); // 不超时/不抛错即通过
-    expect(entities).toHaveLength(1);
+    const fromA = projectEntities([fact('a', 'ko1')], registry);
+    const fromB = projectEntities([fact('b', 'ko1')], registry); // 同一个环，起点换成 b
+    expect(fromA.entities).toHaveLength(1);
+    expect(fromA.entities[0].entity_id).toBe(fromB.entities[0].entity_id); // 收敛到同一个 id，不裂成两个实体
   });
 
   it('确定性：facts 输入顺序打乱，输出 entities/memberships 顺序不变', () => {
@@ -481,5 +483,76 @@ describe('projectEntities（facts + registry → 确定性 KnowledgeEntity[]/Ent
     const facts2 = [fact('a', 'ko1'), fact('b', 'ko2')];
     const registry = [entity('a'), entity('b')];
     expect(projectEntities(facts1, registry)).toEqual(projectEntities(facts2, registry));
+  });
+});
+
+describe('entityFactsFrom（存储原生拓扑：review_state 过滤 + entity_id 归一兜底）', () => {
+  it('review_state=rejected 的 ref 不产 fact——用户明确拒绝的建议不能进"确定性拓扑"', () => {
+    const facts = entityFactsFrom(
+      [ref('a', { review_state: 'accepted' }), ref('b', { review_state: 'rejected' }), ref('c')], // c 无 review_state（缺省视为 suggested，但仍应产 fact——只有明确 rejected 才挡）
+      'ko1', 'doc_test', 'ent_x', '2026-06-01T00:00:00.000Z',
+    );
+    expect(facts.map((f) => f.entity_id).sort()).toEqual(['a', 'c']);
+  });
+
+  it('entity_id 缺省/未归一时用 normalizeEntityId 兜底，不产生原样大小写差异的重复实体', () => {
+    const facts = entityFactsFrom([{ entity_id: 'Cache Coherence', source: 'declared' }], 'ko1', 'doc_test', 'ent_x', '2026-06-01T00:00:00.000Z');
+    expect(facts[0].entity_id).toBe('cache-coherence');
+  });
+});
+
+describe('assembleKnowledgeProjection：source_created_at 接入 KO.createdAt（hash 稳定性硬约束）', () => {
+  it('mark 带 source_created_at 时，KO 的 created_at 取 source_created_at 而非账本条目自身 created_at（防补写 refs 的 revision 让既有 KO 的 content_hash 漂移）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: 'x', created_at: '2026-06-30T00:00:00.000Z', source_created_at: '2026-06-01T00:00:00.000Z' });
+    const proj = await assembleKnowledgeProjection(input([m], []));
+    expect(proj.objects[0].created_at).toBe('2026-06-01T00:00:00.000Z');
+  });
+
+  it('ai_turn 带 source_created_at 时同理', async () => {
+    const t = aiTurn({ overlay_id: 'ov1', ai_reply: 'hi', created_at: '2026-06-30T00:00:00.000Z', source_created_at: '2026-06-01T00:00:00.000Z' });
+    const proj = await assembleKnowledgeProjection(input([], [t]));
+    expect(proj.objects[0].created_at).toBe('2026-06-01T00:00:00.000Z');
+  });
+
+  it('回归护栏：两次投影里，只有 source_created_at 变化（模拟"仅补写 refs 不改内容"）时 KO 的 content_hash 保持一致；source_created_at 用于 created_at 后才成立', async () => {
+    const base = { mark_id: 'm1', feature_type: 'markup' as const, marked_text: 'x', created_at: '2026-06-01T00:00:00.000Z' };
+    const before = mark({ ...base });
+    const afterRevision = mark({ ...base, created_at: '2026-06-30T00:00:00.000Z', source_created_at: '2026-06-01T00:00:00.000Z', entity_refs: [ref('a')] }); // 补写 revision：账本层面的 created_at 变了，但语义时间不变
+    const projBefore = await assembleKnowledgeProjection(input([before], []));
+    const projAfter = await assembleKnowledgeProjection(input([afterRevision], []));
+    expect(projAfter.objects[0].content_hash).toBe(projBefore.objects[0].content_hash); // KO 本体（含 created_at）不变 → hash 不变
+    expect(projAfter.objects[0].ko_id).toBe(projBefore.objects[0].ko_id);
+  });
+});
+
+describe('dismissed ai_turn 与锚 mark 的消费边界（存储原生拓扑：无声丢失修复）', () => {
+  it('锚 mark 无 refs 时：dismissed 仍消费它，行为与改动前一致（kos.length===1，既定行为不变）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: 'x' });
+    const t = aiTurn({ overlay_id: 'ov1', overlay_state: 'dismissed', ai_reply: 'reply', anchor: { surface_id: 's', mark_ids: ['m1'], object_refs: [] } });
+    const kos = await assembleKnowledgeObjects(input([m], [t]));
+    expect(kos).toHaveLength(1);
+    expect(kos[0].status).toBe('dismissed');
+  });
+
+  it('锚 mark 自己带 entity_refs 时：dismissed 不消费它——mark 仍独立导出（内容 + 它自己的 refs 都保住，不随不可导出的 AI KO 一起消失）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: '缓存一致性', entity_refs: [ref('cache-coherence')] });
+    const t = aiTurn({ overlay_id: 'ov1', overlay_state: 'dismissed', ai_reply: 'reply', anchor: { surface_id: 's', mark_ids: ['m1'], object_refs: [] } });
+    const proj = await assembleKnowledgeProjection(input([m], [t]));
+
+    expect(proj.objects).toHaveLength(2); // dismissed 的 ai_note（不可导出）+ mark 自己的 excerpt（可导出）
+    const excerptKo = proj.objects.find((k) => k.kind === 'excerpt');
+    expect(excerptKo).toBeTruthy();
+    expect(excerptKo!.body_md).toBe('缓存一致性');
+    // mark 自己的 fact 挂在 excerpt KO 上（存活的那个），不是挂在会被导出闸挡掉的 dismissed ai_note 上
+    const factsOnExcerpt = proj.entityFacts.filter((f) => f.ko_id === excerptKo!.ko_id);
+    expect(factsOnExcerpt.map((f) => f.entity_id)).toEqual(['cache-coherence']);
+  });
+
+  it('可导出（非 dismissed）时：即使 mark 带 refs，仍照常消费（refs 通过 ai_turn 的 KO 存活，不需要 mark 单独导出）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: 'x', entity_refs: [ref('a')] });
+    const t = aiTurn({ overlay_id: 'ov1', overlay_state: 'shown', ai_reply: 'reply', anchor: { surface_id: 's', mark_ids: ['m1'], object_refs: [] } });
+    const proj = await assembleKnowledgeProjection(input([m], [t]));
+    expect(proj.objects).toHaveLength(1); // 与既有行为一致：mark 被消费，不重复导出
+    expect(proj.entityFacts.map((f) => f.entity_id)).toEqual(['a']);
   });
 });

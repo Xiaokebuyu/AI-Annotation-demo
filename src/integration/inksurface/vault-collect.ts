@@ -61,7 +61,10 @@ export function dropInkPlaceholders<T extends { knowledgeExport: { objects: { ko
 
 /** 合并「存储原生拓扑层」与「legacy LLM 概念层」成渲染器吃的单一 ConceptLayer。两者字段形状一致（P1），
  *  逐字段并集去重；任一缺失直接透传另一个。concepts/hubs 都并（渲染器 hub 来源=hubs??concepts 映射，
- *  只并 hubs 会让 llm 的 concepts 在没有 hubs 时静默消失，所以两边都显式转成 hub 再并）。 */
+ *  只并 hubs 会让 llm 的 concepts 在没有 hubs 时静默消失，所以两边都显式转成 hub 再并）。
+ *  ⚠️hubs 必须按 title 去重（同名归一后取一条）：SDK 渲染器用 `Map(hubs.map(h=>[h.title,namer(h.title)]))` 建
+ *  文件名——重复 title 会被 namer 分配成两个不同文件名，但 Map 只留最后一次的映射，导致两条 hub 循环各写一份
+ *  文件却都解析到同一个（后写的）路径：一份文件名被分配了却没人真正用、另一份被两次写入互相覆盖。 */
 export function mergeConceptLayers(stored: ConceptLayer | undefined, llm: ConceptLayer | undefined): ConceptLayer | undefined {
   if (!stored && !llm) return undefined;
   if (!stored) return llm;
@@ -73,9 +76,20 @@ export function mergeConceptLayers(stored: ConceptLayer | undefined, llm: Concep
     return out;
   };
 
+  const titleKey = (title: string): string => title.normalize('NFKC').trim().toLocaleLowerCase('en-US');
+  const dedupeHubs = (hubs: NonNullable<ConceptLayer['hubs']>): NonNullable<ConceptLayer['hubs']> => {
+    const byKey = new Map<string, NonNullable<ConceptLayer['hubs']>[number]>();
+    for (const hub of hubs) {
+      const key = titleKey(hub.title);
+      const cur = byKey.get(key);
+      if (!cur || (!cur.entity_id && hub.entity_id)) byKey.set(key, hub); // 优先保留带 entity_id 的（存储原生更权威）
+    }
+    return [...byKey.values()];
+  };
+
   return {
     concepts: [...stored.concepts, ...llm.concepts],
-    hubs: [...(stored.hubs ?? []), ...(llm.hubs ?? llm.concepts.map((ko) => ({ title: ko.title })))],
+    hubs: dedupeHubs([...(stored.hubs ?? []), ...(llm.hubs ?? llm.concepts.map((ko) => ({ title: ko.title })))]),
     assignmentsByKo: mergeRecord(stored.assignmentsByKo, llm.assignmentsByKo),
     membersByConcept: mergeRecord(stored.membersByConcept, llm.membersByConcept),
     localByKo: mergeRecord(stored.localByKo, llm.localByKo),
@@ -115,9 +129,12 @@ export async function collectVaultBundle(
 
   const allKos = exports.flatMap((e) => e.knowledgeExport.objects);
 
-  // 存储原生拓扑层（零 LLM）：账本 entity_refs/topic_refs 的确定性投影。concepts:false 时本地导出仍有这层。
+  // 存储原生拓扑层（零 LLM）：账本 entity_refs/topic_refs 的确定性投影。默认开——账本没有 refs 时这层
+  // 自然是空的（无害），但一旦有 refs（P4 采集声明/P5 后台建议写回）就该在**任何**导出路径生效，不该要
+  // 每个调用方都记得显式传 true；concepts:false 的零 LLM 发布路径尤其依赖这条默认值才算兑现"零 LLM 也能
+  // 产出拓扑"的承诺。显式传 storedEntities:false 才关。
   let storedLayer: ConceptLayer | undefined;
-  if (opts.storedEntities) {
+  if (opts.storedEntities !== false) {
     const allEntityFacts = exports.flatMap((e) => e.entityFacts ?? []);
     const registry = await listCanonicalEntities();
     const { entities, memberships } = projectEntities(allEntityFacts, registry);
@@ -147,15 +164,18 @@ export type VaultEntityRef = { mode: 'meeting'; meetingId: string } | { mode: 'r
 export async function collectVaultEntity(ref: VaultEntityRef, opts: { generatedAt?: string; appVersion?: string } = {}): Promise<EntityExport | null> {
   const generatedAt = opts.generatedAt ?? new Date().toISOString();
   const o = { generatedAt, appVersion: opts.appVersion };
+  // ⚠️「实体不存在」和「实体存在但没内容」是两回事——前者是错误(调用方传了脏/已删的 id)，
+  // 后者是合法态(该会议/文档确实还没手写)。混成同一个 null 会让 publishEntityToVault 把
+  // "会议已被删除"误判成 entityEmpty 轻提示静默放过（codex 抓）。not-found 改抛错。
   if (ref.mode === 'meeting') {
     const m = await getMeeting(ref.meetingId);
-    if (!m) return null;
+    if (!m) throw new Error(`会议不存在或已被删除：${ref.meetingId}`);
     const ex = dropInkPlaceholders(await buildMeetingL1Export(ref.meetingId, o));
     if (!nonEmpty(ex)) return null;
     return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts };
   }
   const doc = await getDoc(ref.documentId);
-  if (!doc) return null;
+  if (!doc) throw new Error(`文档不存在或已被删除：${ref.documentId}`);
   const ex = dropInkPlaceholders(await buildL1Export(ref.documentId, o));
   if (!nonEmpty(ex)) return null;
   return { mode: ref.mode, documentId: ref.documentId, documentTitle: doc.filename || ref.documentId, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: doc.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts };

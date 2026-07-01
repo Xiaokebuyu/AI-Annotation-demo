@@ -24,7 +24,7 @@ export interface EntityExport {
   documentProjections: DocumentProjectionExportEnvelope;
   activityDate?: string; // 实体来源日期（书/日记 saved_at·会议 started_at）——无 KO 实体也能落对日期/进每日 MOC
   warnings?: string[];   // 导出诊断（被闸挡/未落块等）→ 写进 Export Report·不静默
-  entityFacts?: EntityMembershipFact[]; // 存储原生拓扑：本实体可导出 KO 的实体关联事实（vault-collect 跨实体聚合用，仅中转不进 bundle）
+  entityFacts?: EntityMembershipFact[]; // 存储原生拓扑：本实体可导出 KO 的实体关联事实（vault-collect 跨实体聚合用；assembleVaultBundle 透传进 bundle JSON，但渲染器只读 conceptLayer，不读这个字段）
 }
 
 export interface VaultBundleEntity extends EntityExport {

@@ -56,7 +56,8 @@ export interface MeetingL1Export {
 }
 
 const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
-const clk = (ms: number): string => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+// M6 语义已进导出链路（⑤·会前手写 relMs 为负）：别再 clamp≥0 把会前笔误标成 0:00，同 meeting-recap.ts 的 clk（codex 抓）。
+const clk = (ms: number): string => { const s = Math.round(Math.abs(ms) / 1000); const neg = ms < 0 && s > 0; return `${neg ? '-' : ''}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const rng = (a: number, b: number): string => `${clk(a)}–${clk(b)}`;
 const inkBody = (text: string, feat: string): string => text.trim() || (feat === 'drawing' ? INK_PLACEHOLDER_DRAWING : INK_PLACEHOLDER_HANDWRITING);
 
@@ -73,6 +74,7 @@ export async function buildMeetingL1Export(meetingId: string, opts: MeetingExpor
   const marksRaw = (await getFoldedMarksByContext(`mtg_${meetingId}`)).filter((mk) => !mk.is_tombstone).sort((a, b) => a.abs_timestamp - b.abs_timestamp);
   const marks = marksRaw.map((mk) => ({
     mark_id: mk.mark_id,
+    entry_id: mk.entry_id,
     abs_timestamp: mk.abs_timestamp,
     feature_type: mk.feature_type,
     marked_text: mk.marked_text,
@@ -88,7 +90,7 @@ export interface MeetingExportInput {
   meeting: PersistedMeeting;
   cues: ReturnType<typeof parseSrtTranscript>;
   marks: {
-    mark_id: string; abs_timestamp: number; feature_type?: string; marked_text?: string; page_index?: number;
+    mark_id: string; entry_id?: string; abs_timestamp: number; feature_type?: string; marked_text?: string; page_index?: number;
     entity_refs?: LedgerEntityRef[]; topic_refs?: LedgerEntityRef[]; // 存储原生拓扑：会中手写笔的实体声明（P4 采集入口写入·目前多数缺）
   }[];
 }
@@ -174,8 +176,9 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
   segments.forEach((s, si) => { for (const mk of s.marks) segOfMark.set(mk.mark_id, si); });
 
   // buildSegmentMarks 产的 SegmentMark 窄化掉了 entity_refs/topic_refs（segment.ts 是更广泛复用的共享模块，
-  // 不为此改它的输出形状）——按 mark_id 回查原始账本条目的 refs。
-  const refsByMarkId = new Map(input.marks.map((m) => [m.mark_id, { entity_refs: m.entity_refs, topic_refs: m.topic_refs }] as const));
+  // 不为此改它的输出形状）——按 mark_id 回查原始账本条目的 refs + 真实 entry_id（provenance 该指真实账本行，
+  // 不是 mark_id；entry_id 缺时退回 mark_id，兼容测试合成数据）。
+  const refsByMarkId = new Map(input.marks.map((m) => [m.mark_id, { entity_refs: m.entity_refs, topic_refs: m.topic_refs, entryId: m.entry_id ?? m.mark_id }] as const));
 
   let annotationKoCount = 0;
   const entityFacts: EntityMembershipFact[] = [];
@@ -200,8 +203,9 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     annotationKoCount++;
     if (anchorBlock) anchorBlock.knowledge_object_ids = [...new Set([...anchorBlock.knowledge_object_ids, ko.ko_id])].sort();
     const refs = refsByMarkId.get(mk.mark_id);
-    entityFacts.push(...entityFactsFrom(refs?.entity_refs, ko.ko_id, documentId, mk.mark_id, createdAt));
-    entityFacts.push(...entityFactsFrom(refs?.topic_refs, ko.ko_id, documentId, mk.mark_id, createdAt));
+    const sourceEntryId = refs?.entryId ?? mk.mark_id;
+    entityFacts.push(...entityFactsFrom(refs?.entity_refs, ko.ko_id, documentId, sourceEntryId, createdAt));
+    entityFacts.push(...entityFactsFrom(refs?.topic_refs, ko.ko_id, documentId, sourceEntryId, createdAt));
   }
 
   // ⑤ 过导出闸 + taxonomy 标签富化（待办1·mode=meeting/会议 slug/会议日期 都从 KO 自身派生·createdAt 已是会议日期）+ 信封。
