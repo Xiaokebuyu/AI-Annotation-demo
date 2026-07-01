@@ -28,8 +28,11 @@ function isDrawing(node: MarkNode): boolean {
   return node.feature_type === 'drawing' || node.shape === 'sketch';
 }
 
+// 注：曾把所有 mode==='self_content' 都当"写"，导致"圈住一片空白/普通墨迹"（markup+self_content，
+// 没锚到印刷内容）被叙事成"仔细写了一段"——圈和写是两个动作，不该混为一谈。圈选类节点的叙事交给
+// 下面 markLabel/referTo 已有的 `${VERB[node.shape]}「xxx」`（如"圈「xxx」"）分支，不依赖这里兜底。
 function isWriting(node: MarkNode): boolean {
-  return node.feature_type === 'handwriting' || node.mode === 'self_content' || node.shape === 'handwriting';
+  return node.feature_type === 'handwriting' || node.shape === 'handwriting';
 }
 
 /** 运笔方式 → 副词前缀 / 重描后缀（Slice A）。只在 manner 明显时点缀，否则保持中性。 */
