@@ -89,17 +89,39 @@ function strokesToVisual(strokes: PersistedStroke[], color: string, blockBBox: N
     .filter((s) => s.points.length > 0);
 }
 
+const isVisibleStroke = (s: PersistedStroke): boolean =>
+  s.tool === 'pen' || s.tool === 'aipen' || s.tool === 'highlighter';
+
+function bboxOfPoints(points: readonly { x: number; y: number }[]): NormBBox | undefined {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+  }
+  if (!Number.isFinite(minX)) return undefined;
+  return [minX, minY, Math.max(1e-6, maxX - minX), Math.max(1e-6, maxY - minY)];
+}
+
+// surface_strokes 永远输出（整页复现的地基）：有真实 surface_points 就用它（reader 等非原版面），否则退回
+// canonical points/page_norm——否则原版页/老数据的笔到了 SDK 只剩 block_norm 碎片，整页无法复原。
 function strokesToSurface(strokes: PersistedStroke[], color: string): RuntimeSurfaceStroke[] {
   return strokes
-    .filter((s) => (s.tool === 'pen' || s.tool === 'aipen' || s.tool === 'highlighter') && s.surface_points?.length)
-    .map((s) => ({
-      tool: visualToolOf(s.tool),
-      color,
-      capture_surface: s.capture_surface ?? 'page',
-      coord_space: s.surface_coord_space ?? s.coord_space ?? 'page_norm',
-      bbox: s.surface_bbox,
-      points: (s.surface_points ?? []).map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure })),
-    }));
+    .filter(isVisibleStroke)
+    .map((s): RuntimeSurfaceStroke | null => {
+      const hasSurface = (s.surface_points?.length ?? 0) > 0;
+      const points = hasSurface ? s.surface_points! : s.points;
+      if (!points.length) return null;
+      return {
+        tool: visualToolOf(s.tool),
+        color,
+        capture_surface: s.capture_surface ?? 'page',
+        coord_space: hasSurface ? (s.surface_coord_space ?? s.coord_space ?? 'page_norm') : (s.coord_space ?? 'page_norm'),
+        bbox: hasSurface ? s.surface_bbox : bboxOfPoints(points),
+        points: points.map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure })),
+      };
+    })
+    .filter((s): s is RuntimeSurfaceStroke => !!s);
 }
 
 export interface RuntimeResult { surfaceBlocks: RuntimeSurfaceBlock[]; visualModel: InkLoopVisualModel; warnings: string[]; orphanInk: number; unplacedInk: number }
