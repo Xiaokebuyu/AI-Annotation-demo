@@ -4,7 +4,7 @@
 import { recordEvent, captureMark, commitSessionDiscussion, recognizeInk } from '../core/pipeline';
 import { pointInPolygon } from '../evidence/focus';
 import { grabLayers } from '../evidence/ocr';
-import { classifyScored, classifyStrokeFeature, bboxOf } from '../capture/classify';
+import { classifyScored, classifyStrokeFeature, bboxOf, CLS_BASIS } from '../capture/classify';
 import {
   addMark, peekSession, clearSession, makeMark, removeMark,
   IDLE_COMMIT_MS, type Mark,
@@ -83,6 +83,7 @@ function persistedStrokeOf(evt: AnnotationEvent, stroke: Stroke): PersistedStrok
     capture_surface: evt.capture_surface ?? (evt.pointer_type === 'reader' ? 'reader' : 'page'),
     ...(evt.reader_layout_id ? { reader_layout_id: evt.reader_layout_id } : {}),
     ...(evt.anchor_runs?.length ? { anchor_runs: evt.anchor_runs } : {}),
+    ...(evt.coord_px_per_norm ? { coord_px_per_norm: evt.coord_px_per_norm } : {}), // 块本地投影标记：重投影据此选逆运算
   };
   if (evt.reflow_ink_points?.length) {
     ps.surface_points = evt.reflow_ink_points;
@@ -271,6 +272,23 @@ function pageInkRefOf(strokes: Stroke[]): string | undefined {
 const isStrongMarkup = (s: ReturnType<typeof classifyScored>): boolean =>
   (s.type === 'circle' || s.type === 'underline' || s.type === 'arrow') && s.score >= 0.55;
 
+/** 单笔分类：块本地投影的 reader 事件喂原生 reflow px（基准配平）——分类阈值是像素语义，
+ *  不该随 canonical 除数变化；其余（原版页/白板/老事件）照旧走 canonical + pageCss。 */
+function scoredOfEvent(e: AnnotationEvent): ReturnType<typeof classifyScored> {
+  const rp = e.reflow_ink_points;
+  if (e.coord_px_per_norm && rp?.length) {
+    const pts = rp.map((p) => ({ x: p.x / CLS_BASIS, y: p.y / CLS_BASIS, t: p.t, pressure: p.pressure }));
+    return classifyScored(pts, bboxOf(pts), CLS_BASIS, CLS_BASIS);
+  }
+  return classifyScored(e.stroke_points, e.geometry.bbox);
+}
+/** reader 块本地批次的分类 dims：canonical norm × 该值 = 真实 reader px（各笔取中位·跨面混批不启用）。 */
+function readerClsDim(events: AnnotationEvent[]): number | undefined {
+  if (!events.length || !events.every((e) => e.coord_px_per_norm)) return undefined;
+  const xs = events.map((e) => e.coord_px_per_norm!).sort((a, b) => a - b);
+  return xs[xs.length >> 1];
+}
+
 function boxCenter(b: NormBBox): Pt { return { x: b[0] + b[2] / 2, y: b[1] + b[3] / 2 }; }
 function pointInInflatedBox(p: Pt, b: NormBBox, pad: number): boolean {
   return p.x >= b[0] - pad && p.x <= b[0] + b[2] + pad && p.y >= b[1] - pad && p.y <= b[1] + b[3] + pad;
@@ -394,7 +412,7 @@ async function recognizeEnclosedInk(polygon: AnnotationEvent['stroke_points'], p
 async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushInfo: Record<string, unknown> = {}, rawRefs: (RawRef | undefined)[] = []): Promise<void> {
   const pid = batch[0].page_id;
   const bookId = state.documentId ?? 'book';
-  const scoredAll = batch.map((e) => classifyScored(e.stroke_points, e.geometry.bbox));
+  const scoredAll = batch.map(scoredOfEvent);
   if (shouldSplitLeadingMarkup(batch, scoredAll)) {
     gtrace({ page_id: pid, split: 'leading-markup', first: diagOf([scoredAll[0]])[0], tail: diagOf(scoredAll.slice(1)), flush: flushInfo });
     await resolveRegion(batch.slice(0, 1), strokes.slice(0, 1), { ...flushInfo, split: 'leading-markup:first' }, rawRefs.slice(0, 1));
@@ -432,10 +450,12 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
   const points = realEvents.flatMap((e) => e.stroke_points);
   const bbox = bboxOf(points);
   // 几何：判 markup（模板笔够大、跨内容），或给 freeform 标 ocrWorthy；handwriting/drawing 由 captureMark 识别定型。
-  const geom = classifyStrokeFeature(realScored, strokeBboxes, points, bbox, localCharHeight(state.surfaceIndex));
+  // reader 块本地批次：dims 传 coord_px_per_norm 中位 → 特征层的像素阈值（ocr 门/复杂度）恢复出真实 reader px。
+  const clsDim = readerClsDim(realEvents);
+  const geom = classifyStrokeFeature(realScored, strokeBboxes, points, bbox, localCharHeight(state.surfaceIndex), clsDim, clsDim);
   // 代表 event 的形状：markup 取最强模板笔（圈/划/箭头，带箭头方向）；否则按合并笔（自由笔=stroke）
   const domScored = geom.type === 'markup' ? realScored.find((s) => s.type === geom.raw.templateType) : undefined;
-  const markScored = domScored ?? classifyScored(points, bbox);
+  const markScored = domScored ?? classifyScored(points, bbox, clsDim, clsDim);
   const repr: AnnotationEvent = {
     ...realEvents[realEvents.length - 1],
     geometry: { bbox }, stroke_points: points, event_type: markScored.type,

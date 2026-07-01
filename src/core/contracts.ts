@@ -75,6 +75,7 @@ export interface AnnotationEvent {
   reflow_ink_points?: StrokePoint[]; // 仅重排面落笔：该笔在 #reader 内容坐标(px)里的原始点。仅作临时取证，不落账本；x/y 此处不是页面归一化。
   reflow_ink_ref?: string;           // 仅重排面落笔：按重排内容坐标直接栅格化的白底笔迹图。self_content 识别优先用它，避免从隐藏 #ink-layer/PDF 坐标裁错。
   ink_ref?: string;                  // 通用离屏白底笔迹图（从账本点串栅格化·不抓可见画布）。M103 日记白板零画布写字时，captureMark 优先用它当 layers.ink，保证 AI 有非空笔迹图（点串云端不消费·#ink-layer 空会 AI 抓白图=大忌）。
+  coord_px_per_norm?: number;        // 仅重排面块本地投影：1 归一化单位 = 多少 reader px（=块rect宽/块source宽）。有值=stroke_points 用块本地 uniform scale 映的（在界·可信）；缺=老 pageCss 除数（reader 笔可越界·近似）。重投影逆运算与分类器 dims 都认它。
 }
 
 export interface OcrTextBlock {

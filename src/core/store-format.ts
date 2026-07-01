@@ -78,6 +78,7 @@ export interface PersistedStroke {
   surface_bbox?: SurfaceBBox;         // surface_points bbox；reader_px 时这是内容 px，不夹 [0,1]。
   reader_layout_id?: string;          // reader_px 笔迹对应的阅读页视觉行布局快照 id；旧数据缺=导出无文字背景。
   anchor_runs?: string[];           // 位置真相锚（逐笔）：该笔落笔时命中重排块的 source run ids → 重投影时各笔认各自的块（多笔手写跨段不被拉拢/塌缩·恒等）。仅重排落笔有；原版/老条目缺=undefined
+  coord_px_per_norm?: number;       // 仅重排块本地投影：1 归一化单位 = 多少 reader px。有值=points 用块本地 uniform scale（在界）；缺=老 pageCss 除数（可越界近似）——重投影按此选逆运算，round-trip 各自自洽。
 }
 
 /** docs 的页缓存：只剩重排结构 + 图解（派生缓存）。strokes/overlays 已迁出到 marks/ai_turns 账本。 */

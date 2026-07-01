@@ -12,7 +12,7 @@ import { signalViewportArea, signalPageReady } from './eink';
 import { grabRegion } from '../evidence/ocr';
 import { postJson } from '../core/api';
 import { getBookAiTurns, getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReaderLayout, putReflow } from '../local/store';
-import { bboxOf, classifyScored } from '../capture/classify';
+import { bboxOf, classifyScored, CLS_BASIS } from '../capture/classify';
 import { isHardwareEraserTip } from '../capture/m103-pen-eraser';
 import { isPhysicalPenContact, isPhysicalFingerContact, isOsdActive, clearOsdInkAfterCommit, setPenDown, shouldUseOsdOnlyForStroke, canMutateReaderCanvas, canMutateReaderLayout, registerOsdClearBarrier, isReaderHandoffReason, type ReaderMutationReason } from '../capture/m103-input-source';
 import { takeHqSocketStroke, type HqSocketPoint } from '../capture/m103-hqhw-socket';
@@ -286,12 +286,21 @@ function blockContentOrigin(ref: BlockRef): { left: number; top: number } {
 function projectPersistedStroke(ps: PersistedStroke, ref: BlockRef): ReaderStroke {
   const o = blockContentOrigin(ref);
   const tool = persistedTool(ps);
-  // 等比回投(reader 同面 / 无块rect兜底)：用全局 pageCss——与采集端 onPenUp 一致、round-trip 自洽、保形(圈仍是圈)。
+  // 等比回投(reader 同面·老数据 / 无块rect兜底)：用全局 pageCss——与老采集端除数一致、round-trip 自洽、保形(圈仍是圈)。
   const byPageCss = (): ReaderStroke => {
     const pw = pageCss.w || 1, ph = pageCss.h || 1;
     return { tool, points: ps.points.map((p) => ({ x: o.left + (p.x - ref.source[0]) * pw, y: o.top + (p.y - ref.source[1]) * ph, pressure: p.pressure, t: p.t })) };
   };
-  if ((ps.capture_surface ?? 'page') === 'reader') return byPageCss();
+  if ((ps.capture_surface ?? 'page') === 'reader') {
+    // 块本地 uniform scale 的新笔（coord_px_per_norm 标记）：逆运算=按**当前**块 rect 宽重算比例——布局没变时
+    // round-trip 精确复原，换布局/字号时随块宽等比缩放。老笔（无标记）仍走 pageCss 老逆运算，两代数据各自自洽。
+    if (ps.coord_px_per_norm && ref.source[2] > 1e-6) {
+      const rectW = ref.el.getBoundingClientRect().width;
+      const inv = rectW > 8 ? rectW / ref.source[2] : ps.coord_px_per_norm;
+      return { tool, points: ps.points.map((p) => ({ x: o.left + (p.x - ref.source[0]) * inv, y: o.top + (p.y - ref.source[1]) * inv, pressure: p.pressure, t: p.t })) };
+    }
+    return byPageCss();
+  }
   // 跨面(page→reader)：重排块 DOM 宽高比 ≠ PDF bbox 宽高比。旧法 x/y 用两个独立比例(rr.w/src[2], rr.h/src[3])→圆被拉成
   // 椭圆、字被拉伸(用户实测"映射比例严重失真")。改：位置按块相对(双轴 sx/sy 定笔画中心落点)，形状只用单一 uniform
   // scale=min(sx,sy)→保形不畸变。
@@ -1149,7 +1158,7 @@ function nearPadForBlock(node: Element, widthPx: number): number {
 
 // geometry.bbox 用该笔的**紧 bbox**（PDF 归一化），与原版页一致——main.ingestStroke 的 nearRegion/unionBb 要按
 // 笔粒度判近邻才能正确组装（旧版传整块 bbox 会让组装退化到整块粒度）。pts 已由 onPenUp 映进命中块的 PDF 坐标。
-function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], nearBbox?: NormBBox, reflowInkPoints?: StrokePoint[], nearPad?: number, readerLayoutId?: string): AnnotationEvent {
+function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], nearBbox?: NormBBox, reflowInkPoints?: StrokePoint[], nearPad?: number, readerLayoutId?: string, coordPxPerNorm?: number): AnnotationEvent {
   return {
     event_id: shortId('evt'), trace_id: shortId('trc'),
     document_id: state.documentId ?? '', page_id: state.pageId ?? '',
@@ -1158,6 +1167,8 @@ function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], ne
     device_id: DEVICE_ID, session_id: SESSION_ID, pointer_type: 'reader', version: SCHEMA_VERSION,
     capture_surface: 'reader',
     coord_space: 'page_norm',
+    ...(coordPxPerNorm ? { coord_px_per_norm: coordPxPerNorm } : {}), // 块本地 uniform scale 标记（在界 canonical）；缺=退化块走的老 pageCss 近似
+
     ...(readerLayoutId ? { reader_layout_id: readerLayoutId } : {}), // reader_px 笔迹引用当时文字布局快照（导出复现文字背景）
     anchor_runs: anchorRuns,         // 命中块的 source run ids → 随 mark 落库当位置锚（repr 经手保留）
     ...(nearBbox ? { near_bbox: nearBbox } : {}), // 屏幕空间 bbox → 组装近邻判定用（跨块视觉相邻才判 near·见 annotation-loop nearBoxOf）
@@ -1192,18 +1203,25 @@ function onPenUp(st: ReaderStroke): void {
   if (!hit) return; // 没画在任何段上 → 不入
   if (!settings.gesture.enabled) return;
   const { ref, left, top } = hit;
-  // 解耦（仅重排面）：笔的**形状/尺度**按页面尺度(pageCss)映成 PDF-norm，命中块只提供**锚点原点**(source 左上角)。
-  // 旧法把笔挤进块的 source bbox（×source[2]/source[3]）——块过窄或退化(source≈0)时笔塌成点 → 判 tap 丢，
-  // 取证连手写都收不到。改用 pageCss 这个稳定页尺度作除数（与 normToPx/redrawInk/grabLayers 同口径）：
-  //   · 永不塌缩（与块宽窄/退化无关）；· 不夹值，落块上/下/旁都按真实相对位移映射；
-  //   · #ink-layer 据此画出真实尺寸笔迹 → grabLayers 裁出的识别图即真实形状（识别图自动修好，无需改取图链路）。
+  // canonical 映射（仅重排面）：块本地 **uniform** scale（s=块source宽/块rect宽·x/y 同尺度保形），锚在命中块
+  // 的 source 左上角——笔迹按"源页文字尺度"落回原版页附近，归一化值天然在界。
+  // 旧法用 pageCss（当前原版页 canvas CSS 尺寸）当除数：reader 全宽 px ÷ 原版页小 canvas → 值爆出 [0,1]
+  //（真机实测 x=1.0/w=1.675 落库·两次落笔除数还随原版视图缩放漂移）。块退化（source≈0/rect≈0）才退回
+  // pageCss 老法，此时不带 coord_px_per_norm 标记 → 重投影仍走老逆运算，新旧 round-trip 各自自洽。
+  const rectW = ref.el.getBoundingClientRect().width;
+  const blockLocal = ref.source[2] > 1e-3 && rectW > 8;
+  const s = blockLocal ? ref.source[2] / rectW : null;
   const w = pageCss.w || 1, h = pageCss.h || 1;
   const pts: StrokePoint[] = raw.map((p) => ({
-    x: ref.source[0] + (p.x - left) / w,
-    y: ref.source[1] + (p.y - top) / h,
+    x: s ? ref.source[0] + (p.x - left) * s : ref.source[0] + (p.x - left) / w,
+    y: s ? ref.source[1] + (p.y - top) * s : ref.source[1] + (p.y - top) / h,
     t: p.t, pressure: p.pressure,   // 真实时间/压感（喂 Tier2 运笔方式 / 未来压感），不再合成 t:i / 0.5
   }));
-  const scored = classifyScored(pts, bboxOf(pts));
+  const coordPxPerNorm = s ? 1 / s : undefined;
+  // 分类与 canonical 解耦：直接喂 reader 原生 px（基准任意、dims 配平即可）——分类阈值（tap 行程/圈闭合）是
+  // 像素语义，不该随 canonical 除数变化。老法 pageCss 恰好约掉所以曾"顺带正确"，块本地 scale 后必须显式解耦。
+  const ptsCls = raw.map((p) => ({ x: p.x / CLS_BASIS, y: p.y / CLS_BASIS, t: p.t, pressure: p.pressure }));
+  const scored = classifyScored(ptsCls, bboxOf(ptsCls), CLS_BASIS, CLS_BASIS);
   const stroke: Stroke = { tool: st.tool, points: pts };
   st.committed = stroke; // 橡皮用：命中此重排笔 → strokeMarkIds.get(committed) 拿整 mark
   // 遥测·重排锚定：每笔命中哪个块 + 屏幕中心（看一个 mark 的多笔是否命中**不同**块 → 逐笔块锚的依据）。
@@ -1220,7 +1238,7 @@ function onPenUp(st: ReaderStroke): void {
   const readerLayoutId = ensureReaderLayoutId(); // 惰性：布局脏了才测一次；这笔引用当时文字布局
   // 当正常 page-ledger mark：发 bus 给 main 走 ingestStroke（组装 + 跨视图 + 持久 + 同享 session/idle）
   // ref.runIds = 命中块的 source run ids → 随事件落库当**位置真相锚**（重投影认它定段、不靠坐标猜，治"刚画完就乱飘"）
-  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds, nearBbox, reflowInkPoints, nearPad, readerLayoutId), stroke });
+  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds, nearBbox, reflowInkPoints, nearPad, readerLayoutId, coordPxPerNorm), stroke });
 }
 
 /** 落笔意图（仅重排面）：tool 决定——hand=滚动浏览、pen/highlighter=落笔(笔与手指都画)。
