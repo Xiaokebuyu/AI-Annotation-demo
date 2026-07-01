@@ -123,7 +123,7 @@ export async function collectVaultBundle(
   for (const m of await listAllMeetings()) {
     const ex = dropInkPlaceholders(await buildMeetingL1Export(m.meeting_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts });
+      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort() });
     }
   }
 
@@ -172,7 +172,7 @@ export async function collectVaultEntity(ref: VaultEntityRef, opts: { generatedA
     if (!m) throw new Error(`会议不存在或已被删除：${ref.meetingId}`);
     const ex = dropInkPlaceholders(await buildMeetingL1Export(ref.meetingId, o));
     if (!nonEmpty(ex)) return null;
-    return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts };
+    return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts, materialDocIds: [...new Set(m.material_doc_ids ?? [])].sort() };
   }
   const doc = await getDoc(ref.documentId);
   if (!doc) throw new Error(`文档不存在或已被删除：${ref.documentId}`);

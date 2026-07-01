@@ -15,6 +15,9 @@ import type { PersistedAiTurn, PersistedEntity, PersistedMark } from '../../core
 import { assembleKnowledgeProjection, type BuilderInput, projectEntities } from '../../knowledge/builder';
 import { buildConceptLayerFromStoredMemberships } from 'ink-surface-sdk/export-core';
 import { renderVaultMarkdown, type ObsidianVaultEntityInput } from 'ink-surface-sdk/adapters/obsidian';
+import type { DocumentProjectionExportEnvelope, KnowledgeObjectExportEnvelope as KnowledgeExportEnvelope } from 'ink-surface-sdk/knowledge-schema';
+import { assembleVaultBundle, type EntityExport } from './vault-export';
+import { toObsidianVaultRenderInput } from './vault-render-input';
 
 function mark(over: Partial<PersistedMark>): PersistedMark {
   return {
@@ -91,5 +94,63 @@ describe('存储原生拓扑端到端：两本书共享一个实体 → 零 LLM 
     const { entities, memberships } = projectEntities(proj.entityFacts, []);
     expect(entities).toEqual([]);
     expect(memberships).toEqual([]);
+  });
+});
+
+const emptyProjections: DocumentProjectionExportEnvelope = { document_projections: [] } as unknown as DocumentProjectionExportEnvelope;
+
+describe('内容拓扑①端到端：会议 material_doc_ids → 渲出 hub-to-hub 引用资料链', () => {
+  it('会议引用一本已导出的书 → meeting hub 出「## 引用资料」直连书 hub，零 dangling', async () => {
+    const noted = mark({ mark_id: 'ma1', document_id: 'doc_a', marked_text: '关键定义在这' });
+    const projA = await assembleKnowledgeProjection({ document_id: 'doc_a', document_title: '参考资料 A', marks: [noted], aiTurns: noAiTurns });
+
+    const bookExport: EntityExport = {
+      mode: 'reading',
+      documentId: 'doc_a',
+      documentTitle: '参考资料 A',
+      knowledgeExport: { objects: projA.objects } as unknown as KnowledgeExportEnvelope,
+      documentProjections: emptyProjections,
+    };
+    const meetingExport: EntityExport = {
+      mode: 'meeting',
+      documentId: 'mtgdoc_x',
+      documentTitle: '周会',
+      knowledgeExport: { objects: [] } as unknown as KnowledgeExportEnvelope,
+      documentProjections: emptyProjections,
+      activityDate: '2026-06-30T03:00:00Z',
+      materialDocIds: ['doc_a'],
+    };
+
+    const bundle = await assembleVaultBundle([bookExport, meetingExport], { generatedAt: '2026-06-30T00:00:00Z' });
+    const renderInput = toObsidianVaultRenderInput(bundle);
+    const files = renderVaultMarkdown(renderInput);
+
+    const meetingHub = files.find((f) => f.path === 'InkLoop/Meetings/2026-06-30 周会/周会.md');
+    expect(meetingHub).toBeTruthy();
+    expect(meetingHub!.markdown).toContain('## 引用资料');
+    expect(meetingHub!.markdown).toContain('[[参考资料 A]]');
+
+    const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
+    const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
+    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+  });
+
+  it('引用的资料文档没入 bundle（未导出/已删）→ 不产悬空链接，其余渲染照常', async () => {
+    const meetingExport: EntityExport = {
+      mode: 'meeting',
+      documentId: 'mtgdoc_y',
+      documentTitle: '周会 2',
+      knowledgeExport: { objects: [] } as unknown as KnowledgeExportEnvelope,
+      documentProjections: emptyProjections,
+      activityDate: '2026-06-30T03:00:00Z',
+      materialDocIds: ['doc_missing'],
+    };
+
+    const bundle = await assembleVaultBundle([meetingExport], { generatedAt: '2026-06-30T00:00:00Z' });
+    const files = renderVaultMarkdown(toObsidianVaultRenderInput(bundle));
+
+    const meetingHub = files.find((f) => f.path === 'InkLoop/Meetings/2026-06-30 周会 2/周会 2.md');
+    expect(meetingHub).toBeTruthy();
+    expect(meetingHub!.markdown).not.toContain('## 引用资料');
   });
 });
