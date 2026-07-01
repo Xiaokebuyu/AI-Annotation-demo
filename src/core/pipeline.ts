@@ -365,6 +365,7 @@ export async function captureMark(
   if (!ctx) return { hmp: null, markedText: '', feature };
   const { index, layers, inkSource } = ctx;
   const captureEvent = ctx.event;
+  const targets = resolveTarget([captureEvent], captureEvent.geometry.bbox, index, ctx.targetPad);
   const pl: PipelineStage[] = []; // 这笔经手的组件阶段（识别/OCR兜底/取证），提交时拼进整轮流水线
 
   // 识别定型：freeform 过几何门(ocrWorthy) → 送识别判 handwriting/drawing；markup 默认几何定型不送识别。
@@ -415,18 +416,15 @@ export async function captureMark(
   const action = markActionOf(resolved.type, event.event_type, score);
   // markup 锚它所标的内容；freeform（手写/画）属 self_content——它本身就是内容，不锚到 bbox 碰巧蹭到的正文
   // （手写跟正文的位置关系靠叙事里同时出现的圈/划来带，避免"误锚正文→模型幻觉"）。
-  // action 挪到这里算好才传：resolveTarget 要按形状分流（仅 enclosure 做包围判定），得等 resolved/action 定型。
-  const targets = resolved.type === 'markup'
-    ? resolveTarget([captureEvent], captureEvent.geometry.bbox, index, ctx.targetPad, 0.25, action)
-    : [];
+  const hmpTargets = resolved.type === 'markup' ? targets : [];
   // 白板(日记)零画布：composite 是纯白背景(#ink-layer 空)→self_content 的 cropRef 改指离屏 ink 图，避免主模型视觉兜底拿白图。
   const cropRef = index.surface_type === 'whiteboard' && resolved.type !== 'markup'
     ? (layers.ink ?? layers.composite)
     : layers.composite;
   const hmp = buildHmp({
     surfaceId: index.surface_id, action, targetBbox: captureEvent.geometry.bbox,
-    targetObjects: targets, cropRef,
-    vectorRef: layers.ink, // 是否保留交给 buildHmp 内部按算出的 mode 判断（真锚定到内容才不需要）
+    targetObjects: hmpTargets, cropRef,
+    vectorRef: resolved.type !== 'markup' ? layers.ink : undefined,
     textHint,
     captureSurface: captureEvent.capture_surface,
     coordSpace: captureEvent.coord_space,
@@ -520,11 +518,8 @@ export async function commitSessionDiscussion(
   // 原图送达：上面没选出图、但本段里有"画"（self_content 带笔迹图）→ 选最近一张画的原图送进推理模型。
   // 让"画不是最后一笔"（如画完又写了句问题）时，画的原图仍到模型手里，由模型在上下文里解读其含义。
   if (!crop) {
-    // 含画的笔（drawing 纯画，或 mixed=图+字虽定型 handwriting 仍含画；或圈住的是空白/普通墨迹、没锚到印刷
-    // 内容的 markup 圈选）→ 把它的白底原图送进推理，让模型直接看那张画/那个圈住了什么。
-    const draw = [...marks].reverse().find((m) =>
-      ((m.feature.type === 'drawing' || m.feature.hasDrawing) || (m.feature.type === 'markup' && m.hmp?.action === 'enclosure'))
-      && m.hmp?.mode === 'self_content');
+    // 含画的笔（drawing 纯画，或 mixed=图+字虽定型 handwriting 仍含画）→ 把它的白底原图送进推理，让模型直接看那张画。
+    const draw = [...marks].reverse().find((m) => (m.feature.type === 'drawing' || m.feature.hasDrawing) && m.hmp?.mode === 'self_content');
     if (draw?.hmp?.vector_ref) crop = { role: 'ink', data: draw.hmp.vector_ref };             // 本 session 刚画的，图还在内存
     else if (draw && draw.event.page_id === state.pageId) {
       // 召回/重载的画：vector_ref 落库时被剥（"存料不存图"），但笔迹点序无损存着、redrawInk 已把它画回当前墨水层 →

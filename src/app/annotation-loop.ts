@@ -346,13 +346,7 @@ async function recognizeEnclosedInk(polygon: AnnotationEvent['stroke_points'], p
   let x0 = 1, y0 = 1, x1 = 0, y1 = 0; // 被圈墨迹并集 bbox
   for (const m of enc) { x0 = Math.min(x0, m.bbox[0]); y0 = Math.min(y0, m.bbox[1]); x1 = Math.max(x1, m.bbox[0] + m.bbox[2]); y1 = Math.max(y1, m.bbox[1] + m.bbox[3]); }
   if (state.pageId !== pid) return null; // await 期间翻页/切面 → 当前 canvas 已非目标页，别裁错
-  // 优先从被圈标注自己的持久化点串离屏栅格化（和 pageInkRefOf 同款模式）：白板/日记页 #ink-layer 平时是空的，
-  // grabLayers 画布截屏在这种"零画布"场景截出来是空白图；点串栅格化真相不依赖画布当时是否画着。
-  // 原版页面（#ink-layer 平时有内容）栅格化拿不到时才退回 grabLayers 兜底。
-  const ink = rasterizeStrokes(enc.flatMap((m) => m.strokes.map((s) => ({
-    tool: s.tool as Stroke['tool'],
-    points: s.points.map((p) => ({ ...normToPx(p.x, p.y), t: p.t, pressure: p.pressure })),
-  })))) ?? grabLayers([x0, y0, x1 - x0, y1 - y0], 0.02).ink;
+  const ink = grabLayers([x0, y0, x1 - x0, y1 - y0], 0.02).ink; // ⭐从 #ink-layer 截被圈墨迹（grabRegion 裁的是 #page-layer=空白底·根本拿不到墨·codex 揪出）
   if (!ink) return null;
   const points = enc.flatMap((m) => m.strokes.flatMap((s) => s.points)); // 端侧 HWR 要点序
   try {
@@ -417,12 +411,8 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
   mark.trace = cap.trace; // 落笔当时这笔经手的组件阶段（识别/OCR兜底/取证）→ 提交时拼进整轮流水线
   mark.manner = computeManner(realStrokes, feature.type); // 运笔方式（Slice A）：随 mark 进叙事
   const isAiPen = realStrokes.some((s) => s.tool === 'aipen');
-  // P2「圈普通墨」：任何圈、且几何上没圈到文字对象（含白板/日记页只有 blank 占位对象的情况）→ 默认尝试识别
-  // 被圈普通墨当所标内容，识别失败也保留圈内墨迹图当证据（见 recognizeEnclosedInk）。不再要求特意切到 AI
-  // 笔工具（isAiPen）或开 dev 开关（aiPenExplicit）——是否真的触发 AI 回应仍由下面独立的 fold/respond
-  // 分类器把关，这里只是让"圈了内容"这件事不再零证据，不会导致乱回应。
-  // AI 笔"必回应、跳过分类器"（下面 462 行附近）是另一个功能点，仍按原样保持默认关闭，不受这处影响。
-  if (markScored.type === 'circle' && !mark.markedText.trim()) {
+  // P2（AI 笔原功能·默认停用·dev settings.aiPenExplicit 开）：AI 笔画圈、且几何上没圈到文字对象 → 识别被圈普通墨当所标内容。
+  if (settings.aiPenExplicit && isAiPen && markScored.type === 'circle' && !mark.markedText.trim()) {
     const enc = await recognizeEnclosedInk(repr.stroke_points, pid, bookId);
     if (enc) {
       if (enc.text) mark.markedText = enc.text;
