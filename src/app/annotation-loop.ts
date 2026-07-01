@@ -19,6 +19,7 @@ import { appendMarkEntry, updateOverlayState, getFoldedMarks } from '../local/st
 import type { ScreenOverlay, AnnotationEvent, NormBBox } from '../core/contracts';
 import { initInk, redrawInk } from '../capture/ink';
 import { rasterizeStrokes } from '../capture/rasterize';
+import { normToPx, pageCss } from '../core/transform';
 import { signalInkArea } from '../surface/eink';
 import { bedrockMarkBoundary } from '../local/bedrock-recorder';
 import type { RawRef } from '../core/bedrock';
@@ -80,6 +81,7 @@ function persistedStrokeOf(evt: AnnotationEvent, stroke: Stroke): PersistedStrok
     points: stroke.points,
     coord_space: evt.coord_space ?? 'page_norm',
     capture_surface: evt.capture_surface ?? (evt.pointer_type === 'reader' ? 'reader' : 'page'),
+    ...(evt.reader_layout_id ? { reader_layout_id: evt.reader_layout_id } : {}),
     ...(evt.anchor_runs?.length ? { anchor_runs: evt.anchor_runs } : {}),
   };
   if (evt.reflow_ink_points?.length) {
@@ -150,6 +152,7 @@ function persistContentStroke(evt: AnnotationEvent, stroke: Stroke): void {
     coord_space: evt.coord_space ?? 'page_norm',
     capture_surface: evt.capture_surface ?? (evt.pointer_type === 'reader' ? 'reader' : 'page'),
     ...(evt.reflow_ink_points?.length ? { surface_bbox: bboxOfSurface(evt.reflow_ink_points), surface_coord_space: 'reader_px' as const } : {}),
+    ...(evt.reader_layout_id ? { reader_layout_id: evt.reader_layout_id } : {}),
     color: isHi ? 'rgba(212,207,202,0.85)' : '#1A1A1A',
     pointer_type: evt.pointer_type, device_id: evt.device_id, abs_timestamp: Date.now(),
     context_id: getActiveContext().id,
@@ -253,6 +256,16 @@ function reflowInkRefOf(events: AnnotationEvent[], strokes: Stroke[]): string | 
     .filter((x): x is { tool: Stroke['tool']; points: AnnotationEvent['stroke_points'] } => !!x);
   if (rs.length) return rasterizeStrokes(rs);
   return events.length === 1 ? events[0].reflow_ink_ref : undefined;
+}
+
+// M103 日记白板零画布：#ink-layer 不再逐笔画，AI 识别不能抓可见画布(得白图=大忌·点串云端不消费)。改从账本
+// page_norm 点串离屏栅格化白底笔迹图当 layers.ink——真相在点串、与画布解耦。只对白板 self_content 生效(见 resolveRegion 门控)。
+function pageInkRefOf(strokes: Stroke[]): string | undefined {
+  if (!pageCss.w || !pageCss.h) return undefined; // 页未渲染(dims 0)→无从换算·退回(captureMark 会 fallback grabLayers)
+  const rs = strokes
+    .filter((s) => s.points.length)
+    .map((s) => ({ tool: s.tool, points: s.points.map((p) => ({ ...normToPx(p.x, p.y), t: p.t, pressure: p.pressure })) }));
+  return rs.length ? rasterizeStrokes(rs) : undefined;
 }
 
 const isStrongMarkup = (s: ReturnType<typeof classifyScored>): boolean =>
@@ -387,6 +400,8 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
   const repr: AnnotationEvent = {
     ...realEvents[realEvents.length - 1],
     geometry: { bbox }, stroke_points: points, event_type: markScored.type,
+    // 白板(日记)零画布→从账本 page_norm 点串离屏栅格化 ink 图给 AI(#ink-layer 空·抓它得白图)。仅白板设，书籍原版/PDF 不设→captureMark 照常 grabLayers(零回归)。
+    ...(state.surfaceType === 'whiteboard' ? { ink_ref: pageInkRefOf(realStrokes) } : {}),
     reflow_ink_ref: reflowInkRefOf(realEvents, realStrokes),
     reflow_ink_points: realEvents.flatMap((e) => e.reflow_ink_points ?? []),
   };
@@ -417,6 +432,7 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
   // mark 级位置真相锚 = 所有保留笔命中块的 source runs **并集**（不再只取 repr=最后一笔·多笔跨块 mark 不丢前面各笔的块）。
   // 逐笔投影仍各认各笔的 stroke.anchor_runs（projectPersistedMark 的 refs=0 分支）；本字段供块高亮 / 缺锚 fallback / 导出。
   const reflowAnchorRuns = [...new Set(realEvents.flatMap((e) => e.anchor_runs ?? []))];
+  const readerLayoutIds = [...new Set(realEvents.map((e) => e.reader_layout_id).filter((id): id is string => !!id))];
   void appendMarkEntry({
     document_id: bookId, page_id: pid, page_index: pageIdxOf(pid), mark_id: mark.id,
     strokes: keep.map((x) => persistedStrokeOf(x.e, x.st)), // 逐笔带各自的块锚 + surface-local 点（位置真相与取证真相分开）
@@ -425,6 +441,7 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
     coord_space: repr.coord_space ?? 'page_norm',
     capture_surface: repr.capture_surface ?? (repr.pointer_type === 'reader' ? 'reader' : 'page'),
     ...(repr.reflow_ink_points?.length ? { surface_bbox: bboxOfSurface(repr.reflow_ink_points), surface_coord_space: 'reader_px' as const } : {}),
+    ...(readerLayoutIds.length === 1 ? { reader_layout_id: readerLayoutIds[0] } : repr.reader_layout_id ? { reader_layout_id: repr.reader_layout_id } : {}),
     pointer_type: repr.pointer_type, device_id: repr.device_id, abs_timestamp: Date.now(),
     context_id: getActiveContext().id,
     feature_type: feature.type, feature_confidence: feature.confidence,

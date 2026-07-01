@@ -1,6 +1,6 @@
 import type { AnnotationEvent, EventType, NormBBox, OverlayState, ScreenOverlay, StrokePoint, SurfaceIndex, SurfaceObject } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
-import type { PersistedAiTurn, PersistedMark, PersistedStroke } from '../core/store-format';
+import type { PersistedAiTurn, PersistedMark, PersistedReaderLayoutSnapshot, PersistedReaderTextRun, PersistedStroke } from '../core/store-format';
 import type { ReflowBlock } from './reflow';
 import { bus, settings, state, strokeMarkIds, type Stroke, type Tool } from '../app/state';
 import { recordInkSample } from '../local/bedrock-recorder';
@@ -11,8 +11,11 @@ import { extractPageBlocks } from './renderer';
 import { signalViewportArea, signalPageReady } from './eink';
 import { grabRegion } from '../evidence/ocr';
 import { postJson } from '../core/api';
-import { getBookAiTurns, getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
+import { getBookAiTurns, getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReaderLayout, putReflow } from '../local/store';
 import { bboxOf, classifyScored } from '../capture/classify';
+import { isHardwareEraserTip } from '../capture/m103-pen-eraser';
+import { isPhysicalPenContact, isPhysicalFingerContact, isOsdActive, clearOsdInkAfterCommit, setPenDown, shouldUseOsdOnlyForStroke, canMutateReaderCanvas, canMutateReaderLayout, registerOsdClearBarrier, isReaderHandoffReason, type ReaderMutationReason } from '../capture/m103-input-source';
+import { takeHqSocketStroke, type HqSocketPoint } from '../capture/m103-hqhw-socket';
 import { DEVICE_ID, SESSION_ID, shortId } from '../core/ids';
 import { pageCss } from '../core/transform';
 import { devEmit } from '../core/dev-telemetry';
@@ -86,7 +89,7 @@ interface RPoint { x: number; y: number; pressure: number; t: number }
 /** committed = onPenUp 发往 reader:gesture 的那条页坐标笔（strokeMarkIds 的 key）；橡皮据此回查整 mark。 */
 interface ReaderStroke { tool: Tool; points: RPoint[]; committed?: Stroke }
 const inkStrokes: ReaderStroke[] = []; // 已落的笔迹（内容坐标）
-let live: { tool: Tool; t0: number; points: RPoint[] } | null = null;
+let live: { tool: Tool; t0: number; points: RPoint[]; skipLiveDraw: boolean } | null = null;
 /** 持久笔 → 重排面工具：保住 highlighter 与 aipen（AI 笔靛蓝），其余归 pen。否则重载/切重排后 AI 笔被降级成普通黑笔。 */
 function persistedTool(ps: PersistedStroke): Tool {
   return ps.tool === 'highlighter' || ps.tool === 'aipen' ? ps.tool : 'pen';
@@ -96,6 +99,19 @@ function persistedTool(ps: PersistedStroke): Tool {
 let restoreStrokes = false;
 const restoredStrokes: Array<ReaderStroke & { markId: string }> = [];
 const restoredMarkIds = new Set<string>(); // 已被 restored 重画的 mark_id → resizeInk 跳过同 mark 的 live inkStroke，免双画
+
+// 在途笔提交跟踪：finishCommittedR 抬笔后要 await 硬件 socket 点(≤160ms)才把笔推进 inkStrokes。这期间若清 OSD，
+// model 里还没这笔→重绘会漏、清完就丢。注册成 OSD 清理屏障：清 OSD 前先等所有在途提交落定(见 m103-input-source)。
+const pendingReaderCommits = new Set<Promise<void>>();
+let osdClearBarrierRegistered = false;
+function trackReaderCommit(p: Promise<void>): void {
+  const guarded = p.catch(() => undefined);
+  pendingReaderCommits.add(guarded);
+  void guarded.finally(() => pendingReaderCommits.delete(guarded));
+}
+function waitPendingReaderCommits(): Promise<void> {
+  return pendingReaderCommits.size ? Promise.allSettled([...pendingReaderCommits]).then(() => undefined) : Promise.resolve();
+}
 // 分页（电纸屏·虚拟页）：把一个 PDF 页的重排流按屏高切成多张「虚拟页」翻阅——固定屏高翻页（电纸屏更自然），
 // 内容仍是一条流、只是禁自由滚 + 按「块对齐」断页步进 scrollTop。虚拟页是 reader 派生态：不进 store、多虚拟页共享同一 PDF page_id/HMP。
 let paginate = false;
@@ -146,7 +162,7 @@ function render(items: RenderItem[], warn: string = ''): void {
     empty.className = 'reader-empty';
     empty.textContent = '这一页没有可重排的文本层（扫描版或空白页）。';
     el.insertBefore(empty, inkCv);
-    resizeInk();
+    resizeInk('render');
     return;
   }
   const wrap = document.createElement('div');
@@ -186,7 +202,7 @@ function render(items: RenderItem[], warn: string = ''): void {
   el.insertBefore(wrap, inkCv);
   pageWrap = wrap;
   // 旁注重贴移到 renderFinal（须在 buildIndex 之后，renderNote 才解析得出块）
-  resizeInk();
+  resizeInk('render');
 }
 
 /** 图附近的正文（喂给图像解读做上下文）。 */
@@ -252,8 +268,9 @@ function renderFinal(blocks: ReflowBlock[], provisional = false): void {
   render(items, warn);
   buildIndex(blocks); // 重建 字符对象→块 映射（跨视图锚）
   if (!replyMode) state.overlays.filter((o) => o.page_id === state.pageId).forEach(renderNote); // 桌面/原版：内联/右栏旁注。移动版重排走点触浮层标记（syncRestoredMarks 末尾·不进文档流、不扰分页）
-  settleV(provisional ? 'relayout' : 'render'); // 先真分页排版（插 spacer 推块到屏顶·块位变）；占位渲染只保位、终渲才落目标虚拟页
-  void syncRestoredMarks(); // 再按分页后的最终块位重画旧 mark 真笔触 + 高亮被标注块（+replyMode 末尾画 AI 回复标记）
+  settleV(provisional ? 'relayout' : 'render', 'render'); // 先真分页排版（插 spacer 推块到屏顶·块位变）；占位渲染只保位、终渲才落目标虚拟页
+  if (!provisional) { readerLayoutDirty = true; currentReaderLayoutId = null; } // 布局变了：下次落笔按需重测 reader 文字布局
+  void syncRestoredMarks('render'); // 再按分页后的最终块位重画旧 mark 真笔触 + 高亮被标注块（+replyMode 末尾画 AI 回复标记）
 }
 
 /** #reader 内容坐标系里某块的左上角（与 contentPoint/hitBlock 同系：减容器 rect、加 scrollTop）。 */
@@ -268,18 +285,24 @@ function blockContentOrigin(ref: BlockRef): { left: number; top: number } {
  *  位置锚到块左上、随文本换行近似（不保证精准套原字，但保形）。 */
 function projectPersistedStroke(ps: PersistedStroke, ref: BlockRef): ReaderStroke {
   const o = blockContentOrigin(ref);
-  // 跨面(page/其它面捕获的笔投到 reader)：重排块的渲染尺寸≠原版页比例 → 必须用「块 reader 渲染 px ÷ 块源跨度(page归一)」
-  // 的**本地比例**换算，否则按全局 pageCss 缩放会大小失真(实测 page 笔投 reader 又小又偏)。
-  // reader 笔同面投影仍用全局 pageCss——与采集端 onPenUp 一致、round-trip 自洽，保真不破；
-  // capture_surface 缺省按契约视为 page → 走跨面块本地比例（修：老 page 数据原判 local=false 走全局 pageCss 会比例失真）。
-  const local = (ps.capture_surface ?? 'page') !== 'reader';
-  const rr = local ? ref.el.getBoundingClientRect() : null;
-  const w = (rr && ref.source[2] > 1e-6) ? rr.width / ref.source[2] : (pageCss.w || 1);
-  const h = (rr && ref.source[3] > 1e-6) ? rr.height / ref.source[3] : (pageCss.h || 1);
-  return {
-    tool: persistedTool(ps),
-    points: ps.points.map((p) => ({ x: o.left + (p.x - ref.source[0]) * w, y: o.top + (p.y - ref.source[1]) * h, pressure: p.pressure, t: p.t })),
+  const tool = persistedTool(ps);
+  // 等比回投(reader 同面 / 无块rect兜底)：用全局 pageCss——与采集端 onPenUp 一致、round-trip 自洽、保形(圈仍是圈)。
+  const byPageCss = (): ReaderStroke => {
+    const pw = pageCss.w || 1, ph = pageCss.h || 1;
+    return { tool, points: ps.points.map((p) => ({ x: o.left + (p.x - ref.source[0]) * pw, y: o.top + (p.y - ref.source[1]) * ph, pressure: p.pressure, t: p.t })) };
   };
+  if ((ps.capture_surface ?? 'page') === 'reader') return byPageCss();
+  // 跨面(page→reader)：重排块 DOM 宽高比 ≠ PDF bbox 宽高比。旧法 x/y 用两个独立比例(rr.w/src[2], rr.h/src[3])→圆被拉成
+  // 椭圆、字被拉伸(用户实测"映射比例严重失真")。改：位置按块相对(双轴 sx/sy 定笔画中心落点)，形状只用单一 uniform
+  // scale=min(sx,sy)→保形不畸变。
+  const rr = ref.el.getBoundingClientRect();
+  if (!(rr && ref.source[2] > 1e-6 && ref.source[3] > 1e-6)) return byPageCss();
+  const sx = rr.width / ref.source[2], sy = rr.height / ref.source[3];
+  const s = Math.min(sx, sy);
+  const bb = bboxOf(ps.points);
+  const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+  const dcx = o.left + (cx - ref.source[0]) * sx, dcy = o.top + (cy - ref.source[1]) * sy;
+  return { tool, points: ps.points.map((p) => ({ x: dcx + (p.x - cx) * s, y: dcy + (p.y - cy) * s, pressure: p.pressure, t: p.t })) };
 }
 
 // ── 标注锚到文本对象（重排锚定重做）：标注跟着它所标的「字」走，而非按原页坐标硬摆进块 ──
@@ -491,17 +514,118 @@ export function grabReaderLayers(bbox: NormBBox, padPx = 24, max = 900): { ink?:
   };
 }
 
+// ── reader 视觉行布局快照：给 reader_px 笔迹一个"当时看到的文字背景"（导出/插件复现，笔迹叠在文字上） ──
+// 性能：整页逐字符 Range 测量只在布局真变后按需跑一次（dirty flag + 惰性测量），不在每笔落下时重测（电纸屏连续写不卡）。
+let currentReaderLayoutId: string | null = null;
+let readerLayoutDirty = true;
+const finiteNum = (n: number): boolean => Number.isFinite(n);
+
+function fnv1a(input: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) { h ^= input.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36);
+}
+function rectToReaderContent(r: DOMRect): { left: number; top: number; width: number; height: number } {
+  const er = el.getBoundingClientRect();
+  return { left: r.left - er.left, top: r.top - er.top + el.scrollTop, width: r.width, height: r.height };
+}
+/** 一个文本块按**视觉行**切成 text_runs（Range 逐码点量位置、按 top 聚成行）——SVG 不自动按 HTML 换行，必须行级。 */
+function collectLineRuns(block: HTMLElement): PersistedReaderTextRun[] {
+  const cs = getComputedStyle(block);
+  const blockId = (block.closest('[data-block]') as HTMLElement | null)?.dataset.block;
+  const lines: Array<{ top: number; left: number; right: number; bottom: number; text: string }> = [];
+  const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const textNode = node as Text;
+    const text = textNode.textContent ?? '';
+    for (let start = 0; start < text.length;) {
+      const cp = text.codePointAt(start);
+      const len = cp && cp > 0xffff ? 2 : 1;
+      const ch = text.slice(start, start + len);
+      start += len;
+      if (ch === '\n' || ch === '\r') continue;
+      try {
+        const range = document.createRange();
+        range.setStart(textNode, start - len);
+        range.setEnd(textNode, start);
+        const r = range.getClientRects()[0];
+        if (!r) continue;
+        const cr = rectToReaderContent(r);
+        if (!finiteNum(cr.left) || !finiteNum(cr.top) || cr.width <= 0 || cr.height <= 0) continue;
+        let line = lines.find((item) => Math.abs(item.top - cr.top) <= Math.max(3, cr.height * 0.35));
+        if (!line) { line = { top: cr.top, left: cr.left, right: cr.left + cr.width, bottom: cr.top + cr.height, text: '' }; lines.push(line); }
+        line.left = Math.min(line.left, cr.left);
+        line.right = Math.max(line.right, cr.left + cr.width);
+        line.top = Math.min(line.top, cr.top);
+        line.bottom = Math.max(line.bottom, cr.top + cr.height);
+        line.text += /\s/.test(ch) ? ' ' : ch;
+      } catch { /* stale range */ }
+    }
+  }
+  return lines
+    .sort((a, b) => (a.top - b.top) || (a.left - b.left))
+    .map((line): PersistedReaderTextRun | null => {
+      const text = line.text.replace(/\s+/g, ' ').trim();
+      if (!text) return null;
+      const h = Math.max(1, line.bottom - line.top);
+      return {
+        text, x: line.left, y: line.top + h * 0.82, w: Math.max(1, line.right - line.left), h,
+        font_size: cssPx(cs.fontSize) || 16,
+        font_family: cs.fontFamily || undefined,
+        font_weight: cs.fontWeight || undefined,
+        font_style: cs.fontStyle || undefined,
+        fill: cs.color || '#111111',
+        ...(blockId ? { block_id: blockId } : {}),
+      };
+    })
+    .filter((run): run is PersistedReaderTextRun => !!run);
+}
+function readerLayoutStyleFingerprint(width: number, height: number): string {
+  const col = el.querySelector('.reader-col') as HTMLElement | null;
+  const cs = getComputedStyle(col ?? el);
+  return [`w=${Math.round(width)}`, `h=${Math.round(height)}`, `font=${cs.fontStyle}/${cs.fontWeight}/${cs.fontSize}/${cs.lineHeight}/${cs.fontFamily}`, `engine=${engineKey(settings.reflowProvider)}`, `paginate=${paginate ? 1 : 0}`].join('|');
+}
+export function captureCurrentReaderLayout(): PersistedReaderLayoutSnapshot | null {
+  if (!el || !state.pageId) return null;
+  const textRuns = [...el.querySelectorAll<HTMLElement>('.reader-h,.reader-p,.reader-list li')].flatMap((node) => collectLineRuns(node));
+  if (!textRuns.length) return null;
+  const width = Math.ceil(Math.max(el.clientWidth, pageWrap?.getBoundingClientRect().width ?? 0, 1));
+  const height = Math.ceil(Math.max(pageContentH(), el.clientHeight, 1));
+  const styleFingerprint = readerLayoutStyleFingerprint(width, height);
+  const hashInput = JSON.stringify({ page_id: state.pageId, width, height, styleFingerprint, runs: textRuns.map((r) => [r.text, Math.round(r.x * 10), Math.round(r.y * 10), r.font_size]) });
+  return {
+    schema: 'inkloop.reader_layout.v1',
+    layout_id: `reader_${state.pageIndex}_${fnv1a(hashInput)}`,
+    page_index: state.pageIndex, page_id: state.pageId,
+    capture_surface: 'reader', coord_space: 'reader_px',
+    width, height, style_fingerprint: styleFingerprint,
+    reflow_engine: engineKey(settings.reflowProvider),
+    text_runs: textRuns, updated_at: new Date().toISOString(),
+  };
+}
+/** 惰性：布局脏了（翻页/重排/resize 后）才真测一次、存库、记 current id；否则复用。给落笔时引用。 */
+function ensureReaderLayoutId(): string | undefined {
+  if (!readerLayoutDirty && currentReaderLayoutId) return currentReaderLayoutId;
+  const layout = captureCurrentReaderLayout();
+  readerLayoutDirty = false;
+  currentReaderLayoutId = layout?.layout_id ?? null;
+  if (layout && state.documentId) void putReaderLayout(state.documentId, state.pageIndex, layout);
+  return currentReaderLayoutId ?? undefined;
+}
+
 export function captureReaderMark(event: AnnotationEvent): { index: SurfaceIndex; event: AnnotationEvent; layers: { ink?: string; composite?: string }; targetPad: number } | null {
   if (event.capture_surface !== 'reader' || !event.reflow_ink_points?.length) return null;
   const index = buildReaderSurfaceIndex();
   if (!index) return null;
   const bbox = bboxOfLocal(event.reflow_ink_points);
+  const readerLayoutId = event.reader_layout_id ?? ensureReaderLayoutId();
   const localEvent: AnnotationEvent = {
     ...event,
     geometry: { bbox },
     stroke_points: event.reflow_ink_points,
     coord_space: 'reader_px',
     capture_surface: 'reader',
+    ...(readerLayoutId ? { reader_layout_id: readerLayoutId } : {}),
   };
   return { index, event: localEvent, layers: grabReaderLayers(bbox), targetPad: 8 };
 }
@@ -571,7 +695,14 @@ function projectPersistedMark(m: PersistedMark, fallback: BlockRef | null): Read
     .filter((x): x is { obj: SurfaceObject; rects: CRect[] } => !!x.obj && x.rects.length > 0);
   if (located.length) { // refs 命中 → 锚到那几个字
     if (action === 'underline' || action === 'highlight') return segmentByChars(strokes, located, action);
-    return projectSpan(strokes, located); // 圈/箭头/有 refs 的手写：整笔锚首行并集（不误入切段·也不丢 refs 改用 nearest）
+    // 圈/箭头/手写有 refs：**reader 捕获的**直接逐笔 pageCss 回各自块(保形·round-trip 自洽)——别被 projectSpan 整笔平移到
+    // refs 首行(那会把 reader 原笔搬位/拉伸=用户实测"重排笔记比例失真")。page 捕获的仍走 projectSpan(跨面无原 reader 点·锚首行)。
+    if (strokes.length && strokes.every((ps) => (ps.capture_surface ?? 'page') === 'reader')) {
+      return strokes
+        .map((ps) => { const blk = (ps.anchor_runs?.length ? resolveBlockByRuns(ps.anchor_runs) : null) ?? fallback; return blk ? projectPersistedStroke(ps, blk) : null; })
+        .filter((s): s is ReaderStroke => !!s);
+    }
+    return projectSpan(strokes, located); // page 捕获的圈/箭头/手写：整笔锚首行并集
   }
   // 块级反投影（projectPersistedStroke）——refs=0 自由笔（手写/画/边注·无字可锚·self_content）走这条：
   //  · **逐笔认各自落笔的块**（stroke.anchor_runs）：多笔手写常跨段落交界、各笔命中不同块；onPenUp 把每笔的坐标存成
@@ -589,7 +720,7 @@ function projectPersistedMark(m: PersistedMark, fallback: BlockRef | null): Read
 
 /** 重排里同步旧标注：高亮被标注块；restoreStrokes 开时再把该 mark 的真笔触反投影进 restoredStrokes 重画。
  *  async（getFoldedMarks）→ 捕获 page/seq 守卫，await 后页/重排/视图已变则整次作废（防跨页串画）。 */
-async function syncRestoredMarks(): Promise<void> {
+async function syncRestoredMarks(reason: ReaderMutationReason = 'restore-sync'): Promise<void> {
   const docId = state.documentId;
   const pageId = state.pageId;
   const seq = reflowSeq;
@@ -621,7 +752,7 @@ async function syncRestoredMarks(): Promise<void> {
     for (const rs of segs) if (rs.points.length) restoredStrokes.push({ ...rs, markId: m.mark_id });
     if (segs.some((s) => s.points.length)) restoredMarkIds.add(m.mark_id); // drawStroke 支持单点，任何可绘 restored 都可用于去重
   }
-  if (restoreStrokes) { resizeInk(); signalPageReady(); } // 重画（restored 笔此刻才就位）；笔画在被忽略的 .reader-ink 上→电纸屏显式刷一发。桌面 restoreStrokes=false 不多画一次
+  if (restoreStrokes && resizeInk(reason)) signalPageReady(); // 重画（restored 笔此刻才就位）；仅在策略门放行、真画了才显式刷电纸屏（M103 写字期间此处被拒→不刷=零画布触碰）。桌面 restoreStrokes=false 不多画一次
   if (replyMode && state.documentId === docId && state.pageId === pageId && seq === reflowSeq) { // AI 回复点触标记（用上面已加载的 marks + 现取 ai_turns join 判类型；restored 已就位故 box 取得到手写包围盒）
     const turns = await getBookAiTurns(docId);
     if (state.documentId === docId && state.pageId === pageId && seq === reflowSeq && settings.viewMode === 'reader') { // 第二 await 后补 documentId 守卫·两表都在守卫内赋值（免 stale 覆盖）
@@ -633,12 +764,20 @@ async function syncRestoredMarks(): Promise<void> {
 }
 
 let syncScheduled = false;
+let scheduledSyncReason: ReaderMutationReason = 'restore-sync';
 /** 内联旁注插入/移除致块位移后，rAF 合批重算 restored（让已成 mark 的圈画跟着新布局走）。桌面 no-op。 */
-function scheduleSyncRestoredMarks(): void {
+function scheduleSyncRestoredMarks(reason: ReaderMutationReason = 'restore-sync'): void {
   if (!restoreStrokes || settings.viewMode !== 'reader') return;
-  if (syncScheduled) return;
+  if (syncScheduled) {
+    // 已排队：新来的是交接类而已排的是弱 reason('mark-resolved'/'restore-sync') → 升级；否则弱 reason 先占坑会把
+    // 同帧内真该重绘的交接吞掉(M103 下被拒绘·codex review Finding 2)。交接互相之间不降级(先到为准即可)。
+    if (isReaderHandoffReason(reason) && !isReaderHandoffReason(scheduledSyncReason)) scheduledSyncReason = reason;
+    return;
+  }
   syncScheduled = true;
-  requestAnimationFrame(() => { syncScheduled = false; settleV('relayout'); void syncRestoredMarks(); }); // 插旁注致内容移位 → 重算断点（保持当前虚拟页）+ restored 重投影
+  scheduledSyncReason = reason;
+  // settleV / syncRestoredMarks 内部都各自过策略门（M103 写字期间/'mark-resolved' 会被拒，只更 model 不刷屏）。
+  requestAnimationFrame(() => { const r = scheduledSyncReason; syncScheduled = false; scheduledSyncReason = 'restore-sync'; settleV('relayout', r); void syncRestoredMarks(r); }); // 插旁注致内容移位 → 重算断点（保持当前虚拟页）+ restored 重投影
 }
 
 // 流式渲染：首块到达时清占位、起空列；逐段 append（不插图，收尾 renderFinal 再按 y 插图 + 建 refs）。
@@ -646,6 +785,7 @@ let streamCol: HTMLElement | null = null;
 function streamStart(): void {
   el.querySelectorAll('.reader-page, .reader-empty, .reader-warn').forEach((n) => n.remove());
   pageWrap = null; inkStrokes.length = 0; blockRefs = [];
+  readerLayoutDirty = true; currentReaderLayoutId = null; // 流式重渲：布局待重测
   restoredStrokes.length = 0; restoredMarkIds.clear(); // 同 render：流式重渲先清旧页 restored
   if (replyMode) { el.querySelectorAll('.reader-reply-mark').forEach((n) => n.remove()); closePopover(); } // 旧页 AI 回复标记/浮层（否则浮在空列/半成品流上）
   const wrap = document.createElement('div'); wrap.className = 'reader-page';
@@ -653,7 +793,7 @@ function streamStart(): void {
   wrap.appendChild(col);
   el.insertBefore(wrap, inkCv);
   pageWrap = wrap; streamCol = col;
-  resizeInk();
+  resizeInk('stream-render');
 }
 function streamAppend(b: ReflowBlock): void {
   if (!streamCol) return;
@@ -914,8 +1054,11 @@ function openFigurePopover(trigger: HTMLElement, text: string): void {
 }
 
 // ── 圈画采集 ──
-function resizeInk(): void {
-  if (!inkCtx) return;
+// 唯一的持久墨迹重绘入口（clearRect + 全量重画 restored/inkStrokes/live）。所有调用都带 reason 并先过
+// canMutateReaderCanvas 策略门：M103 写字期间(penDown)或 'mark-resolved'/'restore-sync'/'live' 等"写完顺手刷"
+// 一律拒绘、返回 false（笔留在 model 里，下一个交接时刻再统一画）；真画了返回 true（供 signalPageReady 判断）。
+function resizeInk(reason: ReaderMutationReason): boolean {
+  if (!inkCtx || !canMutateReaderCanvas(reason)) return false;
   const dpr = window.devicePixelRatio || 1;
   const w = el.clientWidth;
   const h = Math.min(Math.max(pageContentH(), el.clientHeight), MAX_CANVAS_PX); // 用内容真高(pageWrap 底)而非 el.scrollHeight：画布 absolute 会把自己灌进 scrollHeight → 否则高度只增不减（棘轮）
@@ -934,6 +1077,7 @@ function resizeInk(): void {
     drawStroke(s);
   }
   if (live) drawStroke(live);
+  return true;
 }
 
 /** 画一段线段（内容 px）：样式走共享 styleFor（压感线宽 + 荧光笔 multiply），与原版页同一画法。 */
@@ -1005,7 +1149,7 @@ function nearPadForBlock(node: Element, widthPx: number): number {
 
 // geometry.bbox 用该笔的**紧 bbox**（PDF 归一化），与原版页一致——main.ingestStroke 的 nearRegion/unionBb 要按
 // 笔粒度判近邻才能正确组装（旧版传整块 bbox 会让组装退化到整块粒度）。pts 已由 onPenUp 映进命中块的 PDF 坐标。
-function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], nearBbox?: NormBBox, reflowInkPoints?: StrokePoint[], nearPad?: number): AnnotationEvent {
+function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], nearBbox?: NormBBox, reflowInkPoints?: StrokePoint[], nearPad?: number, readerLayoutId?: string): AnnotationEvent {
   return {
     event_id: shortId('evt'), trace_id: shortId('trc'),
     document_id: state.documentId ?? '', page_id: state.pageId ?? '',
@@ -1014,6 +1158,7 @@ function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], ne
     device_id: DEVICE_ID, session_id: SESSION_ID, pointer_type: 'reader', version: SCHEMA_VERSION,
     capture_surface: 'reader',
     coord_space: 'page_norm',
+    ...(readerLayoutId ? { reader_layout_id: readerLayoutId } : {}), // reader_px 笔迹引用当时文字布局快照（导出复现文字背景）
     anchor_runs: anchorRuns,         // 命中块的 source run ids → 随 mark 落库当位置锚（repr 经手保留）
     ...(nearBbox ? { near_bbox: nearBbox } : {}), // 屏幕空间 bbox → 组装近邻判定用（跨块视觉相邻才判 near·见 annotation-loop nearBoxOf）
     ...(nearPad ? { near_pad: nearPad } : {}),     // 按行高折算的近邻外扩半径 → 连续写字不被按字切碎（annotation-loop 仅 reader+快写时用）
@@ -1072,9 +1217,10 @@ function onPenUp(st: ReaderStroke): void {
   const nearBbox: NormBBox = [rb[0] / rw, rb[1] / rw, rb[2] / rw, rb[3] / rw];
   const nearPad = nearPadForBlock(ref.el, rw); // 按命中块行高折算的近邻外扩 → 连续写字攒一团（见 makeEvent/annotation-loop）
   const reflowInkPoints = raw.map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure }));
+  const readerLayoutId = ensureReaderLayoutId(); // 惰性：布局脏了才测一次；这笔引用当时文字布局
   // 当正常 page-ledger mark：发 bus 给 main 走 ingestStroke（组装 + 跨视图 + 持久 + 同享 session/idle）
   // ref.runIds = 命中块的 source run ids → 随事件落库当**位置真相锚**（重投影认它定段、不靠坐标猜，治"刚画完就乱飘"）
-  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds, nearBbox, reflowInkPoints, nearPad), stroke });
+  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds, nearBbox, reflowInkPoints, nearPad, readerLayoutId), stroke });
 }
 
 /** 落笔意图（仅重排面）：tool 决定——hand=滚动浏览、pen/highlighter=落笔(笔与手指都画)。
@@ -1103,7 +1249,7 @@ function eraseRestoredMark(mid: string): void {
   const pageArr = state.pageId ? state.strokesByPage.get(state.pageId) : undefined;
   if (pageArr) for (let k = pageArr.length - 1; k >= 0; k--) { if (strokeMarkIds.get(pageArr[k]) === mid) pageArr.splice(k, 1); }
   bus.emit('mark:erase', mid); // → annotation-loop：落 tombstone + 从 session 移除
-  resizeInk();
+  resizeInk('erase');
 }
 
 /** 擦一笔重排墨：已成 mark（committed 有 markId）→ 擦掉该 mark 的全部重排笔 + 页坐标副本 + 发 mark:erase 落 tombstone；
@@ -1132,7 +1278,7 @@ function eraseReaderStroke(st: ReaderStroke): void {
     const k = inkStrokes.indexOf(st);
     if (k >= 0) inkStrokes.splice(k, 1);
   }
-  resizeInk(); // 重画重排画布
+  resizeInk('erase'); // 重画重排画布
   signalReaderInk(erased); // 被擦区 A2 局部刷（板上才看得到擦除）
 }
 
@@ -1145,7 +1291,7 @@ function bedrockTapR(e: PointerEvent, phase: 'down' | 'move' | 'up'): void {
     documentId: state.documentId, pageId: state.pageId ?? undefined,
     x: p.x / w, y: p.y / h, phase, contactId: e.pointerId,
     pressure: e.pressure, dims: { w, h },
-    penSource: e.pointerType === 'pen', surface: 'reader',
+    penSource: isPhysicalPenContact(e), surface: 'reader',
   });
 }
 
@@ -1207,18 +1353,27 @@ function applyV(): void {
 /** 真分页排版 + 落到目标虚拟页。
  *  mode='render'（新 PDF 页/重排落地）：前进→首屏、翻回→末屏（landAtEnd）。
  *  mode='relayout'（同页再布局：插旁注/resize/切回视图）：保持当前虚拟页，不跳。 */
-function settleV(mode: 'render' | 'relayout'): void {
+function settleV(mode: 'render' | 'relayout', reason: ReaderMutationReason): void {
   if (!paginate) return;
+  if (!canMutateReaderLayout(reason)) return; // M103 写字中/写完顺手刷：不动 scrollTop（否则 OSD 与内容错位="没对齐"）
   paginateLayout();
   if (mode === 'render') { vIndex = landAtEnd ? vCount() - 1 : 0; landAtEnd = false; }
   else vIndex = Math.min(vIndex, vCount() - 1);
   applyV();
 }
+let pendingRepaginate = false; // 图注异步返回若正好落在写字期间→repaginate 被门拒·记脏·笔提交后重试(否则分页/投影错位不自愈)
 /** 异步内容（图片解码完 / 图解文字到达）改了高度后：重排页 + 重投影。仅 paginate·重排态。 */
 function repaginate(): void {
   if (!paginate || settings.viewMode !== 'reader') return;
-  settleV('relayout');
-  scheduleSyncRestoredMarks();
+  if (!canMutateReaderLayout('repaginate')) { pendingRepaginate = true; return; } // 写字中：先记脏，抬笔提交后 drainPendingRepaginate 重试
+  pendingRepaginate = false;
+  settleV('relayout', 'repaginate');
+  readerLayoutDirty = true; currentReaderLayoutId = null; // 分页变了：reader 文字布局待重测
+  scheduleSyncRestoredMarks('repaginate');
+}
+/** 笔提交后调：若有写字期间被拒的 repaginate，此刻(penDown 已 false)补做一次；若又在写下一笔会再被记脏、下次再排。 */
+function drainPendingRepaginate(): void {
+  if (pendingRepaginate) repaginate();
 }
 
 /** 当前虚拟页信息（页码指示用）。非分页/单屏 → count=1。 */
@@ -1248,23 +1403,37 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
   el.appendChild(inkCv);
   inkCtx = inkCv.getContext('2d');
 
+  // 清 OSD 前先等重排面在途笔提交落定（只在重排态生效·非 M103 端 clearOsdInkAfterCommit 本就 no-op）。注册一次。
+  if (!osdClearBarrierRegistered) {
+    registerOsdClearBarrier(() => (settings.viewMode === 'reader' ? waitPendingReaderCommits() : undefined));
+    osdClearBarrierRegistered = true;
+  }
+
   // M103 笔指分流：手指 → 导航（横划翻页），绝不落墨；只有 pen（或桌面鼠标按工具）才画。
   let rnav: { pointerId: number; x0: number; y0: number } | null = null;
+  let erasingOsd = false; // OSD 武装时的橡皮手势：抬笔要清掉 OSD 虚线拖影（橡皮走 eraseAt 早退、不进 finish）
   const READER_SWIPE_MIN_PX = 60;
 
   el.addEventListener('pointerdown', (e) => {
     if (settings.viewMode !== 'reader' || !state.pageId) return;
-    if (e.pointerType === 'touch') { rnav = { pointerId: e.pointerId, x0: e.clientX, y0: e.clientY }; return; } // 手指=导航·不落墨
+    // 手指=导航·不落墨。M103 上 `HqHwBridge` 武装后 pointerType 会失真，优先信原生分类覆盖。
+    if (isPhysicalFingerContact(e)) { rnav = { pointerId: e.pointerId, x0: e.clientX, y0: e.clientY }; return; }
     if (state.tool === 'hand') return;                    // 让出给 #reader 原生滚动（桌面鼠标 hand 工具）
     if (reflowSettling) return;                           // 重排未稳：让出原生滚动、不落笔/不擦（内容与画布尺寸不稳）
     e.preventDefault();
-    if (state.tool === 'eraser') { eraseAt(e); return; }  // 橡皮：擦命中的笔/整 mark，不落 live、不滚
+    // 橡皮：擦命中的笔/整 mark，不落 live、不滚。物理橡皮头(M103 专用)不看当前选的工具，翻过来就能擦。
+    // ⚠️不置 penDown（擦除仍需重画画布让墨迹消失·canMutateReaderCanvas('erase') 放行）——penDown 只标记"写字笔在落"。
+    if (state.tool === 'eraser' || isHardwareEraserTip(e)) { if (isOsdActive()) erasingOsd = true; eraseAt(e); return; }
     try { el.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
-    live = { tool: state.tool, t0: performance.now(), points: [{ ...contentPoint(e), pressure: e.pressure || 0, t: 0 }] };
+    setPenDown(true); // 写字笔落纸：写字期间彻底不碰画布（canMutateReaderCanvas/Layout 据此拒 live/mark-resolved 一切重绘/改布局）
+    // OSD 快速墨迹：M103 物理笔恒交给 OSD 做实时显示、画布一律不 live draw（shouldUseOsdOnlyForStroke）——不再赌落笔瞬间
+    //  isOsdArmed() 的竞态（arm 异步·刚翻页/切重排/首帧后第一笔常读 false→整笔逐 move 画画布=写字碰画布 H1）。抬笔从 model 补。
+    const skipLiveDraw = shouldUseOsdOnlyForStroke(e) || (isOsdActive() && isPhysicalPenContact(e));
+    live = { tool: state.tool, t0: performance.now(), points: [{ ...contentPoint(e), pressure: e.pressure || 0, t: 0 }], skipLiveDraw };
     bedrockTapR(e, 'down');
   });
   el.addEventListener('pointermove', (e) => {
-    if (state.tool === 'eraser' && e.buttons) { eraseAt(e); return; } // 按住拖动连擦（对齐原版页）
+    if ((state.tool === 'eraser' || isHardwareEraserTip(e)) && e.buttons) { if (isOsdActive()) erasingOsd = true; eraseAt(e); return; } // 按住拖动连擦（对齐原版页）
     if (!live) return;
     e.preventDefault();
     // 无损采点：优先取合并事件（快写时一次 move 携多个采样点）——对齐原版页 ink.ts，治中文快写笔点稀疏/毛糙。
@@ -1276,7 +1445,7 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
       const last = live.points[live.points.length - 1];
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < READER_DEADZONE_PX) continue; // 死区：丢 sub-px 抖动
       const pt: RPoint = { x: p.x, y: p.y, pressure: ce.pressure || 0, t: Math.round(performance.now() - live.t0) };
-      drawSegR(last, pt, live.tool); // 增量画新线段（压感线宽，无须全量重画）
+      if (!live.skipLiveDraw && canMutateReaderCanvas('live')) drawSegR(last, pt, live.tool); // 增量画新线段（压感线宽）；M103 skipLiveDraw 恒真→不画（OSD 显示），非 M103 canMutate 恒真→照画
       live.points.push(pt);
     }
   });
@@ -1284,10 +1453,32 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
     if (!live) return;
     bedrockTapR(e, 'up');
     const st = live; live = null;
-    inkStrokes.push(st);
-    onPenUp(st);
+    trackReaderCommit(finishCommittedR(st)); // 跟踪在途提交：清 OSD 屏障会先等它落定，防 160ms socket 窗口内清 OSD 丢笔
   };
+  // OSD 武装时(skipLiveDraw)抬笔：领同源硬件 socket 点画整笔 + 喂 model。**这台设备 WebView 指针坐标有偏移，
+  // 硬件 socket 点才是真实落点(和 OSD 对齐)**——WebView 点补画会和 OSD 错位(用户实测"重画没对齐")、数据也偏。
+  // socket 抬笔后几毫秒即到(fallback 160ms 仅 socket 缺包·罕见)。非 OSD 路径同步走。
+  async function finishCommittedR(st: NonNullable<typeof live>): Promise<void> {
+    if (st.skipLiveDraw) {
+      const socket = await takeHqSocketStroke(st.t0, 160);
+      const finalSt = socket?.points.length ? { ...st, points: socketToReader(socket.points) } : st;
+      // **写字时零画布刷新**：不在这补画画布(那会触发电纸屏局部刷新=用户看到的"重画一遍")，全信 OSD 硬件层显示(最丝滑)。
+      // 只在 OSD 要被清的唯一时机(clearOsdInkAfterCommit 发 osd:will-clear)才 resizeInk 从 model 一次性重绘。
+      // 识别不受影响：重排走 reflow_ink_points 从点栅格化、不抓画布(见 pipeline.ts reflow_ink_ref)。
+      inkStrokes.push(finalSt); onPenUp(finalSt);
+    } else {
+      inkStrokes.push(st); onPenUp(st);
+    }
+    drainPendingRepaginate(); // 补做写字期间被门拒的 repaginate（图注异步返回等）——此刻 penDown 已 false 能过门
+  }
+  /** M103 硬件 socket 点(WebView CSS 视口坐标) → #reader 内容坐标。与 contentPoint 同系(减容器 rect+scrollTop)。 */
+  function socketToReader(points: HqSocketPoint[]): RPoint[] {
+    const r = el.getBoundingClientRect();
+    return points.map((p) => ({ x: p.x - r.left, y: p.y - r.top + el.scrollTop, t: p.t, pressure: p.pressure }));
+  }
   el.addEventListener('pointerup', (e) => {
+    setPenDown(false); // 抬笔：恢复画布清理(翻页/滚动交接可清)
+    if (erasingOsd) { erasingOsd = false; clearOsdInkAfterCommit(); } // 橡皮抬笔：清掉 OSD 虚线拖影
     if (rnav && e.pointerId === rnav.pointerId) {  // 手指抬：横划够长且以横向为主 → 翻页（走 nav:flip→pageNav，到边界自动切真实 PDF 页）
       const dx = e.clientX - rnav.x0, dy = e.clientY - rnav.y0; rnav = null;
       if (Math.abs(dx) > READER_SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy)) bus.emit('nav:flip', dx < 0 ? 1 : -1);
@@ -1295,12 +1486,15 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
     }
     finish(e);
   });
-  el.addEventListener('pointercancel', () => { live = null; rnav = null; resizeInk(); }); // 清掉已增量画上的 live 线段，否则留视觉幽灵墨
+  el.addEventListener('pointercancel', () => { setPenDown(false); live = null; rnav = null; if (erasingOsd) { erasingOsd = false; clearOsdInkAfterCommit(); } resizeInk('pointer-cancel'); }); // 清掉已增量画上的 live 线段，否则留视觉幽灵墨（先置 penDown=false 再重画，故 'pointer-cancel' 交接放行）
 
   bus.on('view:changed', rebuild);
+  // 写字时零画布刷新(finishCommittedR 不补画)：OSD 要清的那一刻(clearOsdInkAfterCommit 发)从 model 一次性重绘，
+  // 补上写字期间没画的 live 笔，OSD 清后不丢墨。只在重排面生效(原版页仍逐笔画·识别要抓画布)。
+  bus.on('osd:will-clear', () => { if (settings.viewMode === 'reader') resizeInk('osd-clear'); });
   // 切到重排（含开书直接进重排态）：#reader 此刻才从 hidden 露出 → 重置 ink 画布尺寸（隐藏时 clientWidth=0 被缓存成 0×0）
   // + 重算 restored（隐藏时 getBoundingClientRect 全 0、那次投影是垃圾坐标）。rebuild 可能因 reflowKey 命中早返不重画，故独立兜一道。
-  bus.on('view:changed', () => { if (settings.viewMode === 'reader' && (restoreStrokes || paginate)) { resizeInk(); settleV('relayout'); scheduleSyncRestoredMarks(); } }); // gate 在移动版：桌面靠 rebuild 自带 resizeInk·此处不渗透（严格零回归）
+  bus.on('view:changed', () => { if (settings.viewMode === 'reader' && (restoreStrokes || paginate)) { resizeInk('view-change'); settleV('relayout', 'view-change'); scheduleSyncRestoredMarks('view-change'); } }); // gate 在移动版：桌面靠 rebuild 自带 resizeInk·此处不渗透（严格零回归）
   bus.on('view:changed', setReaderTouchAction); // 进/出重排 → touch-action 跟随
   bus.on('tool', setReaderTouchAction);          // 切工具 → 重排面滚动/落笔切换
   bus.on('page:rendered', rebuild);
@@ -1327,6 +1521,6 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
   });
 
   // 重排里落的笔收口成 mark 后 → 重投影（把那条仍是内容px的 live inkStroke 升级成锚到块的 restored·不然旁注插入致内容移位它不跟随）。scheduleSyncRestoredMarks 内部已 gate 移动版+重排态。
-  bus.on('mark:resolved', () => scheduleSyncRestoredMarks());
-  window.addEventListener('resize', () => { if (settings.viewMode === 'reader') { resizeInk(); layoutNotes(); settleV('relayout'); scheduleSyncRestoredMarks(); } }); // 补 resync：resize 改了块位、restored 需按新位重投影（否则与正文错位）
+  bus.on('mark:resolved', () => scheduleSyncRestoredMarks('mark-resolved'));
+  window.addEventListener('resize', () => { if (settings.viewMode === 'reader') { resizeInk('window-resize'); layoutNotes(); settleV('relayout', 'window-resize'); readerLayoutDirty = true; currentReaderLayoutId = null; scheduleSyncRestoredMarks('window-resize'); } }); // 补 resync：resize 改了块位、restored 需按新位重投影（否则与正文错位）
 }

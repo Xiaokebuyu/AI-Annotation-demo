@@ -144,6 +144,22 @@ function buildSurfaceWidget(plugin, ctx, page, notes) {
     for (let y = 32; y < height; y += 32) viewport.appendChild(svgEl('line', { x1: 0, y1: y, x2: width, y2: y, stroke: 'rgba(0,0,0,0.06)' }));
   }
 
+  // reader 文字背景（视觉行 text_runs）：底层文字、上层笔迹，同 reader_px 坐标→对齐
+  if ((page.text_runs || []).length) {
+    const textLayer = svgEl('g', { class: 'inkloop-reader-text', 'pointer-events': 'none' });
+    for (const run of page.text_runs) {
+      if (!run || !run.text || !finiteNum(run.x) || !finiteNum(run.y)) continue;
+      const tAttrs = { x: run.x, y: run.y, 'font-size': finiteNum(run.font_size) ? Math.max(1, run.font_size) : 16, fill: run.fill || '#111111' };
+      if (run.font_family) tAttrs['font-family'] = run.font_family;
+      if (run.font_weight) tAttrs['font-weight'] = run.font_weight;
+      if (run.font_style) tAttrs['font-style'] = run.font_style;
+      const t = svgEl('text', tAttrs);
+      t.textContent = run.text;
+      textLayer.appendChild(t);
+    }
+    viewport.appendChild(textLayer);
+  }
+
   for (const stroke of page.strokes || []) {
     const pts = (stroke.points || []).filter((p) => finiteNum(p.x) && finiteNum(p.y));
     if (!pts.length) continue;
@@ -237,6 +253,7 @@ function installSurfaceStyles(plugin) {
 .inkloop-surface-widget{position:relative;overflow:hidden;border:1px solid var(--background-modifier-border);background:var(--background-primary);margin:8px 0}
 .inkloop-surface-svg{display:block;width:100%;height:auto;max-height:72vh;cursor:grab;touch-action:none}
 .inkloop-surface-svg:active{cursor:grabbing}
+.inkloop-reader-text{user-select:none;text-rendering:geometricPrecision}
 .inkloop-surface-stroke.has-note{cursor:pointer}
 .inkloop-surface-note{position:absolute;z-index:20;width:min(320px,calc(100% - 16px));max-height:240px;overflow:auto;padding:10px 12px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);box-shadow:0 8px 24px rgba(0,0,0,.18)}
 .inkloop-surface-note-close{float:right}
@@ -293,8 +310,11 @@ module.exports = class InkloopVaultSync extends Plugin {
     if (!sidecar) return; // 缺失/失败 → 保留原静态 SVG（绝不弄成空白）
     const surface = node.getAttribute('data-inkloop-surface');
     const coord = node.getAttribute('data-inkloop-coord-space');
+    const layout = node.getAttribute('data-inkloop-layout') || '';
     const pages = sidecar.pages.filter((p) => p.page_index === pageIndex);
-    const page = pages.find((p) => p.surface && p.surface.capture_surface === surface && p.surface.coord_space === coord) || pages[0];
+    const page = pages.find((p) => p.surface && p.surface.capture_surface === surface && p.surface.coord_space === coord && String(p.layout_id || '') === layout)
+      || pages.find((p) => p.surface && p.surface.capture_surface === surface && p.surface.coord_space === coord)
+      || pages[0];
     if (!page) return;
     node.replaceChildren(buildSurfaceWidget(this, ctx, page, sidecar.notes || {}));
     node.classList.add('inkloop-page-surface-enhanced');

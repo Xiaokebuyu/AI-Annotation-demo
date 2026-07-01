@@ -5,10 +5,12 @@ import type { DocumentProjectionBlock as ProjectionBlock } from 'ink-surface-sdk
 
 const store = vi.hoisted(() => ({
   getFoldedMarks: vi.fn(),
+  getReaderLayouts: vi.fn(),
 }));
 
 vi.mock('../../local/store', () => ({
   getFoldedMarks: store.getFoldedMarks,
+  getReaderLayouts: store.getReaderLayouts,
 }));
 
 import { buildRuntimeAndVisual } from './runtime-surface';
@@ -16,6 +18,8 @@ import { buildRuntimeAndVisual } from './runtime-surface';
 describe('buildRuntimeAndVisual surface strokes', () => {
   beforeEach(() => {
     store.getFoldedMarks.mockReset();
+    store.getReaderLayouts.mockReset();
+    store.getReaderLayouts.mockResolvedValue({});
   });
 
   it('keeps reader-local stroke points while preserving legacy block_norm visual projection', async () => {
@@ -42,6 +46,7 @@ describe('buildRuntimeAndVisual surface strokes', () => {
         ],
         surface_coord_space: 'reader_px',
         surface_bbox: [120, 480, 80, 40],
+        reader_layout_id: 'layout_reader_3',
         anchor_runs: ['run_child_1'],
       }],
       bbox: [0.15, 0.23, 0.04, 0.02],
@@ -49,6 +54,7 @@ describe('buildRuntimeAndVisual surface strokes', () => {
       capture_surface: 'reader',
       surface_bbox: [120, 480, 80, 40],
       surface_coord_space: 'reader_px',
+      reader_layout_id: 'layout_reader_3',
       tool: 'pen',
       color: '#1A1A1A',
       pointer_type: 'reader',
@@ -65,6 +71,21 @@ describe('buildRuntimeAndVisual surface strokes', () => {
       is_tombstone: false,
     };
     store.getFoldedMarks.mockResolvedValue([mark]);
+    store.getReaderLayouts.mockResolvedValue({
+      3: [{
+        schema: 'inkloop.reader_layout.v1',
+        layout_id: 'layout_reader_3',
+        page_index: 3,
+        page_id: 'pg_0e8fdedf_3',
+        capture_surface: 'reader',
+        coord_space: 'reader_px',
+        width: 640,
+        height: 960,
+        style_fingerprint: 'w=640',
+        text_runs: [{ text: '两个孩子听得入神', x: 12, y: 32, w: 160, h: 20, font_size: 16 }],
+        updated_at: '2026-06-30T08:00:00.000Z',
+      }],
+    });
 
     const block: ProjectionBlock = {
       block_id: 'blk_reader',
@@ -113,6 +134,7 @@ describe('buildRuntimeAndVisual surface strokes', () => {
       color: '#1A1A1A',
       capture_surface: 'reader',
       coord_space: 'reader_px',
+      layout_id: 'layout_reader_3',
       bbox: [120, 480, 80, 40],
       points: [
         { x: 120, y: 480, t: 0, pressure: 0.5 },
@@ -127,6 +149,8 @@ describe('buildRuntimeAndVisual surface strokes', () => {
     expect(rt?.visual_strokes?.[0].points[0].t).toBe(0);
     expect(rt?.visual_strokes?.[0].points[0].pressure).toBe(0.5);
     expect(result.visualModel.blocks[0].annotations[0].surface_strokes?.[0].coord_space).toBe('reader_px');
+    expect(result.visualModel.blocks[0].annotations[0].surface_strokes?.[0].layout_id).toBe('layout_reader_3');
+    expect(result.visualModel.reader_layouts?.layout_reader_3.text_runs[0].text).toBe('两个孩子听得入神');
     expect(result.warnings.some((w) => w.includes('非原版 surface'))).toBe(true);
   });
 });

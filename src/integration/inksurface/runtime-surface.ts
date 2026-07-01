@@ -9,7 +9,7 @@
  *
  * 扩展点（不在 L1）：会议 context_id / 妙记相对时刻将来挂在 annotation 上；基岩 raw_ref 走另谈的 raw-ink 契约。
  */
-import { getFoldedMarks } from '../../local/store';
+import { getFoldedMarks, getReaderLayouts } from '../../local/store';
 import { koId } from '../../knowledge/builder';
 import type { PersistedMark, PersistedStroke } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
@@ -23,6 +23,7 @@ import {
 } from 'ink-surface-sdk/runtime-schema';
 import type {
   InkLoopAnnotation as VisualModelAnnotation,
+  InkLoopReaderLayout,
   InkLoopVisualBlock as VisualModelBlock,
   InkLoopVisualModel,
 } from 'ink-surface-sdk/surface-model';
@@ -117,6 +118,7 @@ function strokesToSurface(strokes: PersistedStroke[], color: string): RuntimeSur
         color,
         capture_surface: s.capture_surface ?? 'page',
         coord_space: hasSurface ? (s.surface_coord_space ?? s.coord_space ?? 'page_norm') : (s.coord_space ?? 'page_norm'),
+        ...(s.reader_layout_id ? { layout_id: s.reader_layout_id } : {}),
         bbox: hasSurface ? s.surface_bbox : bboxOfPoints(points),
         points: points.map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure })),
       };
@@ -150,7 +152,13 @@ export async function buildRuntimeAndVisual(
   // ── 墨迹：逐笔按各自块落 stroke_only 标注 ──
   // KO-backed 笔取所属 KO 的 kind/title/status；无 KO 的可见笔（纯图形/识别失败手写/被 dismiss 的笔）
   // 也产 stroke_only（合成确定性 ko_id·visual-only），不再静默丢——否则 InkLoop 里看得到、导出后消失。
-  const marks = (await getFoldedMarks(documentId)).filter((m) => !m.is_tombstone);
+  const [allMarks, readerLayoutsByPage] = await Promise.all([getFoldedMarks(documentId), getReaderLayouts(documentId)]);
+  const readerLayoutById = new Map<string, InkLoopReaderLayout>();
+  for (const snapshots of Object.values(readerLayoutsByPage)) {
+    for (const layout of snapshots) readerLayoutById.set(layout.layout_id, { width: layout.width, height: layout.height, text_runs: layout.text_runs });
+  }
+  const usedReaderLayoutIds = new Set<string>();
+  const marks = allMarks.filter((m) => !m.is_tombstone);
   let orphanInk = 0;
   let unplaced = 0;
   let surfaceOnlyInk = 0;
@@ -185,6 +193,7 @@ export async function buildRuntimeAndVisual(
       const bb = (blk.source?.anchor_bbox ?? [0, 0, 1, 1]) as NormBBox;
       const vs = strokesToVisual(strokes, mark.color, bb);
       const surfaceStrokes = strokesToSurface(strokes, mark.color);
+      for (const ss of surfaceStrokes) if (ss.layout_id) usedReaderLayoutIds.add(ss.layout_id);
       if (!vs.length) continue;
       const visual_bbox = pageBBoxToBlock(mark.bbox, bb);
       const captureSurface = mark.capture_surface ?? vs.find((s) => s.capture_surface)?.capture_surface ?? 'page';
@@ -257,5 +266,8 @@ export async function buildRuntimeAndVisual(
     annotations: visualByBlock.get(b.block_id) ?? [],
   }));
 
-  return { surfaceBlocks, visualModel: { documentTitle, blocks: visualBlocks }, warnings, orphanInk, unplacedInk: unplaced };
+  const readerLayouts: Record<string, InkLoopReaderLayout> = {};
+  for (const id of [...usedReaderLayoutIds].sort()) { const layout = readerLayoutById.get(id); if (layout) readerLayouts[id] = layout; }
+  const visualModel: InkLoopVisualModel = { documentTitle, blocks: visualBlocks, ...(Object.keys(readerLayouts).length ? { reader_layouts: readerLayouts } : {}) };
+  return { surfaceBlocks, visualModel, warnings, orphanInk, unplacedInk: unplaced };
 }

@@ -17,8 +17,8 @@ import type { RawRef } from './bedrock';
 
 export const STORE_VERSION = '2'; // 1→2：strokes/overlays 出 docs 进 marks/ai_turns 账本（干净断裂，旧 docs 弃）
 export const DB_VERSION = 10;     // v9→v10：canonical_entities（存储原生跨文档实体注册表·store.ts ① 基线幂等建）。任何升级都自愈缺表。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
-export type MarkEntrySchemaVersion = '3' | '4';
-export const MARK_ENTRY_SCHEMA_VERSION: MarkEntrySchemaVersion = '4'; // v3→v4：mark/ai_turn 可选带 entity_refs/topic_refs（存储原生拓扑：采集声明/后台建议写回，导出期零 LLM 可读）。
+export type MarkEntrySchemaVersion = '3' | '4' | '5';
+export const MARK_ENTRY_SCHEMA_VERSION: MarkEntrySchemaVersion = '5'; // v4→v5：reader_px 笔迹可选带 reader_layout_id（引用阅读页视觉行布局快照，导出复现文字背景）。additive·不 bump STORE_VERSION·旧条目缺字段即可。
 
 /** 一张图的解读：图本身可从 PDF 重渲，故只存 bbox + 文字解读。 */
 export interface PersistedImage {
@@ -36,6 +36,37 @@ export interface PersistedPdfBlob {
   size_bytes: number;
 }
 
+/** 阅读页某一视觉行的文字（reader_px 坐标·SVG baseline y）——导出时和 reader_px 笔迹同源合成"文字背景"。 */
+export interface PersistedReaderTextRun {
+  text: string;
+  x: number;
+  y: number; // SVG baseline，reader_px
+  w: number;
+  h: number;
+  font_size: number;
+  font_family?: string;
+  font_weight?: string;
+  font_style?: string;
+  fill?: string;
+  block_id?: string;
+}
+
+/** 一页重排 reader 视图的视觉行布局快照：reader_px 笔迹靠它复现"阅读当时看到的文字"（笔迹叠在文字上）。 */
+export interface PersistedReaderLayoutSnapshot {
+  schema: 'inkloop.reader_layout.v1';
+  layout_id: string;         // 内容+尺寸确定性 hash；同布局同 id·避免重复存
+  page_index: number;
+  page_id: string;
+  capture_surface: 'reader';
+  coord_space: 'reader_px';
+  width: number;
+  height: number;
+  style_fingerprint: string; // 宽度/字体/引擎/分页 关键 CSS 指纹（判布局是否可比）
+  reflow_engine?: string | null;
+  text_runs: PersistedReaderTextRun[];
+  updated_at: string;
+}
+
 /** 一笔的低成本序列：canonical 点串 + 工具（redraw 据此还原原貌、保多笔保真）。 */
 export interface PersistedStroke {
   tool: 'pen' | 'aipen' | 'highlighter' | 'eraser' | 'hand';
@@ -45,6 +76,7 @@ export interface PersistedStroke {
   surface_points?: StrokePoint[];     // 用户落笔 surface 的原始点串；reader 落笔=reader_px，不拿来当 PDF 坐标。
   surface_coord_space?: StrokeCoordSpace;
   surface_bbox?: SurfaceBBox;         // surface_points bbox；reader_px 时这是内容 px，不夹 [0,1]。
+  reader_layout_id?: string;          // reader_px 笔迹对应的阅读页视觉行布局快照 id；旧数据缺=导出无文字背景。
   anchor_runs?: string[];           // 位置真相锚（逐笔）：该笔落笔时命中重排块的 source run ids → 重投影时各笔认各自的块（多笔手写跨段不被拉拢/塌缩·恒等）。仅重排落笔有；原版/老条目缺=undefined
 }
 
@@ -53,6 +85,8 @@ export interface PersistedPage {
   page_index: number;
   reflow: ReflowBlock[] | null;   // 预排版结构（null = 未排版）
   reflow_engine: string | null;   // 产出该重排的引擎（切引擎需重排）
+  reader_layouts?: Record<string, PersistedReaderLayoutSnapshot>; // key=layout_id；同布局覆盖·不随每笔膨胀（派生缓存）
+  current_reader_layout_id?: string;                              // 最近一次稳定布局的 id（落笔时给新笔引用）
   images: PersistedImage[];
   status: 'pending' | 'reflowed' | 'done';
 }
@@ -106,6 +140,7 @@ export interface PersistedMark extends BaseEntry {
   capture_surface?: CaptureSurface;  // 用户实际落笔 surface；缺省 page。
   surface_bbox?: SurfaceBBox;        // 用户落笔 surface 的 union bbox；reader_px 时是内容 px。
   surface_coord_space?: StrokeCoordSpace;
+  reader_layout_id?: string;         // mark 级当前 reader 布局快照 id；逐笔精确值仍在 strokes[].reader_layout_id。
   tool: 'pen' | 'highlighter';      // 代表工具（自 event_type 派生）
   color: string;                    // 据 tool 派生的颜色（取证完整性；redraw 仍按 tool）
   pointer_type: string;             // pen / touch / mouse / unknown
@@ -216,6 +251,28 @@ export interface PanelMeetingSummaryRecord {
   summary: PanelMeetingSummaryFive;
 }
 
+/**
+ * 妙记文档（docx 导出形态，非 `/minutes/<token>` 卡片链接）挂到会议的「链接型资料」。
+ * 不塞进 material_doc_ids——那个字段的 UI/导出全链路都假定它指向已入库的 PersistedDoc（listBooks() 能查到），
+ * 链接型资料一开始就不是这种（可能一直没有可读内容，只是个 url）。link_only 是最低可用态：先把链接本身挂上，
+ * 拉标题/导出 PDF 都是可选的后续增强——用户手动点「导出 PDF」成功后，pdf_doc_id 指向的才是一个真正的 material_doc_ids 条目。
+ */
+export interface PersistedMeetingMaterialLink {
+  link_id: string;                 // 'mtglink_'+meetingId+'_'+token（稳定 id，见 feishu-materials.ts materialLinkId）
+  kind: 'feishu_docx';             // 目前只支持这一种；未来若支持 wiki 链接等可扩展
+  url: string;                     // 完整原链接（点开跳转飞书用）
+  token: string;                   // /docx/<token> 的 token
+  title?: string;                  // 拉到 meta 后回填的真实标题；没有则显示链接本身
+  source_chat_id?: string;         // 来源群（若是从群消息里识别到的）
+  source_message_id?: string;
+  source_create_time?: string;     // 飞书消息 create_time（epoch ms 字符串）
+  attached_at: string;             // ISO：挂上这条资料的时刻
+  updated_at?: string;
+  status?: 'link_only' | 'metadata_ready' | 'pdf_ready' | 'permission_denied' | 'failed';
+  pdf_doc_id?: string;             // 用户手动「导出 PDF」成功后，对应 material_doc_ids 里的那个 document_id
+  error?: string;                  // 上一次尝试失败的原因（导出 PDF 403/超时等）
+}
+
 /** 一场会议：属某 workspace，引用资料（已导入书的 document_id），会后留手写档案 + 思路总结。 */
 export interface PersistedMeeting {
   meeting_id: string;               // 'mtg_'+shortId
@@ -226,6 +283,7 @@ export interface PersistedMeeting {
   started_at?: string;              // ISO 真实「开始会议」墙钟（时间脊原点：会中每笔的相对时刻 = abs_timestamp − started_at；会后与飞书录音对轴的 t0）
   ended_at?: string;                // ISO 真实「结束会议」墙钟
   material_doc_ids: string[];       // 可能有用的文件（指向 docs/pdf_blobs 的 document_id）
+  material_links?: PersistedMeetingMaterialLink[]; // 链接型资料（妙记 docx 等·不强求可批注·见 PersistedMeetingMaterialLink）
   summary?: string;                 // 会后「思路总结」（AI 综合，先空）
   // ── WS2-C 飞书妙记对照（optional·零迁移；近似对照非精确对齐·见 integration/panel-feishu）──
   feishu_meeting_id?: string;       // 关联的飞书 VC 会议 id
@@ -242,13 +300,13 @@ export interface PersistedMeeting {
   feishu_match_confirmed_at?: string; // 用户确认关联的时刻
   summary_generated_at?: string;    // summary 生成时刻（防 stale）
   summary_source?: { feishu_minute_token?: string; align_offset_ms?: number; mark_count: number; cue_count: number; transcript_truncated?: boolean; used_cue_count?: number };
-  segment_digests?: Record<string, string>; // WS2-C V2：active 段一句话 AI 摘要缓存（键＝段 cueHash·内容变即换键失效·旧键残留无害）。零迁移 optional
   // ── L5 panel 总结缓存（recap 顶部显示·离线不丢·optional 零迁移）──
   panel_summary?: PanelMeetingSummaryRecord;
   panel_summary_fetched_at?: string;
   panel_summary_status?: 'ready' | 'not_generated' | 'missing_minute' | 'not_found' | 'failed';
   panel_summary_unread?: boolean;   // 总结由 summary_ready 事件后台到达、用户还没进 recap 看过（home/detail 提醒用·进 recap 即清）
   live_unread?: boolean;            // 飞书 started 事件把这场会议推成 live、用户还没点开看过（M7·nav 徽标+home 顶部提醒用·openMeeting 即清）
+  exported_at?: string;             // ISO：上次成功「导出到 Obsidian」的时刻（阶段⑤·recap 显示「上次导出」用）
   // ── 日程会议（日历来源）+ 实时归群（optional 零迁移）──
   source_kind?: 'calendar' | 'vc' | 'manual'; // 来源：calendar=飞书日历日程预占位 · vc=panel VC started 事件 · manual=手建/模拟（缺省按已有字段推断）
   feishu_calendar_event_id?: string;          // 日历 event_id（日程落库幂等键·防重复建）

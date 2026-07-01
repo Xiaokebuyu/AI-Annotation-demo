@@ -8,7 +8,7 @@
  */
 import type { NormBBox, OverlayState, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedEntity, PersistedMark, PersistedMeeting, PersistedMeetingMinute, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
+import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedEntity, PersistedMark, PersistedMeeting, PersistedMeetingMaterialLink, PersistedMeetingMinute, PersistedPage, PersistedPdfBlob, PersistedReaderLayoutSnapshot, PersistedWorkspace } from '../core/store-format';
 import { DB_VERSION, MARK_ENTRY_SCHEMA_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
 import { vectorStore } from './vector';
@@ -145,18 +145,25 @@ export function activeDoc(): PersistedDoc | null { return current; }
 
 // ── 书籍持久化：PDF 原始字节 + 书目列表 + 阅读位置 ──
 
-/** 存 PDF 原始字节（重开免重导）。幂等 put，导入路径调用一次。 */
+/**
+ * 存 PDF 原始字节（重开免重导）。幂等 put，导入路径调用一次。
+ * ⚠️写失败必须上抛（B7-bug2）：曾经 tx.onerror 也 resolve()，导致 IDB 配额/异常时字节其实没落库，
+ * 但调用方（importPdfFromUrl）仍当「导入成功」把 docId 写进会议 material_doc_ids——书架 listBooks()
+ * 靠 pdf_blobs 是否有这个 key 过滤，于是资料从书架里"隐形"、飞书 picker 又因 docId 已在 material_doc_ids
+ * 里而拒绝用户重新选它——变成谁都救不回来的幽灵资料。现在失败必须让上层感知并计入 failed，不写入 material_doc_ids。
+ */
 export async function storePdfBlob(documentId: string, blob: Blob): Promise<void> {
   const db = await openDB();
-  if (!db) return;
+  if (!db) throw new Error('IndexedDB 不可用，无法落库 PDF 字节');
   const rec: PersistedPdfBlob = { document_id: documentId, blob, stored_at: new Date().toISOString(), size_bytes: blob.size };
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     try {
       const tx = db.transaction(PDF_STORE, 'readwrite');
       tx.objectStore(PDF_STORE).put(rec);
       tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-    } catch { resolve(); }
+      tx.onerror = () => reject(tx.error ?? new Error(`storePdfBlob failed: ${documentId}`));
+      tx.onabort = () => reject(tx.error ?? new Error(`storePdfBlob aborted: ${documentId}`));
+    } catch (e) { reject(e); }
   });
 }
 
@@ -320,6 +327,41 @@ export function setDiaryPageCount(count: number): void {
 /** 当前文档已存的阅读位置（无则 0）。 */
 export function lastReadPage(): number {
   return current?.last_read_page ?? 0;
+}
+
+// ── reader 视觉行布局快照：存 docs 页缓存（派生），不进 marks append-only 账本 ──
+function ensurePersistedPage(doc: PersistedDoc, i: number): PersistedPage {
+  if (!doc.pages[i]) doc.pages[i] = { page_index: i, reflow: null, reflow_engine: null, images: [], status: 'pending' };
+  const p = doc.pages[i];
+  if (!p.images) p.images = []; // 老格式兼容
+  return p;
+}
+
+/** 存一页的 reader 布局快照（同 layout_id 覆盖·不膨胀）；并记成该页 current 布局供新笔引用。 */
+export async function putReaderLayout(documentId: string, pageIndex: number, layout: PersistedReaderLayoutSnapshot): Promise<void> {
+  const into = (doc: PersistedDoc): void => {
+    const p = ensurePersistedPage(doc, pageIndex);
+    p.reader_layouts = { ...(p.reader_layouts ?? {}), [layout.layout_id]: layout };
+    p.current_reader_layout_id = layout.layout_id;
+  };
+  if (current?.document_id === documentId) { into(current); scheduleSave(); return; }
+  const doc = await idbGet(documentId);
+  if (!doc) return;
+  into(doc);
+  doc.saved_at = new Date().toISOString();
+  await idbPut(doc);
+}
+
+/** 某文档所有页的 reader 布局快照（按页号）。导出用（runtime-surface 组装 visualModel.reader_layouts）。 */
+export async function getReaderLayouts(documentId: string): Promise<Record<number, PersistedReaderLayoutSnapshot[]>> {
+  const doc = current?.document_id === documentId ? current : await idbGet(documentId);
+  if (!doc) return {};
+  const out: Record<number, PersistedReaderLayoutSnapshot[]> = {};
+  for (const [key, p] of Object.entries(doc.pages ?? {})) {
+    const layouts = Object.values(p.reader_layouts ?? {}).sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+    if (layouts.length) out[Number(key)] = layouts;
+  }
+  return out;
 }
 
 // ── 账本：marks / ai_turns（append-only，每条独立记录）──
@@ -507,12 +549,7 @@ export function setSynthesisWatermark(doc: PersistedDoc | null = current): void 
 
 function page(i: number): PersistedPage | null {
   if (!current) return null;
-  if (!current.pages[i]) {
-    current.pages[i] = { page_index: i, reflow: null, reflow_engine: null, images: [], status: 'pending' };
-  }
-  const p = current.pages[i];
-  if (!p.images) p.images = []; // 老格式兼容
-  return p;
+  return ensurePersistedPage(current, i);
 }
 
 function scheduleSave(): void {
@@ -681,11 +718,13 @@ export async function upsertScheduleWorkspace(name = '日程'): Promise<Persiste
   return ws;
 }
 
-/** 新建会议（属某工作区）。status 据计划时间派生：过去=已结束，否则=待开始。 */
-export async function createMeeting(workspaceId: string, input: { title: string; scheduled_at: string }): Promise<PersistedMeeting> {
+/** 新建会议（属某工作区）。status 显式传入优先；否则据计划时间派生：过去=已结束，否则=待开始。
+ *  ⚠️日历同步等「尚未被飞书真实事件确认」的来源必须显式传 status:'upcoming'——不能让"计划时间已过"直接判定为已结束，
+ *  那只代表日程时间到了，不代表会议真的开完了（真实开始/结束该由 panel VC 事件驱动，见 upsertPanelMeetingInner）。 */
+export async function createMeeting(workspaceId: string, input: { title: string; scheduled_at: string; status?: MeetingStatus }): Promise<PersistedMeeting> {
   const now = new Date().toISOString();
   const t = new Date(input.scheduled_at).getTime();
-  const status: MeetingStatus = Number.isFinite(t) && t < Date.now() ? 'ended' : 'upcoming';
+  const status: MeetingStatus = input.status ?? (Number.isFinite(t) && t < Date.now() ? 'ended' : 'upcoming');
   const mtg: PersistedMeeting = {
     meeting_id: shortId('mtg'), workspace_id: workspaceId, title: input.title.trim() || '未命名会议',
     scheduled_at: input.scheduled_at, status, material_doc_ids: [], created_at: now, updated_at: now,
@@ -704,13 +743,97 @@ export function listAllMeetings(): Promise<PersistedMeeting[]> {
 export function getMeeting(id: string): Promise<PersistedMeeting | null> {
   return getOneFrom<PersistedMeeting>(MEETINGS, id);
 }
-/** 局部更新一场会议（合并 patch + 刷新 updated_at）。 */
+/** 局部更新一场会议（合并 patch + 刷新 updated_at）。单个 readwrite 事务内 get→spread→put，
+ *  防两次并发 updateMeeting（如 M7 openMeeting 清 live_unread 撞上后台 panel 轮询刷新其它字段）
+ *  各自基于旧快照写回、后写者用旧值覆盖先写者的改动（lost update·真机 12s 轮询下实测触发过）。 */
 export async function updateMeeting(id: string, patch: Partial<PersistedMeeting>): Promise<PersistedMeeting | null> {
-  const cur = await getOneFrom<PersistedMeeting>(MEETINGS, id);
-  if (!cur) return null;
-  const next: PersistedMeeting = { ...cur, ...patch, updated_at: new Date().toISOString() };
-  await putInto(MEETINGS, next);
-  return next;
+  const db = await openDB();
+  if (!db) return null;
+  return new Promise<PersistedMeeting | null>((resolve, reject) => {
+    try {
+      const tx = db.transaction(MEETINGS, 'readwrite');
+      const store = tx.objectStore(MEETINGS);
+      let next: PersistedMeeting | null = null;
+      const req = store.get(id);
+      req.onsuccess = () => {
+        const cur = req.result as PersistedMeeting | undefined;
+        if (!cur) return; // 不存在：tx 空转完成，next 仍 null
+        next = { ...cur, ...patch, updated_at: new Date().toISOString() };
+        store.put(next);
+      };
+      tx.oncomplete = () => resolve(next);
+      tx.onerror = () => reject(tx.error ?? new Error(`IndexedDB updateMeeting failed: ${id}`));
+      tx.onabort = () => reject(tx.error ?? new Error(`IndexedDB updateMeeting aborted: ${id}`));
+    } catch (e) { reject(e); }
+  });
+}
+
+/**
+ * 原子并入若干 material_doc_id（同一读写事务内 get→merge Set→put），不靠调用方旧快照整体覆盖数组。
+ * 根治 B7-bug1：群文件自动扫描和手动添加资料并发时，后写者用旧数组整体覆盖会丢先写者刚并入的 docId
+ *（真机 12s 轮询 + 用户同时手动添加时实测会触发）。空数组直接返回当前值，不占用一次事务。
+ */
+export async function addMeetingMaterialDocIds(id: string, newIds: string[]): Promise<PersistedMeeting | null> {
+  if (!newIds.length) return getMeeting(id);
+  const db = await openDB();
+  if (!db) return null;
+  return new Promise<PersistedMeeting | null>((resolve, reject) => {
+    try {
+      const tx = db.transaction(MEETINGS, 'readwrite');
+      const store = tx.objectStore(MEETINGS);
+      let next: PersistedMeeting | null = null;
+      const req = store.get(id);
+      req.onsuccess = () => {
+        const cur = req.result as PersistedMeeting | undefined;
+        if (!cur) return; // 不存在：tx 空转完成，next 仍 null
+        const merged = new Set(cur.material_doc_ids || []);
+        let changed = false;
+        for (const docId of newIds) { if (!merged.has(docId)) { merged.add(docId); changed = true; } }
+        next = changed ? { ...cur, material_doc_ids: [...merged], updated_at: new Date().toISOString() } : cur;
+        if (changed) store.put(next);
+      };
+      tx.oncomplete = () => resolve(next);
+      tx.onerror = () => reject(tx.error ?? new Error(`IndexedDB addMeetingMaterialDocIds failed: ${id}`));
+      tx.onabort = () => reject(tx.error ?? new Error(`IndexedDB addMeetingMaterialDocIds aborted: ${id}`));
+    } catch (e) { reject(e); }
+  });
+}
+
+/**
+ * 原子并入/更新若干「链接型资料」（妙记 docx 等）——同一 IndexedDB 事务内 get→merge→put，同 addMeetingMaterialDocIds
+ * 根治并发丢更新。按 link_id 去重：同一条链接再次出现（用户重复点选/自动扫描重复命中）时更新其
+ * title/status/source_message_id 等字段，不重复追加成两条。
+ */
+export async function addMeetingMaterialLinks(id: string, links: PersistedMeetingMaterialLink[]): Promise<PersistedMeeting | null> {
+  if (!links.length) return getMeeting(id);
+  const db = await openDB();
+  if (!db) return null;
+  return new Promise<PersistedMeeting | null>((resolve, reject) => {
+    try {
+      const tx = db.transaction(MEETINGS, 'readwrite');
+      const store = tx.objectStore(MEETINGS);
+      let next: PersistedMeeting | null = null;
+      const req = store.get(id);
+      req.onsuccess = () => {
+        const cur = req.result as PersistedMeeting | undefined;
+        if (!cur) return; // 不存在：tx 空转完成，next 仍 null
+        const byId = new Map((cur.material_links || []).map((l) => [l.link_id, l] as const));
+        let changed = false;
+        for (const link of links) {
+          const existing = byId.get(link.link_id);
+          if (!existing) { byId.set(link.link_id, link); changed = true; continue; }
+          const merged: PersistedMeetingMaterialLink = { ...existing, ...link, attached_at: existing.attached_at, updated_at: new Date().toISOString() };
+          byId.set(link.link_id, merged);
+          changed = true;
+        }
+        next = changed ? { ...cur, material_links: [...byId.values()], updated_at: new Date().toISOString() } : cur;
+        if (changed) store.put(next);
+      };
+      tx.oncomplete = () => resolve(next);
+      tx.onerror = () => reject(tx.error ?? new Error(`IndexedDB addMeetingMaterialLinks failed: ${id}`));
+      tx.onabort = () => reject(tx.error ?? new Error(`IndexedDB addMeetingMaterialLinks aborted: ${id}`));
+    } catch (e) { reject(e); }
+  });
 }
 
 // ── WS2-C：妙记转写缓存（会后离线复盘不丢转写）──

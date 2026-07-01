@@ -68,11 +68,13 @@ export interface AnnotationEvent {
   version: string;
   capture_surface?: CaptureSurface;  // 用户实际在哪个 surface 落笔；缺省按老数据视为 page。
   coord_space?: StrokeCoordSpace;    // stroke_points/geometry 的坐标系；缺省 page_norm。
+  reader_layout_id?: string;          // 仅重排面落笔：该笔对应的阅读页视觉行布局快照 id（导出复现文字背景）；老事件缺=undefined
   anchor_runs?: string[];           // 仅重排面落笔：命中重排块的 source run ids（位置真相锚=锚在哪一段）；原版落笔/老事件缺=undefined
   near_bbox?: NormBBox;              // 仅重排面落笔：屏幕空间 bbox（按内容列宽归一化）——专给组装近邻判定用（视觉相邻即 near，跨块不被按块映射的 PDF 坐标判 far）。原版页缺=用 geometry.bbox（=屏幕）。
   near_pad?: number;                 // near_bbox 同坐标单位的组装外扩半径（按 DOM 行高算）；缺省用 annotation-loop 的 REGION_NEAR。仅 reader 面按视觉行高放宽，治"连续写字被按字切碎"。
   reflow_ink_points?: StrokePoint[]; // 仅重排面落笔：该笔在 #reader 内容坐标(px)里的原始点。仅作临时取证，不落账本；x/y 此处不是页面归一化。
   reflow_ink_ref?: string;           // 仅重排面落笔：按重排内容坐标直接栅格化的白底笔迹图。self_content 识别优先用它，避免从隐藏 #ink-layer/PDF 坐标裁错。
+  ink_ref?: string;                  // 通用离屏白底笔迹图（从账本点串栅格化·不抓可见画布）。M103 日记白板零画布写字时，captureMark 优先用它当 layers.ink，保证 AI 有非空笔迹图（点串云端不消费·#ink-layer 空会 AI 抓白图=大忌）。
 }
 
 export interface OcrTextBlock {
