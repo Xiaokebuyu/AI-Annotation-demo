@@ -1158,7 +1158,7 @@ function nearPadForBlock(node: Element, widthPx: number): number {
 
 // geometry.bbox 用该笔的**紧 bbox**（PDF 归一化），与原版页一致——main.ingestStroke 的 nearRegion/unionBb 要按
 // 笔粒度判近邻才能正确组装（旧版传整块 bbox 会让组装退化到整块粒度）。pts 已由 onPenUp 映进命中块的 PDF 坐标。
-function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], nearBbox?: NormBBox, reflowInkPoints?: StrokePoint[], nearPad?: number, readerLayoutId?: string, coordPxPerNorm?: number): AnnotationEvent {
+function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], nearBbox?: NormBBox, reflowInkPoints?: StrokePoint[], nearPad?: number, readerLayoutId?: string, coordPxPerNorm?: number, readerLineH?: number): AnnotationEvent {
   return {
     event_id: shortId('evt'), trace_id: shortId('trc'),
     document_id: state.documentId ?? '', page_id: state.pageId ?? '',
@@ -1168,6 +1168,7 @@ function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], ne
     capture_surface: 'reader',
     coord_space: 'page_norm',
     ...(coordPxPerNorm ? { coord_px_per_norm: coordPxPerNorm } : {}), // 块本地 uniform scale 标记（在界 canonical）；缺=退化块走的老 pageCss 近似
+    ...(readerLineH ? { reader_line_h: readerLineH } : {}), // 命中块视觉行高（px）→ 特征分类的同空间字高标尺
 
     ...(readerLayoutId ? { reader_layout_id: readerLayoutId } : {}), // reader_px 笔迹引用当时文字布局快照（导出复现文字背景）
     anchor_runs: anchorRuns,         // 命中块的 source run ids → 随 mark 落库当位置锚（repr 经手保留）
@@ -1238,7 +1239,7 @@ function onPenUp(st: ReaderStroke): void {
   const readerLayoutId = ensureReaderLayoutId(); // 惰性：布局脏了才测一次；这笔引用当时文字布局
   // 当正常 page-ledger mark：发 bus 给 main 走 ingestStroke（组装 + 跨视图 + 持久 + 同享 session/idle）
   // ref.runIds = 命中块的 source run ids → 随事件落库当**位置真相锚**（重投影认它定段、不靠坐标猜，治"刚画完就乱飘"）
-  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds, nearBbox, reflowInkPoints, nearPad, readerLayoutId, coordPxPerNorm), stroke });
+  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds, nearBbox, reflowInkPoints, nearPad, readerLayoutId, coordPxPerNorm, blockLineHeightPx(ref.el)), stroke });
 }
 
 /** 落笔意图（仅重排面）：tool 决定——hand=滚动浏览、pen/highlighter=落笔(笔与手指都画)。

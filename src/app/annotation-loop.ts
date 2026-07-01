@@ -494,7 +494,11 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
   // 几何：判 markup（模板笔够大、跨内容），或给 freeform 标 ocrWorthy；handwriting/drawing 由 captureMark 识别定型。
   // reader 块本地批次：dims 传 coord_px_per_norm 中位 → 特征层的像素阈值（ocr 门/复杂度）恢复出真实 reader px。
   const clsDim = readerClsDim(realEvents);
-  const geom = classifyStrokeFeature(realScored, strokeBboxes, points, bbox, localCharHeight(state.surfaceIndex), clsDim, clsDim);
+  // 字高标尺必须与 bbox 同空间：reader 批次用命中块视觉行高（换算进 canonical 单位·墨迹高÷行高=真实视觉扁度）。
+  // 旧口径拿源 PDF 页字高比 canonical 墨迹高（跨系）→ reader 下划线扁度恒 ≥0.6 被判"太高"降级 drawing、永远不进命中。
+  const lineHs = realEvents.map((e) => e.reader_line_h).filter((h): h is number => !!h).sort((a, b) => a - b);
+  const charH = clsDim && lineHs.length ? lineHs[lineHs.length >> 1] / clsDim : localCharHeight(state.surfaceIndex);
+  const geom = classifyStrokeFeature(realScored, strokeBboxes, points, bbox, charH, clsDim, clsDim);
   // 代表 event 的形状：markup 取最强模板笔（圈/划/箭头，带箭头方向）；否则按合并笔（自由笔=stroke）
   const domScored = geom.type === 'markup' ? realScored.find((s) => s.type === geom.raw.templateType) : undefined;
   const markScored = domScored ?? classifyScored(points, bbox, clsDim, clsDim);

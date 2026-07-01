@@ -254,11 +254,18 @@ export async function recognizeInk(
       if (reading) return { kind: 'handwriting', reading, description: '', source: 'local_board' };
     } catch { /* 端点不在/失败 → 落云端 */ }
   }
-  try {
-    const model = (settings.interpretModel && settings.interpretModel !== LOCAL_HWR) ? settings.interpretModel : settings.inferModel;
-    const j = await postJson<{ kind?: string; reading?: string; description?: string }>('/api/interpret', { image: inkData, model });
-    return { kind: String(j.kind || 'none'), reading: String(j.reading || '').trim(), description: String(j.description || '').trim(), source: 'cloud' };
-  } catch { return { kind: 'none', reading: '', description: '', source: 'cloud' }; }
+  const model = (settings.interpretModel && settings.interpretModel !== LOCAL_HWR) ? settings.interpretModel : settings.inferModel;
+  // 瞬断重试一次（隔 1.5s）：WiFi 路由切换/自关窗口里 fetch 抛错曾被静默吞成 kind:'none'——这笔从此
+  // 冻成"不是手写"、不触发 AI、无任何反馈（真机实锤 evt_4cebc424·同图网络恢复后一次识别通过）。
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const j = await postJson<{ kind?: string; reading?: string; description?: string }>('/api/interpret', { image: inkData, model });
+      return { kind: String(j.kind || 'none'), reading: String(j.reading || '').trim(), description: String(j.description || '').trim(), source: 'cloud' };
+    } catch {
+      if (attempt >= 1) return { kind: 'none', reading: '', description: '', source: 'cloud' };
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
 }
 
 /**
