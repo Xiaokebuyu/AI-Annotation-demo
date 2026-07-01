@@ -337,6 +337,37 @@ export function findMidMarkupIndex(batch: AnnotationEvent[], scored: ReturnType<
   return -1;
 }
 
+/**
+ * 「AI 笔圈普通内容」＝选择手势（笔触划分设计：普通笔=纯内容不进 AI·AI 笔=唯一进 AI，圈普通墨迹即把它选给 AI 读）：
+ * 批内 circle-ish 笔圈住了本页**已落库普通内容墨迹**（ai_eligible:false mark 的中心）→ 在该笔处拆分，
+ * 拆出的圈 mark 收口时由 recognizeEnclosedInk 识别被圈内容（marked_text+证据图），narrative 变成
+ * 「圈『被圈内容』，随即写下『问题』」——AI 拿到真实内容而不是把圈+问题混成一团乱码识别。
+ * 阈值放宽到 0.45（与 classifyStrokeFeature 的 markup 门同格）：手绘椭圆常在 0.5 上下，
+ * isStrongMarkup 的 0.55 够不着（真机 evt_6e4bb782=0.52 未拆的直接病根）；语义前提（圈住已有内容）
+ * 天然防误拆——写字不会圈住自己已落库的旧墨迹。日记/会议手记同一条白板路径，会议场景直接复用。
+ */
+export async function findContentEnclosureIndex(
+  batch: AnnotationEvent[],
+  scored: ReturnType<typeof classifyScored>[],
+  pid: string,
+  bookId: string,
+): Promise<number> {
+  if (batch.length < 2) return -1; // 单笔批次没得拆（也防拆出的圈段递归再匹配死循环）
+  const cand = batch
+    .map((e, i) => ({ e, s: scored[i], i }))
+    .filter(({ e, s }) => s.type === 'circle' && s.score >= 0.45 && e.stroke_points.length >= 8);
+  if (!cand.length) return -1;
+  await waitContentMarks(); // 「写完就圈」内容笔可能还没落库
+  let marks;
+  try { marks = await getFoldedMarks(bookId); } catch { return -1; }
+  const content = marks.filter((m) => m.page_id === pid && m.ai_eligible === false && m.bbox[2] > 0 && m.bbox[3] > 0);
+  if (!content.length) return -1;
+  for (const { e, i } of cand) {
+    if (content.some((m) => pointInPolygon(m.bbox[0] + m.bbox[2] / 2, m.bbox[1] + m.bbox[3] / 2, e.stroke_points))) return i;
+  }
+  return -1;
+}
+
 function bboxCorners(b: NormBBox): Pt[] {
   const [x, y, w, h] = b;
   return [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
@@ -427,6 +458,15 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
     await resolveRegion(batch.slice(0, mid), strokes.slice(0, mid), { ...flushInfo, split: 'mid-markup:content' }, rawRefs.slice(0, mid));
     await resolveRegion(batch.slice(mid, mid + 1), strokes.slice(mid, mid + 1), { ...flushInfo, split: 'mid-markup:markup' }, rawRefs.slice(mid, mid + 1));
     if (batch.length > mid + 1) await resolveRegion(batch.slice(mid + 1), strokes.slice(mid + 1), { ...flushInfo, split: 'mid-markup:tail' }, rawRefs.slice(mid + 1));
+    return;
+  }
+  // 圈住已落库普通内容（AI 笔圈自己普通笔写的东西+旁边写问题）：在圈处拆，被圈内容的读取交给圈 mark 的 recognizeEnclosedInk。
+  const encAt = await findContentEnclosureIndex(batch, scoredAll, pid, bookId);
+  if (encAt >= 0) {
+    gtrace({ page_id: pid, split: 'content-enclosure', at: encAt, markup: diagOf([scoredAll[encAt]])[0], flush: flushInfo });
+    if (encAt > 0) await resolveRegion(batch.slice(0, encAt), strokes.slice(0, encAt), { ...flushInfo, split: 'content-enclosure:head' }, rawRefs.slice(0, encAt));
+    await resolveRegion(batch.slice(encAt, encAt + 1), strokes.slice(encAt, encAt + 1), { ...flushInfo, split: 'content-enclosure:markup' }, rawRefs.slice(encAt, encAt + 1));
+    if (batch.length > encAt + 1) await resolveRegion(batch.slice(encAt + 1), strokes.slice(encAt + 1), { ...flushInfo, split: 'content-enclosure:tail' }, rawRefs.slice(encAt + 1));
     return;
   }
 
