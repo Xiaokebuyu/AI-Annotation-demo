@@ -64,6 +64,9 @@ export interface Settings {
   // AI 触发模式（笔触划分）：'pen'=只 AI 笔进 AI（默认·普通笔=纯内容）；'auto'=每笔都判（旧自动判意·实验）。
   // 默认 'pen'：AI 笔=激活意图识别的开关（选中它写→走 recognize+fold/respond 分类器）；普通笔不进 AI。
   aiTrigger: AiTrigger;
+  // 手写收口等待（ms）：停笔多久把这团笔收口送识别/AI。调短=反馈快，但句中思考停顿会把一段字拆成多个标注
+  //（session 图会把它们串回一段叙事，语义不丢，只是账本条目变碎+分类调用变多）。dev 页可调。
+  regionQuietMs: number;
   // AI 笔"原功能"（圈选 P2 识别被圈内容 + 它画的必回应·跳分类器）。默认 false=停用·AI 笔走普通意图识别即可；
   // dev 开 → 恢复原显式行为（待把重排圈选锚定重做后再启用·见 codex 重排漂移调查）。
   aiPenExplicit: boolean;
@@ -105,6 +108,7 @@ export const settings: Settings = {
   preprocess: { reflowEnabled: false, reflowPages: 5 },
   gesture: { enabled: true, idleSeconds: 90 },
   aiTrigger: 'pen', // 默认：只有选中 AI 笔写的才进 AI（走识别→fold/respond 意图分类器）；普通笔=纯内容。dev 可切 'auto'=每笔都判（实验）。
+  regionQuietMs: 1000, // 手写收口等待默认 1s（用户拍板·原 6s 反馈太慢）；写长句常被句中停顿拆碎的话在 dev 调回 2-3s。
   aiPenExplicit: false, // AI 笔"原功能"（圈选识别 P2 + 总是回应·跳分类器）默认停用·走意图识别即可；dev 开（重排漂移待重做后再启用）。
   inferModel: 'claude-sonnet-4-6', // 默认推理+识别模型：sonnet-4.6（DMX，中文手写实测准）。recognizeInk/chat 都随它。
   //   注：旧用户 localStorage 里存了别的会覆盖此默认——要用 sonnet 需在 dev 面板「推理模型」选一次或清 inkloop.settings.v1。
@@ -132,7 +136,7 @@ const PRODUCT_KEY = 'inkloop.prefs.v1';
 const DEV_KEY = 'inkloop.devflags.v1';
 const LEGACY_KEY = 'inkloop.settings.v1';
 const PRODUCT_FIELDS = ['placement', 'viewMode', 'reflowProvider', 'gesture'] as const;
-export const DEV_FIELDS = ['aiTrigger', 'aiPenExplicit', 'reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations', 'bedrock', 'recordPipeline', 'devtel', 'thinkingTag'] as const;
+export const DEV_FIELDS = ['aiTrigger', 'aiPenExplicit', 'regionQuietMs', 'reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations', 'bedrock', 'recordPipeline', 'devtel', 'thinkingTag'] as const;
 
 type SettingsRec = Record<string, unknown>;
 

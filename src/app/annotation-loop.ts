@@ -27,7 +27,8 @@ import type { PersistedStroke } from '../core/store-format';
 
 // 区域组装（空间+时间连续）：同一小块区域里继续写的笔画并进一个 mark；附近无动作满 REGION_QUIET 才提交；
 // 笔落到远处=离开该区域 → 上一区域立刻收口。无书写时长上限——慢写整段保持静默、聚成一整团再识别（读得准、只回一条）。
-const REGION_QUIET_MS = 6000;     // 附近无动作多久 → 收口提交（dev 可调，按真实手速）
+// 附近无动作多久 → 收口提交：走 settings.regionQuietMs（默认 1s·dev 页可调）。调短=识别反馈快；
+// 句中思考停顿会拆碎成多个 mark，但 session 图会串回一段叙事，语义不丢。
 const REGION_NEAR = 0.06;         // "附近"：笔中心在区域 bbox 外扩此值内算同区（归一化·基础半径）
 const REGION_READER_QUICK_MS = 2500; // reader 面"连续快写"时间窗：≤此间隔的下一笔才用 near_pad 放宽半径；慢停后仍按 REGION_NEAR 分区
 
@@ -167,7 +168,7 @@ function persistContentStroke(evt: AnnotationEvent, stroke: Stroke): void {
 }
 
 /** 区域收口的原因（进 dev 通道，定位"连续书写被切到新区"）。 */
-type FlushReason = 'far-stroke' | 'quiet-6s' | 'manual' | 'view-switch';
+type FlushReason = 'far-stroke' | `quiet-${number}ms` | 'manual' | 'view-switch';
 
 /** 收口当前区域 → 解析成一个 mark（异步识别在 resolveRegion 内）。reason/diag 镜像到遥测。 */
 export function flushRegion(reason: FlushReason = 'manual', diag: Record<string, number> | null = null): void {
@@ -211,7 +212,8 @@ function ingestStroke(evt: AnnotationEvent, stroke: Stroke): void {
   regLastAt = now;
   window.clearTimeout(regTimer);
   // 收口只靠两个真实信号：走到别处(far-stroke) 或 停笔满 REGION_QUIET。不设书写时长上限——慢写整段保持静默。
-  regTimer = window.setTimeout(() => flushRegion('quiet-6s'), REGION_QUIET_MS);
+  const quietMs = settings.regionQuietMs || 1000;
+  regTimer = window.setTimeout(() => flushRegion(`quiet-${quietMs}ms`), quietMs);
   bus.emit('region:update', { bbox: regBbox, near: regNearPad }); // dev 可视：实时画当前组装区域
 
   // 长停顿(~1–2min)无新笔 → 对整段 session 综合回复（连续标注期间界面静默）
