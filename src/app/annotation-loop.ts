@@ -296,6 +296,29 @@ function shouldSplitLeadingMarkup(batch: AnnotationEvent[], scored: ReturnType<t
   return !tailTemplateDominant;
 }
 
+/**
+ * 「先写内容 → 再圈起来（→ 接着写问题）」：圈在批次**中段**时 shouldSplitLeadingMarkup 管不到，
+ * 整团会被并成一个 mark、freeform 识别只捞出图里最清楚的一句，真实内容在识别那步丢掉。
+ * 判据：中段某笔是强圈选、且圈住了**它之前** ≥2 笔的中心 → 返回该笔下标，调用方在此处拆分。
+ * 汉字包围结构（口/回/国…）天然不满足——外框先画、圈不住"之前"的笔；只有圈自己刚写的内容才命中。
+ * 只认 circle：underline/arrow 出现在书写中段十有八九是长横/连笔误判，不拆。
+ */
+export function findMidMarkupIndex(batch: AnnotationEvent[], scored: ReturnType<typeof classifyScored>[]): number {
+  if (batch.length < 3) return -1;
+  for (let i = 1; i < batch.length; i++) {
+    const s = scored[i];
+    if (s.type !== 'circle' || s.score < 0.55) continue;
+    const poly = batch[i].stroke_points;
+    if (poly.length < 8) continue; // 点数太少不构成可信闭环
+    const enclosedPrior = batch.slice(0, i).filter((e) => {
+      const c = boxCenter(e.geometry.bbox);
+      return pointInPolygon(c.x, c.y, poly);
+    }).length;
+    if (enclosedPrior >= 2) return i;
+  }
+  return -1;
+}
+
 function bboxCorners(b: NormBBox): Pt[] {
   const [x, y, w, h] = b;
   return [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
@@ -376,6 +399,16 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
     gtrace({ page_id: pid, split: 'leading-markup', first: diagOf([scoredAll[0]])[0], tail: diagOf(scoredAll.slice(1)), flush: flushInfo });
     await resolveRegion(batch.slice(0, 1), strokes.slice(0, 1), { ...flushInfo, split: 'leading-markup:first' }, rawRefs.slice(0, 1));
     await resolveRegion(batch.slice(1), strokes.slice(1), { ...flushInfo, split: 'leading-markup:tail' }, rawRefs.slice(1));
+    return;
+  }
+  // 圈在中段（写内容→圈→接着问）：在圈处拆成 内容 / 圈选 /（如有）后续 三段，各自独立收口。
+  // 尾段递归——用户连圈两轮时后半段自己再拆；头段是被圈住的书写，天然不再命中。
+  const mid = findMidMarkupIndex(batch, scoredAll);
+  if (mid > 0) {
+    gtrace({ page_id: pid, split: 'mid-markup', at: mid, markup: diagOf([scoredAll[mid]])[0], head: diagOf(scoredAll.slice(0, mid)), tail: diagOf(scoredAll.slice(mid + 1)), flush: flushInfo });
+    await resolveRegion(batch.slice(0, mid), strokes.slice(0, mid), { ...flushInfo, split: 'mid-markup:content' }, rawRefs.slice(0, mid));
+    await resolveRegion(batch.slice(mid, mid + 1), strokes.slice(mid, mid + 1), { ...flushInfo, split: 'mid-markup:markup' }, rawRefs.slice(mid, mid + 1));
+    if (batch.length > mid + 1) await resolveRegion(batch.slice(mid + 1), strokes.slice(mid + 1), { ...flushInfo, split: 'mid-markup:tail' }, rawRefs.slice(mid + 1));
     return;
   }
 
