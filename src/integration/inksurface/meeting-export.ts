@@ -13,9 +13,9 @@
 import { getMeeting, getCachedMinute, getFoldedMarksByContext } from '../../local/store';
 import { parseSrtTranscript } from '../panel-feishu/align';
 import { buildSegments, buildSegmentMarks, digestCacheKey, type RecapSegment } from '../panel-feishu/segment';
-import { finalize, clampNormBBox, enrichExportTags, INK_PLACEHOLDER_DRAWING, INK_PLACEHOLDER_HANDWRITING } from '../../knowledge/builder';
+import { finalize, clampNormBBox, enrichExportTags, entityFactsFrom, INK_PLACEHOLDER_DRAWING, INK_PLACEHOLDER_HANDWRITING, type EntityMembershipFact } from '../../knowledge/builder';
 import { pageIdFor } from '../../core/ids';
-import type { PersistedMeeting } from '../../core/store-format';
+import type { LedgerEntityRef, PersistedMeeting } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
 import {
   buildInkloopDocUri,
@@ -52,6 +52,7 @@ export interface MeetingL1Export {
     summaryIncluded: boolean; annotationKoCount: number; skippedKoCount: number;
     transcriptMissing: boolean;
   };
+  entityFacts: EntityMembershipFact[]; // 存储原生拓扑：会议手写笔的实体关联事实（vault-collect 跨实体聚合用）
 }
 
 const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
@@ -70,7 +71,15 @@ export async function buildMeetingL1Export(meetingId: string, opts: MeetingExpor
     if (cached?.srt) cues = parseSrtTranscript(cached.srt);
   }
   const marksRaw = (await getFoldedMarksByContext(`mtg_${meetingId}`)).filter((mk) => !mk.is_tombstone).sort((a, b) => a.abs_timestamp - b.abs_timestamp);
-  const marks = marksRaw.map((mk) => ({ mark_id: mk.mark_id, abs_timestamp: mk.abs_timestamp, feature_type: mk.feature_type, marked_text: mk.marked_text, page_index: mk.page_index }));
+  const marks = marksRaw.map((mk) => ({
+    mark_id: mk.mark_id,
+    abs_timestamp: mk.abs_timestamp,
+    feature_type: mk.feature_type,
+    marked_text: mk.marked_text,
+    page_index: mk.page_index,
+    entity_refs: mk.entity_refs,
+    topic_refs: mk.topic_refs,
+  }));
   return assembleMeetingL1Export({ meeting, cues, marks }, opts);
 }
 
@@ -78,7 +87,10 @@ export async function buildMeetingL1Export(meetingId: string, opts: MeetingExpor
 export interface MeetingExportInput {
   meeting: PersistedMeeting;
   cues: ReturnType<typeof parseSrtTranscript>;
-  marks: { mark_id: string; abs_timestamp: number; feature_type?: string; marked_text?: string; page_index?: number }[];
+  marks: {
+    mark_id: string; abs_timestamp: number; feature_type?: string; marked_text?: string; page_index?: number;
+    entity_refs?: LedgerEntityRef[]; topic_refs?: LedgerEntityRef[]; // 存储原生拓扑：会中手写笔的实体声明（P4 采集入口写入·目前多数缺）
+  }[];
 }
 
 /** 纯核心：会议数据 → L1 导出（**无 store**·crypto.subtle 在 Node 可用 → 可 vitest + 过对方 validator）。 */
@@ -161,7 +173,12 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
   const segOfMark = new Map<string, number>();
   segments.forEach((s, si) => { for (const mk of s.marks) segOfMark.set(mk.mark_id, si); });
 
+  // buildSegmentMarks 产的 SegmentMark 窄化掉了 entity_refs/topic_refs（segment.ts 是更广泛复用的共享模块，
+  // 不为此改它的输出形状）——按 mark_id 回查原始账本条目的 refs。
+  const refsByMarkId = new Map(input.marks.map((m) => [m.mark_id, { entity_refs: m.entity_refs, topic_refs: m.topic_refs }] as const));
+
   let annotationKoCount = 0;
+  const entityFacts: EntityMembershipFact[] = [];
   const blockById = new Map(blocks.map((b) => [b.block_id, b] as const));
   for (const mk of segMarks) {
     const si = segOfMark.get(mk.mark_id);
@@ -182,12 +199,17 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     kos.push(ko);
     annotationKoCount++;
     if (anchorBlock) anchorBlock.knowledge_object_ids = [...new Set([...anchorBlock.knowledge_object_ids, ko.ko_id])].sort();
+    const refs = refsByMarkId.get(mk.mark_id);
+    entityFacts.push(...entityFactsFrom(refs?.entity_refs, ko.ko_id, documentId, mk.mark_id, createdAt));
+    entityFacts.push(...entityFactsFrom(refs?.topic_refs, ko.ko_id, documentId, mk.mark_id, createdAt));
   }
 
   // ⑤ 过导出闸 + taxonomy 标签富化（待办1·mode=meeting/会议 slug/会议日期 都从 KO 自身派生·createdAt 已是会议日期）+ 信封。
   const exportable = await Promise.all(kos.filter(isExportableKo).map((ko) => enrichExportTags(ko)));
   const skippedKoCount = kos.length - exportable.length;
   if (skippedKoCount) warnings.push(`${skippedKoCount} 个 KO 被导出闸挡掉（隐私/状态/空正文）`);
+  const exportableIds = new Set(exportable.map((ko) => ko.ko_id));
+  const exportedEntityFacts = entityFacts.filter((f) => exportableIds.has(f.ko_id)); // 被闸挡掉的 KO，其实体关联也不进导出图
 
   const knowledgeExport: KnowledgeExportEnvelope = {
     schema_version: KO_EXPORT_SCHEMA_VERSION,
@@ -203,6 +225,7 @@ export async function assembleMeetingL1Export(input: MeetingExportInput, opts: M
     meetingId, documentId, documentTitle, generatedAt: generated_at,
     knowledgeExport, documentProjections, warnings,
     diagnostics: { cueCount: cues.length, markCount: segMarks.length, segmentCount: segments.length, summaryIncluded, annotationKoCount, skippedKoCount, transcriptMissing },
+    entityFacts: exportedEntityFacts,
   };
 }
 

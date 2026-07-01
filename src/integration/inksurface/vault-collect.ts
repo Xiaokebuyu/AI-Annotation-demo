@@ -5,13 +5,19 @@
  * dev-only（__inkloop.exportVaultBundle）。空实体（无可导出 KO 且无 projection 块）跳过——不写空壳。
  */
 
-import { listAllMeetings, listBooks, listDiaries } from '../../local/store';
-import { buildConceptLayer, type ConceptKnowledgeObjectFactory, entityModeOf } from 'ink-surface-sdk/export-core';
+import { getDoc, getMeeting, listAllMeetings, listBooks, listCanonicalEntities, listDiaries } from '../../local/store';
+import {
+  buildConceptLayer,
+  buildConceptLayerFromStoredMemberships,
+  type ConceptKnowledgeObjectFactory,
+  type ConceptLayer,
+  entityModeOf,
+} from 'ink-surface-sdk/export-core';
 import { makeConceptExtractor } from './concept-extract';
 import { buildL1Export } from './index';
 import { buildMeetingL1Export } from './meeting-export';
 import { assembleVaultBundle, type EntityExport, type VaultExportBundle } from './vault-export';
-import { finalize, isInkPlaceholderBody } from '../../knowledge/builder';
+import { finalize, isInkPlaceholderBody, projectEntities, type EntityMembershipFact } from '../../knowledge/builder';
 
 /** 概念 KO 工厂：SDK 装配出的概念 draft → finalize 的 Draft（确定性 ko_id + content_hash·与其他 KO 同口径过 validator）。
  *  SDK 只调本工厂、不自己建 KO（也不碰 LLM·抽取走 makeConceptExtractor）。 */
@@ -38,14 +44,48 @@ function nonEmpty(ex: { knowledgeExport: { objects: unknown[] }; documentProject
  * 否则空白页涂鸦在 Obsidian 刷屏（实测一篇日记 100+ 个占位淹没真内容）。笔迹仍在账本·不丢·将来渲成墨迹再恢复。
  * 在 nonEmpty 判定**之前**过滤 → 纯涂鸦实体（过滤后无 KO 且无 projection）自然跳过、不留空壳。
  * 会议侧 body=占位+「（约 X 处手写）」带时间上下文·不恰等占位·不命中·不误伤。详见记忆 inkloop-obsidian-clean-vault。
+ * ⚠️例外（存储原生拓扑）：占位 KO 若带 entity_refs/topic_refs（用户明确"归类"过这条笔迹），不能被这条过滤悄悄吞掉——
+ * 那是用户显式声明的关系，过滤掉=无声丢失。判据＝该 KO 是否有对应的 entityFacts。
  */
-function dropInkPlaceholders<T extends { knowledgeExport: { objects: { body_md: string }[] } }>(ex: T): T {
-  ex.knowledgeExport.objects = ex.knowledgeExport.objects.filter((ko) => !isInkPlaceholderBody(ko.body_md));
+export function dropInkPlaceholders<T extends { knowledgeExport: { objects: { ko_id: string; body_md: string }[] }; entityFacts?: EntityMembershipFact[] }>(ex: T): T {
+  const refKoIds = new Set((ex.entityFacts ?? []).map((f) => f.ko_id));
+  const kept = new Set<string>();
+  ex.knowledgeExport.objects = ex.knowledgeExport.objects.filter((ko) => {
+    const keep = !isInkPlaceholderBody(ko.body_md) || refKoIds.has(ko.ko_id);
+    if (keep) kept.add(ko.ko_id);
+    return keep;
+  });
+  if (ex.entityFacts) ex.entityFacts = ex.entityFacts.filter((f) => kept.has(f.ko_id));
   return ex;
 }
 
+/** 合并「存储原生拓扑层」与「legacy LLM 概念层」成渲染器吃的单一 ConceptLayer。两者字段形状一致（P1），
+ *  逐字段并集去重；任一缺失直接透传另一个。concepts/hubs 都并（渲染器 hub 来源=hubs??concepts 映射，
+ *  只并 hubs 会让 llm 的 concepts 在没有 hubs 时静默消失，所以两边都显式转成 hub 再并）。 */
+export function mergeConceptLayers(stored: ConceptLayer | undefined, llm: ConceptLayer | undefined): ConceptLayer | undefined {
+  if (!stored && !llm) return undefined;
+  if (!stored) return llm;
+  if (!llm) return stored;
+
+  const mergeRecord = (a: Record<string, string[]> | undefined, b: Record<string, string[]> | undefined): Record<string, string[]> => {
+    const out: Record<string, string[]> = { ...(a ?? {}) };
+    for (const [k, v] of Object.entries(b ?? {})) out[k] = [...new Set([...(out[k] ?? []), ...v])];
+    return out;
+  };
+
+  return {
+    concepts: [...stored.concepts, ...llm.concepts],
+    hubs: [...(stored.hubs ?? []), ...(llm.hubs ?? llm.concepts.map((ko) => ({ title: ko.title })))],
+    assignmentsByKo: mergeRecord(stored.assignmentsByKo, llm.assignmentsByKo),
+    membersByConcept: mergeRecord(stored.membersByConcept, llm.membersByConcept),
+    localByKo: mergeRecord(stored.localByKo, llm.localByKo),
+    entityIdsByKo: mergeRecord(stored.entityIdsByKo, llm.entityIdsByKo),
+    membersByEntity: mergeRecord(stored.membersByEntity, llm.membersByEntity),
+  };
+}
+
 export async function collectVaultBundle(
-  opts: { generatedAt?: string; appVersion?: string; concepts?: boolean; conceptModel?: string } = {},
+  opts: { generatedAt?: string; appVersion?: string; concepts?: boolean; conceptModel?: string; storedEntities?: boolean } = {},
 ): Promise<VaultExportBundle> {
   const generatedAt = opts.generatedAt ?? new Date().toISOString();
   const o = { generatedAt, appVersion: opts.appVersion };
@@ -57,28 +97,66 @@ export async function collectVaultBundle(
     if (entityModeOf(b.document_id) !== 'reading') continue;
     const ex = dropInkPlaceholders(await buildL1Export(b.document_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'reading', documentId: b.document_id, documentTitle: b.filename || b.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: b.saved_at, warnings: ex.warnings });
+      exports.push({ mode: 'reading', documentId: b.document_id, documentTitle: b.filename || b.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: b.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts });
     }
   }
   for (const d of await listDiaries()) {
     const ex = dropInkPlaceholders(await buildL1Export(d.document_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'diary', documentId: d.document_id, documentTitle: d.filename || d.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: d.saved_at, warnings: ex.warnings });
+      exports.push({ mode: 'diary', documentId: d.document_id, documentTitle: d.filename || d.document_id, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: d.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts });
     }
   }
   for (const m of await listAllMeetings()) {
     const ex = dropInkPlaceholders(await buildMeetingL1Export(m.meeting_id, o));
     if (nonEmpty(ex)) {
-      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings });
+      exports.push({ mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts });
     }
   }
 
-  // 概念层（语义跨链）：收齐全部实体的 KO 后跑一遍 LLM 抽概念 → 跨文档桥成概念枢纽。
-  // 失败/空不影响其余导出（buildConceptLayer 内部对每条容错·extractFn 失败返 []）。
   const allKos = exports.flatMap((e) => e.knowledgeExport.objects);
-  const conceptLayer = opts.concepts === false
+
+  // 存储原生拓扑层（零 LLM）：账本 entity_refs/topic_refs 的确定性投影。concepts:false 时本地导出仍有这层。
+  let storedLayer: ConceptLayer | undefined;
+  if (opts.storedEntities) {
+    const allEntityFacts = exports.flatMap((e) => e.entityFacts ?? []);
+    const registry = await listCanonicalEntities();
+    const { entities, memberships } = projectEntities(allEntityFacts, registry);
+    storedLayer = buildConceptLayerFromStoredMemberships(allKos, entities, memberships);
+  }
+
+  // 概念层（语义跨链·可选）：收齐全部实体的 KO 后跑一遍 LLM 抽概念 → 跨文档桥成概念枢纽。
+  // 失败/空不影响其余导出（buildConceptLayer 内部对每条容错·extractFn 失败返 []）。
+  const llmLayer = opts.concepts === false
     ? undefined
     : await buildConceptLayer(allKos, makeConceptExtractor({ model: opts.conceptModel }), createConceptKo);
 
+  const conceptLayer = mergeConceptLayers(storedLayer, llmLayer);
+
   return assembleVaultBundle(exports, { generatedAt, appVersion: opts.appVersion, conceptLayer });
+}
+
+/** 单实体引用（会议用 meetingId 找·书/日记用 documentId 找——两者查找键不同，故分支而非共用 id 字段）。 */
+export type VaultEntityRef = { mode: 'meeting'; meetingId: string } | { mode: 'reading' | 'diary'; documentId: string };
+
+/**
+ * 单实体收集（阶段⑤·按需导出预检用）：只建这一个实体的 L1 导出切片，不装配整包 bundle（MOC/概念层是跨实体的，
+ * 单实体天然没有）。用于「导出到 Obsidian」按钮判断这场会议/这本书有没有可导出内容 + 拿标题。
+ * ⚠️真正发布仍要走 collectVaultBundle 整包通道（见其头注）——panel `latest release` 是全量快照语义，
+ * 单独发一个实体的 release 会把其它实体从 Obsidian 端删掉。单实体最小化发布待 panel 加实体端点后才能做。
+ */
+export async function collectVaultEntity(ref: VaultEntityRef, opts: { generatedAt?: string; appVersion?: string } = {}): Promise<EntityExport | null> {
+  const generatedAt = opts.generatedAt ?? new Date().toISOString();
+  const o = { generatedAt, appVersion: opts.appVersion };
+  if (ref.mode === 'meeting') {
+    const m = await getMeeting(ref.meetingId);
+    if (!m) return null;
+    const ex = dropInkPlaceholders(await buildMeetingL1Export(ref.meetingId, o));
+    if (!nonEmpty(ex)) return null;
+    return { mode: 'meeting', documentId: ex.documentId, documentTitle: ex.documentTitle, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: m.started_at ?? m.scheduled_at ?? m.created_at, warnings: ex.warnings, entityFacts: ex.entityFacts };
+  }
+  const doc = await getDoc(ref.documentId);
+  if (!doc) return null;
+  const ex = dropInkPlaceholders(await buildL1Export(ref.documentId, o));
+  if (!nonEmpty(ex)) return null;
+  return { mode: ref.mode, documentId: ref.documentId, documentTitle: doc.filename || ref.documentId, knowledgeExport: ex.knowledgeExport, documentProjections: ex.documentProjections, activityDate: doc.saved_at, warnings: ex.warnings, entityFacts: ex.entityFacts };
 }

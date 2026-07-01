@@ -11,9 +11,10 @@
  * ko_id / content_hash 用**确定性**派生（非随机 ULID）：KO 不落库、每次重建，随机 id 会让身份漂移、
  * 毁掉 content_hash 去重；确定性派生（hash 自稳定源 id）才真满足契约要的"跨端稳定身份"。
  */
-import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
+import type { LedgerEntityRef, PersistedAiTurn, PersistedEntity, PersistedMark } from '../core/store-format';
 import { getBookAiTurns, getDoc, getFoldedMarks, listBooks } from '../local/store';
 import { type EntityMode, taxonomyTags } from 'ink-surface-sdk/export-core';
+import type { EntityMembership, KnowledgeEntity } from 'ink-surface-sdk/knowledge-schema';
 import {
   KO_SCHEMA_VERSION,
   type KnowledgeKind,
@@ -191,19 +192,51 @@ export const INK_PLACEHOLDER_HANDWRITING = '（未识别手写）';
  *  ⚠️只判恰等——会议侧 body=占位+「（约 X 处手写）」带时间上下文·不命中·不过滤。笔迹仍在账本·不丢·将来渲成墨迹。 */
 export const isInkPlaceholderBody = (body: string): boolean => body === INK_PLACEHOLDER_DRAWING || body === INK_PLACEHOLDER_HANDWRITING;
 
+/* ── 存储原生拓扑：账本 entity_refs → 确定性成员关系（零 LLM）───────────────── */
+
+/** 归一化实体 id（NFKC + 折大小写 + 转 slug）。写 entity_refs 的一方（采集声明/后台 suggester）用它算 canonical entity_id；
+ *  这里也用它兜底——facts 里若混进未归一的裸 display（不该发生，但账本数据不受 TS 类型约束，防御一下）。 */
+export function normalizeEntityId(input: string): string {
+  return input.normalize('NFKC').trim().toLocaleLowerCase('en-US').replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '') || 'untitled';
+}
+
+/** 一条"某 KO 关联到某实体"的确定性事实（side-channel，不进任何 KO 字段·不碰 content_hash）。
+ *  由账本条目的 entity_refs/topic_refs 直接映射而来——真相已经在账本里，这里只是投影，不计算/不猜测。 */
+export interface EntityMembershipFact {
+  entity_id: string;
+  display?: string;
+  ko_id: string;
+  source_document_id: string;
+  source_entry_id: string;
+  source: LedgerEntityRef['source'];
+  created_at: string; // 决定 entity 首次出现时间的排序键；取 ref 所在条目的 source_created_at ?? created_at
+}
+
+/** refs（mark/ai_turn 的 entity_refs 或 topic_refs）→ 事实数组。builder 内外都用它映射，别重复实现同一逻辑（如 meeting-export）。 */
+export function entityFactsFrom(refs: LedgerEntityRef[] | undefined, koId: string, documentId: string, sourceEntryId: string, createdAt: string): EntityMembershipFact[] {
+  return (refs ?? []).map((ref) => ({ entity_id: ref.entity_id, display: ref.display, ko_id: koId, source_document_id: documentId, source_entry_id: sourceEntryId, source: ref.source, created_at: createdAt }));
+}
+
 /* ── 纯转换核心 ──────────────────────────────────────────────────────────── */
 
+export interface KnowledgeProjection {
+  objects: KnowledgeObject[];
+  entityFacts: EntityMembershipFact[];
+}
+
 /**
- * 折叠 marks + ai_turns → KnowledgeObject[]。纯函数（除 crypto.subtle）：
+ * 折叠 marks + ai_turns → KnowledgeObject[] + 存储原生实体成员事实。纯函数（除 crypto.subtle）：
  *   1) 每条非 folded 的 ai_turn → ai_note（trigger=discussion 时 qa），source 取 ai_turn 自身锚点、quote 取锚 mark；
- *      成功产出才把锚到的活 mark 记"已消费"（空内容轮不消费，其 mark 仍单独导出）。
+ *      成功产出才把锚到的活 mark 记"已消费"（空内容轮不消费，其 mark 仍单独导出）。产出的 KO 关联到
+ *      ai_turn 自身 + 全部被消费锚 mark 的 entity_refs/topic_refs（用户在手写或 AI 回复任一处"归类"都算数）。
  *   2) 未被任何 ai_turn 消费的活 mark → excerpt（markup）/ annotation（手写/画）；空内容笔不产 KO。
  */
-export async function assembleKnowledgeObjects(input: BuilderInput): Promise<KnowledgeObject[]> {
+export async function assembleKnowledgeProjection(input: BuilderInput): Promise<KnowledgeProjection> {
   const { document_id, document_title, marks, aiTurns } = input;
   const markById = new Map(marks.map((m) => [m.mark_id, m]));
   const consumed = new Set<string>();
   const out: KnowledgeObject[] = [];
+  const entityFacts: EntityMembershipFact[] = [];
 
   // 1) ai_turns → ai_note / qa（成功产出才把锚 mark 记为"已消费"，并进本条不再单独导出）
   for (const t of aiTurns) {
@@ -212,30 +245,38 @@ export async function assembleKnowledgeObjects(input: BuilderInput): Promise<Kno
     const body = t.overlay_state === 'edited' && t.user_edited_text != null ? t.user_edited_text : t.ai_reply;
     if (!body) continue; // 空内容轮不产 KO，且**不消费**锚 mark → 该 mark 仍由下方循环单独导出（不丢）
     const anchorIds = t.anchor?.mark_ids ?? [];
-    for (const id of anchorIds) if (markById.has(id)) consumed.add(id); // 确认会产出后再消费
-    const anchorMark = anchorIds.map((id) => markById.get(id)).find((m): m is PersistedMark => !!m);
-    out.push(
-      await finalize({
-        stableKey: `ai_turn:${document_id}:${t.overlay_id}`, // 含 doc 命名空间·防全库聚合短 id 跨书碰撞
-        kind: t.trigger === 'discussion' ? 'qa' : 'ai_note',
-        documentId: document_id,
-        documentTitle: document_title,
-        // source 统一取 ai_turn 自身锚点（page/refs/bbox 同源·session 级聚合），quote 取锚 mark 所标原文
-        pageId: t.page_id,
-        pageIndex: t.page_index,
-        objectRefs: t.anchor?.object_refs ?? [],
-        bbox: t.overlay?.geometry?.anchor_bbox,
-        quote: anchorMark?.marked_text || undefined,
-        body,
-        provenance: {
-          created_from: 'ai_turn',
-          mark_ids: anchorIds.filter((id) => markById.has(id)),
-          ai_turn_ids: [t.entry_id],
-        },
-        status: statusFromOverlay(t.overlay_state),
-        createdAt: t.created_at,
-      }),
-    );
+    const anchorMarks = anchorIds.map((id) => markById.get(id)).filter((m): m is PersistedMark => !!m);
+    for (const m of anchorMarks) consumed.add(m.mark_id); // 确认会产出后再消费
+    const anchorMark = anchorMarks[0];
+    const ko = await finalize({
+      stableKey: `ai_turn:${document_id}:${t.overlay_id}`, // 含 doc 命名空间·防全库聚合短 id 跨书碰撞
+      kind: t.trigger === 'discussion' ? 'qa' : 'ai_note',
+      documentId: document_id,
+      documentTitle: document_title,
+      // source 统一取 ai_turn 自身锚点（page/refs/bbox 同源·session 级聚合），quote 取锚 mark 所标原文
+      pageId: t.page_id,
+      pageIndex: t.page_index,
+      objectRefs: t.anchor?.object_refs ?? [],
+      bbox: t.overlay?.geometry?.anchor_bbox,
+      quote: anchorMark?.marked_text || undefined,
+      body,
+      provenance: {
+        created_from: 'ai_turn',
+        mark_ids: anchorIds.filter((id) => markById.has(id)),
+        ai_turn_ids: [t.entry_id],
+      },
+      status: statusFromOverlay(t.overlay_state),
+      createdAt: t.created_at,
+    });
+    out.push(ko);
+    const turnCreatedAt = t.source_created_at ?? t.created_at;
+    entityFacts.push(...entityFactsFrom(t.entity_refs, ko.ko_id, document_id, t.entry_id, turnCreatedAt));
+    entityFacts.push(...entityFactsFrom(t.topic_refs, ko.ko_id, document_id, t.entry_id, turnCreatedAt));
+    for (const m of anchorMarks) {
+      const markCreatedAt = m.source_created_at ?? m.created_at;
+      entityFacts.push(...entityFactsFrom(m.entity_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
+      entityFacts.push(...entityFactsFrom(m.topic_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
+    }
   }
 
   // 2) 独立 mark → excerpt / annotation
@@ -248,43 +289,126 @@ export async function assembleKnowledgeObjects(input: BuilderInput): Promise<Kno
     const inkBody = (m.feature_type === 'drawing' ? INK_PLACEHOLDER_DRAWING : INK_PLACEHOLDER_HANDWRITING);
     const body = kind === 'excerpt' ? m.marked_text || '' : transcript || (m.marked_text || '').trim() || inkBody;
     if (!body) continue; // 仅 excerpt 无所标原文时为空→跳；annotation 永有占位正文（不丢手写）
-    out.push(
-      await finalize({
-        stableKey: `mark:${document_id}:${m.mark_id}`,
-        kind,
-        documentId: document_id,
-        documentTitle: document_title,
-        pageId: m.page_id,
-        pageIndex: m.page_index,
-        objectRefs: m.hmp?.target_object_refs ?? [],
-        bbox: m.bbox,
-        quote: m.marked_text || undefined,
-        body,
-        provenance: { created_from: 'mark', mark_ids: [m.mark_id] },
-        status: 'export_ready',
-        createdAt: m.created_at,
-      }),
-    );
+    const ko = await finalize({
+      stableKey: `mark:${document_id}:${m.mark_id}`,
+      kind,
+      documentId: document_id,
+      documentTitle: document_title,
+      pageId: m.page_id,
+      pageIndex: m.page_index,
+      objectRefs: m.hmp?.target_object_refs ?? [],
+      bbox: m.bbox,
+      quote: m.marked_text || undefined,
+      body,
+      provenance: { created_from: 'mark', mark_ids: [m.mark_id] },
+      status: 'export_ready',
+      createdAt: m.created_at,
+    });
+    out.push(ko);
+    const markCreatedAt = m.source_created_at ?? m.created_at;
+    entityFacts.push(...entityFactsFrom(m.entity_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
+    entityFacts.push(...entityFactsFrom(m.topic_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
   }
 
-  return out.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.ko_id.localeCompare(b.ko_id));
+  return {
+    objects: out.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.ko_id.localeCompare(b.ko_id)),
+    entityFacts: entityFacts.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.entity_id.localeCompare(b.entity_id) || a.ko_id.localeCompare(b.ko_id)),
+  };
+}
+
+/** 折叠 marks + ai_turns → KnowledgeObject[]（不含实体拓扑；纯 KO 消费者用这个，与既有调用点行为完全一致）。 */
+export async function assembleKnowledgeObjects(input: BuilderInput): Promise<KnowledgeObject[]> {
+  return (await assembleKnowledgeProjection(input)).objects;
+}
+
+/** 沿 status='merged'+merged_into 链走到底，解析出当前活着的 canonical entity_id（环守卫：撞环就地停）。 */
+function resolveEntityRef(entityId: string, registryById: Map<string, PersistedEntity>): string {
+  let current = entityId;
+  const seen = new Set<string>();
+  for (;;) {
+    const rec = registryById.get(current);
+    if (!rec || rec.status !== 'merged' || !rec.merged_into) return current;
+    if (seen.has(current)) return current; // 环：放弃继续解析，停在当前，不死循环
+    seen.add(current);
+    current = rec.merged_into;
+  }
+}
+
+export interface EntityProjection {
+  entities: KnowledgeEntity[];
+  memberships: EntityMembership[];
+}
+
+/**
+ * facts + canonical_entities 注册表快照 → 确定性 KnowledgeEntity[] + EntityMembership[]。纯函数、零 LLM：
+ *   · 按 registry 的 status='merged' 链把每条 fact 的 entity_id 重映射到活的实体（合并不改历史 refs）。
+ *   · 成员边按 (resolved entity_id, ko_id) 去重；entity 优先取 registry 记录（display/kind/aliases/时间），
+ *     registry 缺记录时用 fact 里最早出现的 display 兜底——refs 是唯一真相源，registry 暂缺不该让关系消失。
+ *   · 只有至少一条活 fact 指向的实体才出现在结果里（合并掉的旧实体天然不再是 hub，无需特判排除）。
+ */
+export function projectEntities(facts: readonly EntityMembershipFact[], registry: readonly PersistedEntity[]): EntityProjection {
+  const registryById = new Map(registry.map((e) => [e.entity_id, e] as const));
+  const resolved = facts.map((f) => ({ ...f, entity_id: resolveEntityRef(f.entity_id, registryById) }));
+
+  const membershipByKey = new Map<string, EntityMembership>();
+  const earliestByEntity = new Map<string, { display: string; createdAt: string }>();
+
+  for (const f of resolved) {
+    const key = `${f.entity_id} ${f.ko_id}`;
+    if (!membershipByKey.has(key)) {
+      membershipByKey.set(key, { schema_version: 'inkloop.entity_membership.v1', entity_id: f.entity_id, ko_id: f.ko_id, source: f.source });
+    }
+    const cur = earliestByEntity.get(f.entity_id);
+    const display = f.display ?? registryById.get(f.entity_id)?.display ?? f.entity_id;
+    if (!cur || f.created_at < cur.createdAt) earliestByEntity.set(f.entity_id, { display, createdAt: f.created_at });
+  }
+
+  const createdFromOf = (reg: PersistedEntity | undefined): KnowledgeEntity['provenance']['created_from'] => {
+    const first = reg?.provenance.entries[0]?.source;
+    return first === 'llm_suggestion' || first === 'import' || first === 'merge' ? first : 'manual';
+  };
+
+  const entities: KnowledgeEntity[] = [...earliestByEntity.keys()].sort().map((entityId) => {
+    const reg = registryById.get(entityId);
+    const fallback = earliestByEntity.get(entityId)!;
+    return {
+      schema_version: 'inkloop.knowledge_entity.v1',
+      entity_id: entityId,
+      kind: reg?.kind ?? 'entity',
+      display: reg?.display ?? fallback.display,
+      ...(reg?.aliases ? { aliases: reg.aliases } : {}),
+      provenance: { created_from: createdFromOf(reg) },
+      ...(reg?.status ? { status: reg.status } : {}),
+      ...(reg?.merged_into ? { merged_into: reg.merged_into } : {}),
+      created_at: reg?.created_at ?? fallback.createdAt,
+      updated_at: reg?.updated_at ?? fallback.createdAt,
+    };
+  });
+
+  const memberships = [...membershipByKey.values()].sort((a, b) => a.entity_id.localeCompare(b.entity_id) || a.ko_id.localeCompare(b.ko_id));
+  return { entities, memberships };
 }
 
 /* ── store 取数包装（运行态 / 导出）──────────────────────────────────────── */
 
-/** 取一本书的真相切片、折叠成 KO[]。 */
-export async function buildKnowledgeObjects(documentId: string): Promise<KnowledgeObject[]> {
+/** 取一本书的真相切片、折叠成 KO[] + 实体成员事实。 */
+export async function buildKnowledgeProjection(documentId: string): Promise<KnowledgeProjection> {
   const [doc, marks, aiTurns] = await Promise.all([
     getDoc(documentId),
     getFoldedMarks(documentId),
     getBookAiTurns(documentId),
   ]);
-  return assembleKnowledgeObjects({
+  return assembleKnowledgeProjection({
     document_id: documentId,
     document_title: doc?.filename ?? documentId,
     marks,
     aiTurns,
   });
+}
+
+/** 取一本书的真相切片、折叠成 KO[]（不含实体拓扑；与既有调用点行为完全一致）。 */
+export async function buildKnowledgeObjects(documentId: string): Promise<KnowledgeObject[]> {
+  return (await buildKnowledgeProjection(documentId)).objects;
 }
 
 /** 导出一本书的 KO 列表为 JSON 文本（契约 §8 v1：导出 JSON 给 FS 适配器扫）。 */

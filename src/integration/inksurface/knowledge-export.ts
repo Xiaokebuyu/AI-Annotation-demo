@@ -3,7 +3,7 @@
  * 取我们已产的 KnowledgeObject[]（builder·ko_id 已是 Crockford-26、content_hash 已与对方 canonicalize 对齐），
  * 过对方导出闸（isExportableKo），套信封。privacy gate：只导出 export_allowed + 可导出状态 + 正文非空的 KO。
  */
-import { buildKnowledgeObjects, enrichExportTags } from '../../knowledge/builder';
+import { buildKnowledgeProjection, enrichExportTags, type EntityMembershipFact } from '../../knowledge/builder';
 import type { KnowledgeObject } from '../../knowledge/knowledge-object';
 import {
   isExportableKnowledgeObject as isExportableKo,
@@ -27,13 +27,15 @@ function skipReason(ko: KnowledgeObject): string {
 export async function buildKnowledgeExport(
   documentId: string,
   opts: ExportOpts = {},
-): Promise<{ envelope: KnowledgeExportEnvelope; exportable: KnowledgeObject[]; skipped: SkippedKo[] }> {
+): Promise<{ envelope: KnowledgeExportEnvelope; exportable: KnowledgeObject[]; skipped: SkippedKo[]; entityFacts: EntityMembershipFact[] }> {
   const generated_at = opts.generatedAt ?? new Date().toISOString();
-  const all = await buildKnowledgeObjects(documentId);
+  const { objects: all, entityFacts: rawFacts } = await buildKnowledgeProjection(documentId);
   // 富化 taxonomy 标签（mode/实体/日期·待办1 全量感知）：从 KO 自身 document_id/title/created_at 派生。
   // 在过闸后富化（被挡掉的不必富化）；enriched 也传给 projection/runtime——ko_id 不变·链接仍有效。
   const exportable = await Promise.all(all.filter(isExportableKo).map((ko) => enrichExportTags(ko))); // local_only / 非可导出状态 / 空正文 都挡在外
   const skipped: SkippedKo[] = all.filter((ko) => !isExportableKo(ko)).map((ko) => ({ ko_id: ko.ko_id, kind: ko.kind, reason: skipReason(ko) }));
+  const exportableIds = new Set(exportable.map((ko) => ko.ko_id));
+  const entityFacts = rawFacts.filter((f) => exportableIds.has(f.ko_id)); // 被导出闸挡掉的 KO，其实体关联也不该出现在导出图里
   const envelope: KnowledgeExportEnvelope = {
     schema_version: 'inkloop.knowledge_export.v1',
     export_id: stampExportId('export', documentId, generated_at),
@@ -41,5 +43,5 @@ export async function buildKnowledgeExport(
     source: { app: 'inkloop', app_version: opts.appVersion ?? '0.1.0', document_id: documentId },
     objects: exportable,
   };
-  return { envelope, exportable, skipped };
+  return { envelope, exportable, skipped, entityFacts };
 }

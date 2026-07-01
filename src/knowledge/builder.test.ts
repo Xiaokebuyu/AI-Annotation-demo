@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { HMP, InferenceView, ScreenOverlay } from '../core/contracts';
-import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
-import { assembleKnowledgeObjects, type BuilderInput, enrichExportTags, finalize, INK_PLACEHOLDER_DRAWING, INK_PLACEHOLDER_HANDWRITING, isInkPlaceholderBody } from './builder';
+import type { LedgerEntityRef, PersistedAiTurn, PersistedEntity, PersistedMark } from '../core/store-format';
+import {
+  assembleKnowledgeObjects,
+  assembleKnowledgeProjection,
+  type BuilderInput,
+  enrichExportTags,
+  finalize,
+  INK_PLACEHOLDER_DRAWING,
+  INK_PLACEHOLDER_HANDWRITING,
+  isInkPlaceholderBody,
+  normalizeEntityId,
+  projectEntities,
+} from './builder';
 import { KO_SCHEMA_VERSION, type KnowledgeObject } from './knowledge-object';
 
 /* ── 合成账本工厂（只填 builder 真读的字段，重型嵌套类型给最小占位）──────── */
@@ -362,5 +373,113 @@ describe('isInkPlaceholderBody（笔迹占位判定·vault 过渡过滤用）', 
     const placeholder = kos.find((k) => k.kind === 'annotation');
     expect(placeholder?.body_md).toBe(INK_PLACEHOLDER_DRAWING);
     expect(isInkPlaceholderBody(placeholder!.body_md)).toBe(true);
+  });
+});
+
+describe('normalizeEntityId', () => {
+  it('NFKC + 折大小写 + 转 slug', () => {
+    expect(normalizeEntityId('Cache Coherence')).toBe('cache-coherence');
+    expect(normalizeEntityId('  缓存 一致性  ')).toBe('缓存-一致性');
+    expect(normalizeEntityId('Ｃache　Coherence')).toBe('cache-coherence'); // 全角折半角同键
+  });
+  it('全非法字符兜底 untitled，不产空串', () => {
+    expect(normalizeEntityId('   ')).toBe('untitled');
+    expect(normalizeEntityId('***')).toBe('untitled');
+  });
+});
+
+const ref = (entity_id: string, over: Partial<LedgerEntityRef> = {}): LedgerEntityRef => ({ entity_id, source: 'declared', ...over });
+
+describe('assembleKnowledgeProjection（存储原生拓扑：账本 entity_refs → 确定性 facts，零 LLM）', () => {
+  it('独立 mark 带 entity_refs → 产对应 fact；assembleKnowledgeObjects 薄壳与新核心 KO 输出一致', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: '缓存一致性', entity_refs: [ref('cache-coherence', { display: '缓存一致性' })] });
+    const proj = await assembleKnowledgeProjection(input([m], []));
+    const plain = await assembleKnowledgeObjects(input([m], []));
+
+    expect(proj.objects.map((k) => k.ko_id)).toEqual(plain.map((k) => k.ko_id)); // 薄壳行为不变
+    expect(proj.entityFacts).toHaveLength(1);
+    expect(proj.entityFacts[0]).toMatchObject({ entity_id: 'cache-coherence', display: '缓存一致性', ko_id: proj.objects[0].ko_id, source_document_id: 'doc_test', source: 'declared' });
+  });
+
+  it('ai_turn 产出的 KO 同时继承 ai_turn 自身 + 被消费锚 mark 的 refs（手写或 AI 回复任一处归类都算数）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: '量子纠缠', entity_refs: [ref('physics')] });
+    const t = aiTurn({ overlay_id: 'ov1', ai_reply: '已被实验验证。', anchor: { surface_id: 's', mark_ids: ['m1'], object_refs: [] }, topic_refs: [ref('experiment-evidence')] });
+    const proj = await assembleKnowledgeProjection(input([m], [t]));
+
+    expect(proj.objects).toHaveLength(1); // mark 仍被消费，不重复出
+    const koId = proj.objects[0].ko_id;
+    expect(proj.entityFacts.map((f) => f.entity_id).sort()).toEqual(['experiment-evidence', 'physics']);
+    expect(proj.entityFacts.every((f) => f.ko_id === koId)).toBe(true);
+  });
+
+  it('topic_refs 与 entity_refs 都产 fact（同口径，无差别对待）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: 'x', entity_refs: [ref('a')], topic_refs: [ref('b')] });
+    const proj = await assembleKnowledgeProjection(input([m], []));
+    expect(proj.entityFacts.map((f) => f.entity_id).sort()).toEqual(['a', 'b']);
+  });
+
+  it('无 refs → entityFacts 为空数组（不是 undefined，调用方不用判空）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: 'x' });
+    const proj = await assembleKnowledgeProjection(input([m], []));
+    expect(proj.entityFacts).toEqual([]);
+  });
+
+  it('source_created_at 存在时用它做 fact 的 created_at（回填场景防 KO.created_at 漂移的配套：fact 时间线也不该被回填时刻污染）', async () => {
+    const m = mark({ mark_id: 'm1', feature_type: 'markup', marked_text: 'x', created_at: '2026-06-30T00:00:00.000Z', source_created_at: '2026-06-01T00:00:00.000Z', entity_refs: [ref('a')] });
+    const proj = await assembleKnowledgeProjection(input([m], []));
+    expect(proj.entityFacts[0].created_at).toBe('2026-06-01T00:00:00.000Z');
+  });
+});
+
+function entity(id: string, over: Partial<PersistedEntity> = {}): PersistedEntity {
+  return { entity_id: id, normalized_key: id, display: id, kind: 'entity', provenance: { document_ids: [], entries: [] }, created_at: '2026-06-01T00:00:00.000Z', updated_at: '2026-06-01T00:00:00.000Z', ...over };
+}
+function fact(entity_id: string, ko_id: string, over: { created_at?: string; display?: string; source?: LedgerEntityRef['source'] } = {}) {
+  return { entity_id, ko_id, source_document_id: 'doc_test', source_entry_id: 'ent_x', source: over.source ?? ('declared' as const), created_at: over.created_at ?? '2026-06-01T00:00:00.000Z', display: over.display };
+}
+
+describe('projectEntities（facts + registry → 确定性 KnowledgeEntity[]/EntityMembership[]，零 LLM）', () => {
+  it('registry 有记录时用 registry 的 display/kind；无记录时用 fact 里最早出现的 display 兜底（refs 是真相源，registry 缺不该丢关系）', () => {
+    const facts = [fact('known', 'ko1'), fact('ghost', 'ko2', { display: '幽灵实体' })];
+    const { entities } = projectEntities(facts, [entity('known', { display: '已注册', kind: 'topic' })]);
+    const known = entities.find((e) => e.entity_id === 'known');
+    const ghost = entities.find((e) => e.entity_id === 'ghost');
+    expect(known).toMatchObject({ display: '已注册', kind: 'topic' });
+    expect(ghost).toMatchObject({ display: '幽灵实体', kind: 'entity' }); // registry 缺记录 → fallback 兜底，不丢
+  });
+
+  it('同 (entity_id, ko_id) 去重成员边；不同 ko_id 各成一条', () => {
+    const facts = [fact('a', 'ko1'), fact('a', 'ko1'), fact('a', 'ko2')];
+    const { memberships } = projectEntities(facts, []);
+    expect(memberships).toHaveLength(2);
+  });
+
+  it('合并链：status=merged+merged_into 把旧 entity 的 fact 重映射到活实体；旧实体不再出现在结果里', () => {
+    const facts = [fact('old-name', 'ko1', { display: '旧名' })];
+    const registry = [entity('old-name', { status: 'merged', merged_into: 'new-name' }), entity('new-name', { display: '新名' })];
+    const { entities, memberships } = projectEntities(facts, registry);
+    expect(entities.map((e) => e.entity_id)).toEqual(['new-name']); // old-name 不再是活 hub
+    expect(memberships).toEqual([{ schema_version: 'inkloop.entity_membership.v1', entity_id: 'new-name', ko_id: 'ko1', source: 'declared' }]);
+  });
+
+  it('合并链多级：a→b→c 一路解析到底', () => {
+    const facts = [fact('a', 'ko1')];
+    const registry = [entity('a', { status: 'merged', merged_into: 'b' }), entity('b', { status: 'merged', merged_into: 'c' }), entity('c', { display: '终点' })];
+    const { entities } = projectEntities(facts, registry);
+    expect(entities.map((e) => e.entity_id)).toEqual(['c']);
+  });
+
+  it('合并链成环：不死循环，就地停在当前 id（防御性——正常数据不会出现环）', () => {
+    const facts = [fact('a', 'ko1')];
+    const registry = [entity('a', { status: 'merged', merged_into: 'b' }), entity('b', { status: 'merged', merged_into: 'a' })];
+    const { entities } = projectEntities(facts, registry); // 不超时/不抛错即通过
+    expect(entities).toHaveLength(1);
+  });
+
+  it('确定性：facts 输入顺序打乱，输出 entities/memberships 顺序不变', () => {
+    const facts1 = [fact('b', 'ko2'), fact('a', 'ko1')];
+    const facts2 = [fact('a', 'ko1'), fact('b', 'ko2')];
+    const registry = [entity('a'), entity('b')];
+    expect(projectEntities(facts1, registry)).toEqual(projectEntities(facts2, registry));
   });
 });
