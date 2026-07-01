@@ -36,8 +36,8 @@ const blockTextMd = (b: ReflowBlock): string =>
     ? b.items.map((x, i) => (b.ordered ? `${i + 1}. ${x}` : `- ${x}`)).join('\n')
     : b.text;
 
-/** run 引用归一：KO 的 object_refs 可能是字符级 `tl_3_12`，块的 sourceRunIds 是 run 级 `tl_3` → 取到倒数第二段前缀比对。 */
-const runIdOf = (ref: string): string => ref.replace(/_\d+$/, '');
+/** run 引用归一：字符级 `tl_3_12` 削到 run 级 `tl_3`；已是 run 级（`tl_58`）原样返回（防削成裸 `tl` 误匹配）。 */
+const runIdOf = (ref: string): string => { const s = ref.replace(/_\d+$/, ''); return s.includes('_') ? s : ref; };
 
 /** 两 bbox 交集占较小框的比例（粗判 KO 是否落在块里·兜底关联）。 */
 function overlapRatio(a?: NormBBox, b?: NormBBox): number {

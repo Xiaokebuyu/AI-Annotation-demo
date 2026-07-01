@@ -30,7 +30,9 @@ import type {
 import { pageBBoxToBlock, pagePointToBlock } from './coordinates';
 
 const pageIdxOf = (pageId: string): number => { const m = pageId.match(/_(\d+)$/); return m ? Number(m[1]) : -1; };
-const runIdOf = (ref: string): string => ref.replace(/_\d+$/, '');
+/** 字符级 ref（`tl_3_12`）削到 run 级（`tl_3`）；已是 run 级（`tl_58`）原样返回——
+ *  否则会被削成裸前缀 `tl`，blockByRuns 双向归一后任何 mark 都"匹配"该页第一个块（真机实锤：摊手。误活跃）。 */
+const runIdOf = (ref: string): string => { const s = ref.replace(/_\d+$/, ''); return s.includes('_') ? s : ref; };
 
 function overlapRatio(a?: readonly number[], b?: readonly number[]): number {
   if (!a || !b) return 0;
