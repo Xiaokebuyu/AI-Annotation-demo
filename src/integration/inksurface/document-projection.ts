@@ -9,7 +9,7 @@
  * 扩展点（不在 L1）：export_policy.include_pdf_asset/include_raw_strokes 当前恒 false；将来基岩 Tier1 从这里挂。
  */
 import { getDoc, getFoldedMarks } from '../../local/store';
-import { clampNormBBox } from '../../knowledge/builder';
+import { clampNormBBox, markSourceObjectRefs } from '../../knowledge/builder';
 import { pageIdFor } from '../../core/ids';
 import type { NormBBox } from '../../knowledge/knowledge-object';
 import type { PersistedMark, PersistedStroke } from '../../core/store-format';
@@ -49,13 +49,23 @@ function overlapRatio(a?: NormBBox, b?: NormBBox): number {
   return inter / minArea;
 }
 
-function koIdsForBlock(kos: KnowledgeObject[], pageIndex: number, block: ReflowBlock): string[] {
+function koIdsForBlock(kos: KnowledgeObject[], pageIndex: number, block: ReflowBlock, markById: ReadonlyMap<string, PersistedMark>): string[] {
   const runIds = new Set(block.sourceRunIds ?? []);
+  const hitByRefs = (refs: readonly string[]): boolean => refs.some((ref) => runIds.has(ref) || runIds.has(runIdOf(ref)));
   const ids = kos
     .filter((ko) => ko.source.page_index === pageIndex)
-    .filter((ko) =>
-      (ko.source.object_refs ?? []).some((ref) => runIds.has(ref) || runIds.has(runIdOf(ref)))
-      || overlapRatio(ko.source.anchor_bbox, block.source) > 0.15)
+    .filter((ko) => {
+      // 恒等优先：provenance marks 的源 run 锚（重排落笔位置真相·tl_* 按页编号故必须同页）→ KO 自身 object_refs
+      // → 都没有才退几何。reader 笔的 canonical bbox 是近似投影（可越界），有恒等锚时绝不让几何兜底抢段。
+      const markRefs = [...new Set((ko.provenance.mark_ids ?? [])
+        .map((id) => markById.get(id))
+        .filter((m): m is PersistedMark => !!m && m.page_index === pageIndex)
+        .flatMap(markSourceObjectRefs))];
+      if (markRefs.length) return hitByRefs(markRefs);
+      const own = ko.source.object_refs ?? [];
+      if (own.length) return hitByRefs(own);
+      return overlapRatio(ko.source.anchor_bbox, block.source) > 0.15;
+    })
     .map((ko) => ko.ko_id);
   return [...new Set(ids)].sort();
 }
@@ -93,8 +103,10 @@ export async function buildDocumentProjectionExport(
 
   // 没重排块的页（日记天生没有印刷文字可重排·阅读原版未重排页同理）不该让真笔迹静默判死——按页聚合折叠后的
   // 笔迹，稍后给这类页生成一个"合成占位块"当锚点（region:'generated'，不冒充真印刷正文）。
+  const foldedMarks = await getFoldedMarks(documentId);
+  const markById = new Map(foldedMarks.filter((m) => !m.is_tombstone).map((m) => [m.mark_id, m] as const));
   const marksByPage = new Map<number, PersistedMark[]>();
-  for (const m of (await getFoldedMarks(documentId)).filter(hasVisibleInk)) {
+  for (const m of foldedMarks.filter(hasVisibleInk)) {
     const bucket = marksByPage.get(m.page_index);
     if (bucket) bucket.push(m);
     else marksByPage.set(m.page_index, [m]);
@@ -153,7 +165,7 @@ export async function buildDocumentProjectionExport(
           source_range: { start: offset, end: offset + text_md.length },
           anchor_bbox: clampNormBBox(b.source), // 越界夹回页内（renderer 需要落点）；夹动了的计入 clampedCount 警告，不静默
         },
-        knowledge_object_ids: koIdsForBlock(exportableKos, pi, b),
+        knowledge_object_ids: koIdsForBlock(exportableKos, pi, b, markById),
       };
       blocks.push(block);
       offset += text_md.length + 1;

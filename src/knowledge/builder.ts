@@ -293,6 +293,16 @@ export function entityFactsFrom(refs: LedgerEntityRef[] | undefined, koId: strin
 
 /* ── 纯转换核心 ──────────────────────────────────────────────────────────── */
 
+/** mark 的源 run 恒等锚并集：reflow_anchor_runs（重排落笔的位置真相）∪ 各笔 anchor_runs ∪ HMP 命中 refs。
+ *  KO/投影定位段落以此恒等匹配为先——reader 笔的 canonical bbox 是近似投影（可越界），不配当定位真相。 */
+export function markSourceObjectRefs(m: PersistedMark): string[] {
+  return [...new Set([
+    ...(m.reflow_anchor_runs ?? []),
+    ...(m.strokes ?? []).flatMap((s) => s.anchor_runs ?? []),
+    ...(m.hmp?.target_object_refs ?? []),
+  ])];
+}
+
 export interface KnowledgeProjection {
   objects: KnowledgeObject[];
   entityFacts: EntityMembershipFact[];
@@ -338,6 +348,9 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
       if (turnWillExport || !markHasOwnRefs) consumed.add(m.mark_id);
     }
     const anchorMark = anchorMarks[0];
+    // 定位 refs 恒等优先：turn 自身 anchor.object_refs 常年为空（触发笔=手写 self_content），
+    // 而锚 mark 的 reflow_anchor_runs/HMP refs 才是真相——没有它们导出只能退几何兜底（reader 笔的 bbox 是烂近似）。
+    const anchorObjectRefs = [...new Set(anchorMarks.flatMap(markSourceObjectRefs))];
     const turnCreatedAt = t.source_created_at ?? t.created_at;
     const ko = await finalize({
       stableKey: `ai_turn:${document_id}:${t.overlay_id}`, // 含 doc 命名空间·防全库聚合短 id 跨书碰撞
@@ -347,7 +360,7 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
       // source 统一取 ai_turn 自身锚点（page/refs/bbox 同源·session 级聚合），quote 取锚 mark 所标原文
       pageId: t.page_id,
       pageIndex: t.page_index,
-      objectRefs: t.anchor?.object_refs ?? [],
+      objectRefs: anchorObjectRefs.length ? anchorObjectRefs : (t.anchor?.object_refs ?? []),
       bbox: t.overlay?.geometry?.anchor_bbox,
       quote: anchorMark?.marked_text || undefined,
       body,
@@ -383,7 +396,7 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
     if (!body) continue; // 仅 excerpt 无所标原文时为空→跳；annotation 永有占位正文（不丢手写）
     const markIds = group.map((x) => x.mark_id);
     const bbox = group.map((x) => x.bbox).reduce(unionBBox);
-    const objectRefs = [...new Set(group.flatMap((x) => x.hmp?.target_object_refs ?? []))];
+    const objectRefs = [...new Set(group.flatMap(markSourceObjectRefs))];
     const ko = await finalize({
       stableKey: `mark:${document_id}:${m.mark_id}`, // 簇沿用首笔身份，减少导出/wikilink 迁移 churn
       kind,

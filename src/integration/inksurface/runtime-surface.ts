@@ -10,7 +10,7 @@
  * 扩展点（不在 L1）：会议 context_id / 妙记相对时刻将来挂在 annotation 上；基岩 raw_ref 走另谈的 raw-ink 契约。
  */
 import { getFoldedMarks, getReaderLayouts } from '../../local/store';
-import { koId } from '../../knowledge/builder';
+import { koId, markSourceObjectRefs } from '../../knowledge/builder';
 import type { PersistedMark, PersistedStroke } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
 import type { DocumentProjectionBlock as ProjectionBlock } from 'ink-surface-sdk/knowledge-schema';
@@ -47,11 +47,13 @@ function blockByRuns(runs: string[] | undefined, samePage: ProjectionBlock[]): P
   const norm = new Set(runs.map(runIdOf));
   return samePage.find((b) => (b.source?.object_refs ?? []).some((r) => set.has(r) || norm.has(r) || norm.has(runIdOf(r)))) ?? null;
 }
-/** mark 级块解析（同页）：reflow_anchor_runs + 各笔 anchor_runs → hmp.target_object_refs → bbox 重叠最大。 */
+/** mark 级块解析（同页）：源 run 恒等锚（reflow_anchor_runs∪各笔 anchor_runs∪HMP refs）→ bbox 重叠最大。
+ *  reader 笔有恒等锚但没匹配上时**不退几何**——它的 canonical bbox 是近似投影（可越界），兜底只会挂错块。 */
 function resolveMarkBlock(mark: PersistedMark, samePage: ProjectionBlock[]): ProjectionBlock | null {
-  const runs = [...(mark.reflow_anchor_runs ?? []), ...mark.strokes.flatMap((s) => s.anchor_runs ?? [])];
-  const byRun = blockByRuns(runs, samePage) ?? blockByRuns(mark.hmp?.target_object_refs, samePage);
+  const runs = markSourceObjectRefs(mark);
+  const byRun = blockByRuns(runs, samePage);
   if (byRun) return byRun;
+  if (runs.length && ((mark.capture_surface ?? 'page') === 'reader' || mark.surface_coord_space === 'reader_px')) return null;
   let best: ProjectionBlock | null = null;
   let bestOv = 0.02;
   for (const b of samePage) {
@@ -60,18 +62,26 @@ function resolveMarkBlock(mark: PersistedMark, samePage: ProjectionBlock[]): Pro
   }
   return best;
 }
-/** KO 锚块（同页）：object_refs → anchor_bbox 重叠 → 该页首块兜底。 */
-function resolveKoBlock(ko: KnowledgeObject, samePage: ProjectionBlock[]): ProjectionBlock | null {
+/** KO 锚块（同页）：provenance marks 的源 run 恒等锚 → KO 自身 object_refs → anchor_bbox 重叠。
+ *  定不了就返回 null（调用方计 orphan）——不再默认挂该页首块（静默错位比诚实缺席更糟）。 */
+function resolveKoBlock(ko: KnowledgeObject, samePage: ProjectionBlock[], markById: ReadonlyMap<string, PersistedMark>): ProjectionBlock | null {
   if (!samePage.length) return null;
+  const markRuns = [...new Set((ko.provenance.mark_ids ?? [])
+    .map((id) => markById.get(id))
+    .filter((m): m is PersistedMark => !!m && m.page_index === (ko.source.page_index ?? -1))
+    .flatMap(markSourceObjectRefs))];
+  const byMarkRun = blockByRuns(markRuns, samePage);
+  if (byMarkRun) return byMarkRun;
   const byRun = blockByRuns(ko.source.object_refs, samePage);
   if (byRun) return byRun;
+  if (markRuns.length) return null; // 有恒等锚没匹配上：别让烂 bbox 几何兜底抢段
   let best: ProjectionBlock | null = null;
   let bestOv = 0.02;
   for (const b of samePage) {
     const ov = overlapRatio(ko.source.anchor_bbox, b.source?.anchor_bbox);
     if (ov > bestOv) { bestOv = ov; best = b; }
   }
-  return best ?? samePage[0];
+  return best;
 }
 
 const visualToolOf = (tool: PersistedStroke['tool']): 'pen' | 'highlighter' =>
@@ -159,6 +169,7 @@ export async function buildRuntimeAndVisual(
   }
   const usedReaderLayoutIds = new Set<string>();
   const marks = allMarks.filter((m) => !m.is_tombstone);
+  const markById = new Map(marks.map((m) => [m.mark_id, m] as const));
   let orphanInk = 0;
   let unplaced = 0;
   let surfaceOnlyInk = 0;
@@ -237,7 +248,7 @@ export async function buildRuntimeAndVisual(
     if (!body) continue;
     const pi = ko.source.page_index;
     if (pi == null) { koNoteOrphan++; continue; }
-    const blk = resolveKoBlock(ko, byPage.get(pi) ?? []);
+    const blk = resolveKoBlock(ko, byPage.get(pi) ?? [], markById);
     if (!blk) { koNoteOrphan++; continue; }
     const bb = (blk.source?.anchor_bbox ?? [0, 0, 1, 1]) as NormBBox;
     const anchor = ko.source.anchor_bbox ? pageBBoxToBlock(ko.source.anchor_bbox, bb) : undefined;

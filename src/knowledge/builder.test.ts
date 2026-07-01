@@ -268,7 +268,7 @@ describe('KnowledgeBuilder', () => {
     expect(kos[0].body_md).toBe('重要原文');
   });
 
-  it('ai_note source uses ai_turn own anchor (page/refs/bbox); quote from mark', async () => {
+  it('ai_note source: page/bbox 取 ai_turn 自身锚点；object_refs 恒等优先取锚 mark 源 run 锚；quote from mark', async () => {
     const m = mark({
       mark_id: 'm11',
       page_id: 'pg_other_5',
@@ -289,11 +289,13 @@ describe('KnowledgeBuilder', () => {
     expect(ko.kind).toBe('ai_note');
     expect(ko.source.page_index).toBe(2); // ai_turn 自己的页，不是 mark 的 5
     expect(ko.source.page_id).toBe('pg_turn_2');
-    expect(ko.source.object_refs).toEqual(['rTurn']); // ai_turn 锚点，不是 mark 的 rMark
+    // 定位 refs 恒等优先（2026-07-02 契约变更）：锚 mark 的源 run 锚（reflow_anchor_runs∪anchor_runs∪HMP refs）
+    // 优先于 turn 自身 object_refs——后者=触发笔的 refs、手写 self_content 时常年为空，光靠它导出只能退几何兜底。
+    expect(ko.source.object_refs).toEqual(['rMark']);
     expect(ko.source.anchor_bbox).toEqual([0.5, 0.5, 0.2, 0.2]); // overlay 锚框
     expect(ko.source.quote).toBe('被引原文'); // quote 仍取 mark 的所标原文
     expect(ko.title).toBe('测试书 · p3');
-    expect(ko.source.inkloop_uri).toBe('inkloop://doc/doc_test/page/2?anchor=rTurn');
+    expect(ko.source.inkloop_uri).toBe('inkloop://doc/doc_test/page/2?anchor=rMark');
   });
 
   it('edited with empty user_edited_text → no KO (not reverted to ai_reply)', async () => {
