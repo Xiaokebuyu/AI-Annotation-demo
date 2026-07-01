@@ -16,7 +16,8 @@ import type { InkLoopVisualModel } from 'ink-surface-sdk/surface-model';
 /** 导出"漏了什么"的结构化诊断——让调用方/UI 能展示哪些 KO/页/笔没进导出，杜绝"成功"假象。 */
 export interface L1Diagnostics {
   skippedKos: { ko_id: string; kind: string; reason: string }[]; // 被隐私/状态/空正文闸挡掉的 KO
-  skippedPages: number[];      // 未重排·不进文档投影的页（0-based）
+  skippedPages: number[];      // 无重排块且无可导出内容·不进文档投影的页（0-based）
+  syntheticPages: number[];    // 无重排块但有笔迹/笔记·用合成占位块承载的页（0-based，非真实印刷正文）
   orphanInk: number;           // 无可导出 KO·按 visual-only 导出的笔数
   unplacedInk: number;         // 未落到任何文档块·彻底没进导出的笔数（真·丢失）
   exportableKoCount: number;
@@ -43,7 +44,7 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
   const documentTitle = doc?.filename || '(未命名)';
 
   const { envelope: knowledgeExport, exportable, skipped: skippedKos, entityFacts, koRelationFacts } = await buildKnowledgeExport(documentId, o);
-  const { envelope: documentProjections, warnings: projWarn, skippedPages } = await buildDocumentProjectionExport(documentId, exportable, o);
+  const { envelope: documentProjections, warnings: projWarn, skippedPages, syntheticPages } = await buildDocumentProjectionExport(documentId, exportable, o);
   const blocks = documentProjections.document_projections[0]?.blocks ?? [];
   const { surfaceBlocks, visualModel, warnings: rtWarn, orphanInk, unplacedInk } = await buildRuntimeAndVisual(documentId, documentTitle, blocks, exportable);
 
@@ -59,7 +60,7 @@ export async function buildL1Export(documentId: string, opts: ExportOpts = {}): 
     runtimeSurfaceBlocks: { container: 'inkloop_internal.surface_blocks', document_id: documentId, generated_at: generatedAt, blocks: surfaceBlocks },
     visualModel,
     warnings,
-    diagnostics: { skippedKos, skippedPages, orphanInk, unplacedInk, exportableKoCount: exportable.length },
+    diagnostics: { skippedKos, skippedPages, syntheticPages, orphanInk, unplacedInk, exportableKoCount: exportable.length },
     entityFacts,
     koRelationFacts,
   };

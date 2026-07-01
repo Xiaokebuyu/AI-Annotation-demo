@@ -63,4 +63,22 @@ describe('buildVaultSyncPlan', () => {
     expect(p.download.map((x) => x.path)).toEqual(['InkLoop/ok.md']);
     expect(p.rejected.map((x) => x.path).sort()).toEqual(['../escape.md', 'InkLoop\\win.md', 'InkLoop/../secrets.md', 'Other/x.md'].sort());
   });
+
+  it('页级重构迁移：旧「一 KO 一文件」发布后不在新 manifest 里——未改则安全删除、用户手改过则冲突保留，新页文件正常下载', () => {
+    const p = buildVaultSyncPlan(
+      [
+        f('InkLoop/Reading/书/书.md', 'hub2'), // hub 内容变了（从列 KO 变成页面目录）
+        f('InkLoop/Reading/书/书 · 第 1 页.md', 'page1'), // 新增的页文件
+      ],
+      {
+        'InkLoop/Reading/书/书.md': local('hub1', 'hub1'), // 旧 hub：本地未改，安全覆盖成新内容
+        'InkLoop/Reading/书/旧 KO.md': local('leaf1', 'leaf1'), // 旧 KO leaf：本地未改，新 manifest 里没有 → 删
+        'InkLoop/Reading/书/用户改过的 KO.md': local('leaf2', 'user-edited'), // 用户在 Obsidian 编辑过 → 冲突保留，不删
+      },
+    );
+
+    expect(p.download.map((x) => x.path).sort()).toEqual(['InkLoop/Reading/书/书 · 第 1 页.md', 'InkLoop/Reading/书/书.md']);
+    expect(p.delete).toEqual(['InkLoop/Reading/书/旧 KO.md']);
+    expect(p.conflicts).toEqual([{ path: 'InkLoop/Reading/书/用户改过的 KO.md', reason: 'local_edited_remote_deleted' }]);
+  });
 });

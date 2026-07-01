@@ -81,10 +81,11 @@ describe('存储原生拓扑端到端：两本书共享一个实体 → 零 LLM 
     expect(noteA!.markdown).toContain('**同实体笔记**');
     expect(noteB!.markdown).toContain('**同实体笔记**');
 
-    // 零 dangling：每个 [[link]] 都真实解析到某个文件（图谱连通，没有断链）
+    // 零 dangling：每个 [[link]] 都真实解析到某个文件（图谱连通，没有断链）。页级重构②后 reading/diary 的互链
+    // 也变成 `页文件#^block-id`，按 `#` 拆出文件名部分再判是否有真实文件承载。
     const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
     const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
-    const dangling = [...new Set(links)].filter((l) => !bases.has(l));
+    const dangling = [...new Set(links)].filter((l) => !bases.has(l.split('#')[0]));
     expect(dangling).toEqual([]);
   });
 
@@ -134,7 +135,8 @@ describe('内容拓扑①端到端：会议 material_doc_ids → 渲出 hub-to-h
 
     const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
     const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
-    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+    // 会议 KO 内嵌成 hub 内的 block（页级重构①）时，互链形如 `文件#^block-id`——按 `#` 拆出文件名部分再判是否有真实文件承载
+    expect([...new Set(links)].filter((l) => !bases.has(l.split('#')[0]))).toEqual([]);
   });
 
   it('引用的资料文档没入 bundle（未导出/已删）→ 不产悬空链接，其余渲染照常', async () => {
@@ -190,7 +192,8 @@ describe('内容拓扑②端到端：KO-KO 关系层 → leaf 互链「同源笔
 
     const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
     const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
-    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+    // 会议 KO 内嵌成 hub 内的 block（页级重构①）时，互链形如 `文件#^block-id`——按 `#` 拆出文件名部分再判是否有真实文件承载
+    expect([...new Set(links)].filter((l) => !bases.has(l.split('#')[0]))).toEqual([]);
   });
 
   it('same_context：一场会议的多条手写 KO 端到端渲出「同场采集笔记」互链', async () => {
@@ -235,7 +238,8 @@ describe('内容拓扑②端到端：KO-KO 关系层 → leaf 互链「同源笔
 
     const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
     const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
-    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+    // 会议 KO 内嵌成 hub 内的 block（页级重构①）时，互链形如 `文件#^block-id`——按 `#` 拆出文件名部分再判是否有真实文件承载
+    expect([...new Set(links)].filter((l) => !bases.has(l.split('#')[0]))).toEqual([]);
   });
 });
 
@@ -281,7 +285,8 @@ describe('内容拓扑③端到端：普通笔无 OCR 的占位 KO → dropInkPl
 
     const bases = new Set(files.map((f) => f.path.split('/').pop()!.replace(/\.md$/, '')));
     const links = files.flatMap((f) => [...f.markdown.matchAll(/(?<!\\)\[\[([^\]]+)\]\]/g)].map((m) => m[1]));
-    expect([...new Set(links)].filter((l) => !bases.has(l))).toEqual([]);
+    // 会议 KO 内嵌成 hub 内的 block（页级重构①）时，互链形如 `文件#^block-id`——按 `#` 拆出文件名部分再判是否有真实文件承载
+    expect([...new Set(links)].filter((l) => !bases.has(l.split('#')[0]))).toEqual([]);
   });
 
   it('同一占位 KO 但 visualModel 没挂笔迹（或压根没有 visualModel）：照旧被 dropInkPlaceholders 整条丢弃（笔迹豁免只对真有笔迹的情况生效）', async () => {

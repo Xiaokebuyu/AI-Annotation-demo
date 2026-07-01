@@ -192,6 +192,71 @@ export const INK_PLACEHOLDER_HANDWRITING = '（未识别手写）';
  *  ⚠️只判恰等——会议侧 body=占位+「（约 X 处手写）」带时间上下文·不命中·不过滤。笔迹仍在账本·不丢·将来渲成墨迹。 */
 export const isInkPlaceholderBody = (body: string): boolean => body === INK_PLACEHOLDER_DRAWING || body === INK_PLACEHOLDER_HANDWRITING;
 
+/* ── 普通笔簇合并：抬笔即落库(persistContentStroke)天生一笔一条 mark，不像 AI 笔走区域组装——
+ *   连续书写/画画在导出时会碎成一堆几乎相同的单笔占位 KO（Obsidian 刷屏）。这里在建 KO 前，把同页、
+ *   短间隔、空间相邻的未识别内容笔事后聚成一组，折成一条 KO（provenance.mark_ids 本就是数组，天然支持）。
+ *   不碰实时落笔热路径（那条路径当前有 M103 硬件适配并发改动，风险更高）；纯函数、可回滚。 ── */
+const CONTENT_CLUSTER_MAX_GAP_MS = 2500; // 产品阈值：抬笔间隔多久内算"连续书写"，2-3s 之间，需真机数据调
+const CONTENT_CLUSTER_NEAR = 0.06; // 对齐 capture 侧 REGION_NEAR 的页归一化邻近半径（annotation-loop.ts）
+
+function unionBBox(a: NormBBox, b: NormBBox): NormBBox {
+  const x0 = Math.min(a[0], b[0]);
+  const y0 = Math.min(a[1], b[1]);
+  const x1 = Math.max(a[0] + a[2], b[0] + b[2]);
+  const y1 = Math.max(a[1] + a[3], b[1] + b[3]);
+  return [x0, y0, x1 - x0, y1 - y0];
+}
+
+const sourceCreatedAtOf = (m: PersistedMark): string => m.source_created_at ?? m.created_at;
+const markTimeMs = (m: PersistedMark): number =>
+  Number.isFinite(m.abs_timestamp) && m.abs_timestamp > 0 ? m.abs_timestamp : Date.parse(sourceCreatedAtOf(m));
+
+/** 该 mark 是否有真实可见笔迹（橡皮擦/空笔画不算·笔迹仍要在，否则合并了个空壳）。 */
+const hasVisibleInk = (m: PersistedMark): boolean =>
+  m.strokes.some((s) => (s.tool === 'pen' || s.tool === 'aipen') && s.points.length > 0);
+
+/** 是否可参与聚簇：只并"未识别的纯内容笔"——已识别出文字/已被用户显式声明实体关系的 mark 本身已经
+ *  是有意义的独立单元，不该被临近笔迹粘在一起（会稀释语义、或把用户的显式声明连带并进邻居）。
+ *  高亮(markup/excerpt)不并：高亮通常标记一段特定原文，多段高亮粘一起会混淆"标了哪一段"。 */
+function clusterableContentMark(m: PersistedMark): boolean {
+  const hasText = !!m.marked_text.trim() || !!m.hmp?.text_hint?.trim();
+  const hasRefs = (m.entity_refs?.length ?? 0) > 0 || (m.topic_refs?.length ?? 0) > 0;
+  return m.ai_eligible === false && m.tool === 'pen' && !hasText && !hasRefs
+    && (m.feature_type === 'drawing' || m.feature_type === 'handwriting') && hasVisibleInk(m);
+}
+
+/** 新 mark 的中心点是否落在当前簇 union bbox 的邻近范围内（对齐 capture 侧"挨着就并"的判定）。 */
+function nearCluster(group: readonly PersistedMark[], m: PersistedMark): boolean {
+  const box = group.map((x) => x.bbox).reduce(unionBBox);
+  const cx = m.bbox[0] + m.bbox[2] / 2;
+  const cy = m.bbox[1] + m.bbox[3] / 2;
+  return cx >= box[0] - CONTENT_CLUSTER_NEAR && cx <= box[0] + box[2] + CONTENT_CLUSTER_NEAR
+    && cy >= box[1] - CONTENT_CLUSTER_NEAR && cy <= box[1] + box[3] + CONTENT_CLUSTER_NEAR;
+}
+
+/** marks（按 seq 序）→ 分组：可聚簇的连续内容笔（同页+同 context+短间隔+空间邻近）合成一组；
+ *  其余（已识别/已消费/有 refs/高亮等）各自单独成组，保持原有"一 mark 一 KO"语义不变。 */
+function standaloneMarkGroups(marks: readonly PersistedMark[], consumed: ReadonlySet<string>): PersistedMark[][] {
+  const groups: PersistedMark[][] = [];
+  let cur: PersistedMark[] = [];
+  const flush = (): void => { if (cur.length) groups.push(cur); cur = []; };
+  for (const m of [...marks].sort((a, b) => a.seq - b.seq)) {
+    if (consumed.has(m.mark_id)) { flush(); continue; }
+    if (!clusterableContentMark(m)) { flush(); groups.push([m]); continue; }
+    const last = cur[cur.length - 1];
+    const sameContext = !last || !last.context_id || !m.context_id || last.context_id === m.context_id;
+    if (last && last.page_id === m.page_id && sameContext
+      && markTimeMs(m) - markTimeMs(last) <= CONTENT_CLUSTER_MAX_GAP_MS && nearCluster(cur, m)) {
+      cur.push(m);
+    } else {
+      flush();
+      cur = [m];
+    }
+  }
+  flush();
+  return groups;
+}
+
 /* ── 存储原生拓扑：账本 entity_refs → 确定性成员关系（零 LLM）───────────────── */
 
 /** 归一化实体 id（NFKC + 折大小写 + 转 slug）。写 entity_refs 的一方（采集声明/后台 suggester）用它算 canonical entity_id；
@@ -305,36 +370,42 @@ export async function assembleKnowledgeProjection(input: BuilderInput): Promise<
     for (const markId of anchorIds) if (markById.has(markId)) addMarkKo(markId, ko.ko_id);
   }
 
-  // 2) 独立 mark → excerpt / annotation
-  for (const m of marks) {
-    if (consumed.has(m.mark_id)) continue;
+  // 2) 独立 mark → excerpt / annotation（未识别的连续内容笔先事后聚簇·减少导出碎片，见 standaloneMarkGroups）
+  for (const group of standaloneMarkGroups(marks, consumed)) {
+    const m = group[0];
     const kind: KnowledgeKind = m.feature_type === 'markup' ? 'excerpt' : 'annotation';
-    const transcript = m.hmp?.text_hint?.trim();
+    const transcript = group.map((x) => x.hmp?.text_hint?.trim()).find((t) => !!t);
+    const markedText = group.map((x) => x.marked_text.trim()).find((t) => !!t) ?? '';
     // excerpt 正文=所标原文（空则无价值·跳）；annotation（手写/画）正文=识别文字，退回所标内容，
     // **再退回占位**——纯图形/未识别手写也要产 KO，否则用户真画过的圈画在导出里无声消失（与会议侧 inkBody 同口径）。
     const inkBody = (m.feature_type === 'drawing' ? INK_PLACEHOLDER_DRAWING : INK_PLACEHOLDER_HANDWRITING);
-    const body = kind === 'excerpt' ? m.marked_text || '' : transcript || (m.marked_text || '').trim() || inkBody;
+    const body = kind === 'excerpt' ? m.marked_text || '' : transcript || markedText || inkBody;
     if (!body) continue; // 仅 excerpt 无所标原文时为空→跳；annotation 永有占位正文（不丢手写）
-    const markCreatedAt = m.source_created_at ?? m.created_at;
+    const markIds = group.map((x) => x.mark_id);
+    const bbox = group.map((x) => x.bbox).reduce(unionBBox);
+    const objectRefs = [...new Set(group.flatMap((x) => x.hmp?.target_object_refs ?? []))];
     const ko = await finalize({
-      stableKey: `mark:${document_id}:${m.mark_id}`,
+      stableKey: `mark:${document_id}:${m.mark_id}`, // 簇沿用首笔身份，减少导出/wikilink 迁移 churn
       kind,
       documentId: document_id,
       documentTitle: document_title,
       pageId: m.page_id,
       pageIndex: m.page_index,
-      objectRefs: m.hmp?.target_object_refs ?? [],
-      bbox: m.bbox,
-      quote: m.marked_text || undefined,
+      objectRefs,
+      bbox,
+      quote: markedText || undefined,
       body,
-      provenance: { created_from: 'mark', mark_ids: [m.mark_id] },
+      provenance: { created_from: 'mark', mark_ids: markIds },
       status: 'export_ready',
-      createdAt: markCreatedAt, // source_created_at 兜底：补写 refs 的 revision 不该让既有 KO 的 created_at（进 content_hash）漂移
+      createdAt: sourceCreatedAtOf(m), // source_created_at 兜底：补写 refs 的 revision 不该让既有 KO 的 created_at（进 content_hash）漂移
     });
     out.push(ko);
-    entityFacts.push(...entityFactsFrom(m.entity_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
-    entityFacts.push(...entityFactsFrom(m.topic_refs, ko.ko_id, document_id, m.entry_id, markCreatedAt));
-    addMarkKo(m.mark_id, ko.ko_id);
+    for (const src of group) {
+      const t = sourceCreatedAtOf(src);
+      entityFacts.push(...entityFactsFrom(src.entity_refs, ko.ko_id, document_id, src.entry_id, t));
+      entityFacts.push(...entityFactsFrom(src.topic_refs, ko.ko_id, document_id, src.entry_id, t));
+      addMarkKo(src.mark_id, ko.ko_id);
+    }
   }
 
   const objects = out.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.ko_id.localeCompare(b.ko_id));
