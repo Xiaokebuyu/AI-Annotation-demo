@@ -109,6 +109,23 @@ describe('mergeConceptLayers（存储原生拓扑层 + legacy LLM 概念层 → 
     expect(merged.assignmentsByKo.ko1).toEqual(['一致性', '缓存']); // 去重，不重复
   });
 
+  // 回归：codex intent review 抓到的真问题——两者都在时 relationGroups/relationsByKo 曾经被漏合并，
+  // 导致 concepts:true（collectVaultBundle 的默认路径）下 KO 关系层（同源笔记/同场采集笔记）静默消失。
+  // llm 层（buildConceptLayer）从不产这两个字段，只有 stored 会产，所以这里只需验证透传不丢。
+  it('KO 关系层（relationGroups/relationsByKo）随 stored 层透传，不被 llm 合并悄悄吞掉', () => {
+    const relationGroups = [{
+      schema_version: 'inkloop.ko_relation_group.v1' as const, relation_id: 'rel:1', kind: 'same_context' as const,
+      source: 'meeting_context' as const, confidence: 'experimental' as const, ko_ids: ['ko1', 'ko2'], created_at: '2026-06-30T00:00:00.000Z',
+    }];
+    const relationsByKo = { ko1: [{ relation_id: 'rel:1', kind: 'same_context' as const, source: 'meeting_context' as const, confidence: 'experimental' as const, ko_id: 'ko2' }] };
+    const stored = layer({ relationGroups, relationsByKo });
+    const llm = layer({ concepts: [{ title: '概念A' } as never] });
+
+    const merged = mergeConceptLayers(stored, llm)!;
+    expect(merged.relationGroups).toEqual(relationGroups);
+    expect(merged.relationsByKo).toEqual(relationsByKo);
+  });
+
   // 同名 hub（存储实体 + LLM 概念独立发现同一个显示名）必须去重成一条：否则 SDK 渲染器按 title 建 Map 时
   // 后写覆盖前写，两条 hub 循环各写一份文件却互相踩踏——一份路径分配了却没人用，另一份被两次写入互相覆盖。
   it('同名 hub 去重：只保留一条，优先带 entity_id 的那条（存储原生更权威）', () => {

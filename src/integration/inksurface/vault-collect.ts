@@ -104,6 +104,25 @@ export function mergeConceptLayers(stored: ConceptLayer | undefined, llm: Concep
     return out;
   };
 
+  // KO 关系层合并：当前只有 stored 路径会产（llm/buildConceptLayer 从不产这两个字段），但按并集写而不是
+  // 直接透传 stored——避免以后 llm 侧也开始产关系数据时，这里又悄悄把它吞掉（同样的坑已经在这个函数里
+  // 踩过一次：hubs/assignmentsByKo 等字段都是并集，只有这两个字段最初漏掉才会让 concepts:true 默认路径下
+  // 「同源笔记/同场采集笔记」无声消失）。
+  const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  const mergeRelationsByKo = (a: ConceptLayer['relationsByKo'], b: ConceptLayer['relationsByKo']): ConceptLayer['relationsByKo'] => {
+    const out = Object.create(null) as NonNullable<ConceptLayer['relationsByKo']>;
+    for (const source of [a, b]) {
+      for (const [koId, relations] of Object.entries(source ?? {})) {
+        const bucket = (out[koId] ??= []);
+        for (const rel of relations) {
+          if (!bucket.some((x) => x.relation_id === rel.relation_id && x.kind === rel.kind && x.ko_id === rel.ko_id)) bucket.push(rel);
+        }
+      }
+    }
+    for (const relations of Object.values(out)) relations.sort((a, b) => compareText(a.ko_id, b.ko_id) || compareText(a.relation_id, b.relation_id) || compareText(a.kind, b.kind));
+    return Object.keys(out).length ? out : undefined;
+  };
+
   const titleKey = (title: string): string => title.normalize('NFKC').trim().toLocaleLowerCase('en-US');
   const dedupeHubs = (hubs: NonNullable<ConceptLayer['hubs']>): NonNullable<ConceptLayer['hubs']> => {
     const byKey = new Map<string, NonNullable<ConceptLayer['hubs']>[number]>();
@@ -115,6 +134,9 @@ export function mergeConceptLayers(stored: ConceptLayer | undefined, llm: Concep
     return [...byKey.values()];
   };
 
+  const relationGroups = [...(stored.relationGroups ?? []), ...(llm.relationGroups ?? [])];
+  const relationsByKo = mergeRelationsByKo(stored.relationsByKo, llm.relationsByKo);
+
   return {
     concepts: [...stored.concepts, ...llm.concepts],
     hubs: dedupeHubs([...(stored.hubs ?? []), ...(llm.hubs ?? llm.concepts.map((ko) => ({ title: ko.title })))]),
@@ -123,6 +145,8 @@ export function mergeConceptLayers(stored: ConceptLayer | undefined, llm: Concep
     localByKo: mergeRecord(stored.localByKo, llm.localByKo),
     entityIdsByKo: mergeRecord(stored.entityIdsByKo, llm.entityIdsByKo),
     membersByEntity: mergeRecord(stored.membersByEntity, llm.membersByEntity),
+    ...(relationGroups.length ? { relationGroups } : {}),
+    ...(relationsByKo ? { relationsByKo } : {}),
   };
 }
 
