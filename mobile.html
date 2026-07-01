@@ -6,13 +6,31 @@
 <title>InkLoop · 移动版</title>
 </head>
 <body class="eink-shell" data-mode="read" data-read="diary" data-mtg="home" data-meet="schedule" data-dev="chat">
+<section id="auth-gate" hidden>
+  <div class="auth-panel">
+    <div class="auth-head">
+      <h1>InkLoop 登录</h1>
+      <button class="hbtn" id="auth-refresh" type="button">刷新</button>
+    </div>
+    <div class="auth-body">
+      <img id="auth-qr" width="240" height="240" alt="" />
+      <div class="auth-code" id="auth-code">----</div>
+      <div class="auth-status" id="auth-status">待生成二维码</div>
+      <div class="auth-expire" id="auth-expire"></div>
+      <a class="auth-link" id="auth-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+    </div>
+    <div class="auth-foot">
+      <button class="hbtn" id="auth-logout" type="button">清除登录态</button>
+    </div>
+  </div>
+</section>
 <div id="m-app">
 
   <!-- ════ 导航脊 ════ -->
   <nav id="m-rail">
     <div class="nav">
       <div class="rl-item cur"><button class="rl-btn on" data-mode="read" aria-label="阅读"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.6C10.4 5.6 7.8 5 4 5v13c3.8 0 6.4.6 8 1.6 1.6-1 4.2-1.6 8-1.6V5c-3.8 0-6.4.6-8 1.6z"/><path d="M12 6.6V19.6"/></svg></button><span class="rl-lab">阅读</span></div>
-      <div class="rl-item"><button class="rl-btn dim" data-mode="meet" aria-label="会议"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.1"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15.2 5.3a3.1 3.1 0 0 1 0 5.4"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg></button><span class="rl-lab">会议</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-mode="meet" aria-label="会议"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.1"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15.2 5.3a3.1 3.1 0 0 1 0 5.4"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg><span class="rl-badge" id="rl-meet-badge" hidden></span></button><span class="rl-lab">会议</span></div>
       <div class="rl-item"><button class="rl-btn dim" data-mode="dev" aria-label="dev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 8.5 5 12l3.5 3.5"/><path d="M15.5 8.5 19 12l-3.5 3.5"/><path d="M13.5 6l-3 12"/></svg></button><span class="rl-lab">dev</span></div>
     </div>
 
@@ -32,7 +50,13 @@
       <div class="rl-item"><button class="rl-btn dim" data-dev="set" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/></svg></button><span class="rl-lab">设置</span></div>
     </div>
 
-    <!-- 会议子导航已删（单页面收敛·阶段①）：会议=单一会议流，home 直接是会议列表，无日程/群聊双子页 -->
+    <!-- 会议首页子导航已删（单页面收敛·阶段①）：home 直接是会议列表，无日程/群聊双子页。
+         这个是会后记录页专属子导航（时间脊/思路总结/panel总结三页互为平级·点即切） -->
+    <div class="sub" id="recap-sub">
+      <div class="rl-item cur"><button class="rl-btn on" data-rc="overview" aria-label="时间脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/><path d="M12 7v3M12 14v3"/></svg></button><span class="rl-lab">时间脊</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-rc="summary" aria-label="思路总结"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg></button><span class="rl-lab">思路总结</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-rc="panel" aria-label="panel 总结"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></button><span class="rl-lab">panel 总结</span></div>
+    </div>
 
     <!-- 工具收纳格子 -->
     <div id="tools">
@@ -55,7 +79,10 @@
     <button class="rl-btn dim" id="rl-ai" aria-label="AI 洞察"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg></button>
     <button class="rl-btn dim" id="rl-collapse" aria-label="收起导航脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
   </nav>
-  <div id="m-tab" aria-label="展开导航脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
+  <div id="m-tab" aria-label="展开导航脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg><span class="rl-tab-badge" id="rl-meet-tab-badge" hidden></span></div>
+
+  <!-- 全局提示（会议开始等跨屏幕提醒）：固定容器预置，运行时只改 hidden/innerHTML，避免 append 到 body 触发整屏 e-ink 刷新 -->
+  <div id="m-toast-root" hidden aria-live="polite"></div>
 
   <!-- ════ 内容区 ════ -->
   <main id="m-canvas">
@@ -118,7 +145,7 @@
 
       <!-- WS2-C 会后记录（转写句列 + 手写档案·纯文本·JS 填充 #recap-body） -->
       <div class="mview" id="mv-recap">
-        <div class="mtop"><span class="bk" id="recap-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti" id="recap-title">会后记录</span></div>
+        <div class="mtop"><span class="bk" id="recap-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti" id="recap-title">会后记录</span><span class="sp"></span><button class="hbtn" id="recap-export-btn" hidden>导出到 Obsidian</button></div>
         <div id="recap-body"></div>
       </div>
 

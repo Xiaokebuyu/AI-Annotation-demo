@@ -14,6 +14,22 @@
   body{font:14px/1.5 var(--sans);color:var(--ink);background:var(--page);overflow:hidden;-webkit-font-smoothing:antialiased;}
   #m-app{height:100%;display:flex;}
 
+  /* Phase C：二维码设备登录门禁（黑白线性 UI，覆盖现有移动版；登录成功后 hidden） */
+  #auth-gate{position:fixed;inset:0;z-index:80;background:var(--page);display:grid;place-items:center;padding:20px;}
+  #auth-gate[hidden]{display:none;}
+  body.auth-open #m-app{visibility:hidden;}
+  .auth-panel{width:min(100%,340px);border:1px solid var(--hair2);border-radius:8px;background:var(--page);}
+  .auth-head{height:48px;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--hair);}
+  .auth-head h1{font:600 16px var(--sans);margin:0;flex:1;}
+  .auth-body{display:flex;flex-direction:column;align-items:center;padding:18px 16px 14px;}
+  #auth-qr{width:240px;height:240px;border:1px solid var(--hair);image-rendering:pixelated;background:#fff;}
+  .auth-code{font:600 23px var(--mono);letter-spacing:2px;margin-top:13px;color:var(--ink);}
+  .auth-status{font:13px var(--sans);color:var(--ink);margin-top:6px;}
+  .auth-expire{font:11px var(--mono);color:var(--mut);margin-top:3px;min-height:16px;}
+  .auth-link{display:block;max-width:100%;font:10.5px/1.45 var(--mono);color:var(--mut);margin-top:10px;word-break:break-all;text-align:center;text-decoration:none;}
+  .auth-link:active{color:var(--ink);}
+  .auth-foot{display:flex;justify-content:center;padding:0 12px 14px;}
+
   /* ════ 导航脊 ════ */
   #m-rail{flex:0 0 auto;width:50px;display:flex;flex-direction:column;align-items:center;padding:8px 0;border-right:1px solid var(--hair);background:var(--page);transition:transform .12s ease;z-index:5;overflow:hidden;}
   .rl-btn{position:relative;width:38px;height:38px;display:grid;place-items:center;border:none;background:transparent;color:var(--ink);border-radius:10px;cursor:pointer;padding:0;}
@@ -21,16 +37,18 @@
   .rl-btn.on{background:var(--sel);color:var(--ink);box-shadow:inset 0 0 0 1px var(--sel-line);}
   .rl-btn.dim{color:var(--mut);}
   .rl-btn svg{width:21px;height:21px;}
+  .rl-badge{position:absolute;top:1px;right:2px;width:7px;height:7px;border-radius:50%;background:#111;border:1.5px solid var(--page);} /* M7·会议开始未读徽标（纯黑白·实心点） */
+  .rl-tab-badge{position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#111;border:1.5px solid var(--page);} /* rail 收起态同一徽标（#m-tab 上）·rail 展开时原 .rl-badge 已可见，两者各自按 hidden 独立开关 */
   .rl-item{display:flex;flex-direction:column;align-items:center;margin:1px 0;}
   .rl-lab{font:9px var(--sans);color:var(--mut);margin-top:1px;letter-spacing:.2px;}
   .rl-item.cur .rl-lab{color:var(--ink);}
   .rl-sep{width:24px;height:1px;background:var(--hair);margin:7px 0;}
   .rl-spacer{flex:1;min-height:8px;}
   .nav,.sub{display:flex;flex-direction:column;align-items:center;}
-  #read-sub,#dev-sub,#meet-sub{display:none;}
+  #read-sub,#dev-sub,#recap-sub{display:none;}
   body[data-mode="read"] #read-sub{display:flex;}
   body[data-mode="dev"] #dev-sub{display:flex;}
-  body[data-mode="meet"][data-mtg="home"] #meet-sub{display:flex;} /* 会议子导航只在首页露·钻进 ws/detail/live/recap 隐藏 */
+  body[data-mode="meet"][data-mtg="recap"] #recap-sub{display:flex;} /* 会后记录子导航：时间脊/思路总结/panel总结三页入口 */
   #tools{display:none;flex-direction:column;align-items:center;margin-top:4px;}
   body.writable #tools{display:flex;}
   #tools-toggle .chev{position:absolute;right:2px;bottom:2px;width:9px;height:9px;color:var(--mut);transition:transform .12s ease;}
@@ -43,6 +61,15 @@
   #m-tab{position:fixed;left:6px;top:8px;width:30px;height:30px;display:none;place-items:center;border:1px solid var(--hair);border-radius:9px;background:var(--page);color:var(--ink);cursor:pointer;z-index:6;}
   body.rail-off #m-tab{display:grid;}
   #m-tab svg{width:18px;height:18px;}
+  /* 全局提示：固定容器，运行时只切 hidden/改 innerHTML，避免 append 到 body 触发整屏刷新 */
+  #m-toast-root{position:fixed;left:56px;right:10px;top:10px;z-index:35;display:flex;flex-direction:column;gap:6px;}
+  body.rail-off #m-toast-root{left:10px;}
+  .m-toast{background:var(--page);border:1px solid var(--hair2);border-radius:9px;padding:9px 11px;display:flex;align-items:flex-start;gap:8px;}
+  .m-toast-body{flex:1;min-width:0;}
+  .m-toast-title{font:600 12.5px var(--sans);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .m-toast-msg{font:11.5px var(--sans);color:var(--mut);margin-top:1px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  .m-toast-ft{display:flex;gap:6px;flex-shrink:0;}
+  .m-toast .hbtn{padding:4px 9px;font-size:11.5px;}
 
   /* ════ 内容区 ════ */
   #m-canvas{flex:1;min-height:0;position:relative;overflow:hidden;transition:margin .12s ease;}
@@ -205,9 +232,23 @@
   body[data-mtg="detail"] #mv-detail{display:block;}
   body[data-mtg="live"]   #mv-live{display:block;}
   body[data-mtg="recap"]  #mv-recap{display:block;}
-  /* WS2-C 会后记录：转写句列 + 手写档案（纯黑白·近似对照非精确） */
+  /* WS2-C 会后记录：转写句列 + 手写档案（纯黑白·近似对照非精确）。「页面入口」在导航脊的 #recap-sub（时间脊/思路总结/
+     panel总结互为平级页·点即切换 recapState.view，非抽屉）——时间脊为默认主体，其余两页把原先顶部的摘要块搬到各自整页。 */
   #recap-body{position:absolute;top:48px;left:0;right:0;bottom:0;overflow-y:auto;padding:14px 18px 80px;}
   .rc-note{font:11.5px/1.5 var(--sans);color:var(--ink2);background:#f6f6f6;border-radius:8px;padding:8px 10px;margin-bottom:12px;}
+  /* 思路总结 / panel 总结整页——纯排版分节（电纸屏·不套容器框，标题下一条发丝线分节，同 .msec-h 的做法）。 */
+  .rc-msum,.rc-psum{margin:0 0 16px;}
+  .rc-msum-h,.rc-psum-h{display:flex;align-items:baseline;gap:8px;margin-bottom:10px;padding-bottom:7px;border-bottom:1px solid var(--hair);}
+  .rc-msum-h b,.rc-psum-h b{font:600 13px var(--sans);color:var(--ink);flex:1;}
+  .rc-psum-h .mdl{font:10.5px var(--mono);color:var(--mut2);}
+  .rc-blk{margin:11px 0;}
+  .rc-blk:first-of-type{margin-top:0;}
+  .rc-blk-h{display:block;font:600 11px var(--sans);color:var(--ink2);margin-bottom:4px;letter-spacing:.2px;}
+  .rc-blk-li{display:block;font:12.5px/1.6 var(--sans);color:var(--ink);padding-left:11px;position:relative;}
+  .rc-blk-li+.rc-blk-li{margin-top:2px;}
+  .rc-blk-li::before{content:"·";position:absolute;left:0;color:var(--mut2);}
+  .rc-blk-li .who{font:10.5px var(--mono);color:var(--mut);margin-left:6px;}
+  .rc-psum-retry{margin-top:6px;}
   .rc-h{font:600 12.5px var(--sans);color:var(--ink);margin:18px 0 8px;display:flex;align-items:center;gap:8px;}
   .rc-h .mb{font:11px var(--sans);color:var(--ink2);font-weight:400;}
   .rc-cue{display:grid;grid-template-columns:46px 1fr;gap:10px;padding:7px 0;border-bottom:1px solid var(--hair);}
@@ -220,9 +261,16 @@
   .rc-arch .t{font:11px var(--mono);color:var(--ink2);}
   .rc-arch .x{font:12.5px/1.6 var(--sans);color:var(--ink);}
   .rc-pager{display:flex;align-items:center;gap:10px;justify-content:center;margin:14px 0 4px;}
-  /* WS2-C V2 分段对轴时间线（概览段级 / 详情句级共用一根中轴·无框·纯文本贴轴） */
-  .tl-seg{position:relative;}
+  /* WS2-C V2 分段对轴时间线（概览段级 / 详情句级共用一根中轴·无框·纯文本贴轴）。
+     .tl-page 撑满 #recap-body 可视高（flex 列·note/pager 各自然高·.tl-seg flex:1 吃剩余空间）——
+     脊柱靠 .tl-ax 的 bottom:6px 自动跟着 .tl-seg 拉到页底，内容不够一页时留白也有中轴（用户拍板）。 */
+  .tl-page{display:flex;flex-direction:column;min-height:100%;}
+  .tl-seg{position:relative;flex:1 0 auto;}
   .tl-ax{position:absolute;left:50%;top:6px;bottom:6px;border-left:1.5px solid var(--ink);transform:translateX(-50%);}
+  .tl-row.tl-empty{cursor:default;}
+  .tl-row.tl-empty .tl-txt{color:var(--mut2);}
+  /* 空态行中轴标记：孤零零一个空心圆太像"漏了一个数据点"——换成竖排三点，读成"还没写到这·后面待续" */
+  .tl-md.tl-pending{width:3px;height:3px;border-radius:50%;background:var(--mut2);box-shadow:0 -7px 0 var(--mut2),0 7px 0 var(--mut2);}
   .tl-row{position:relative;display:grid;grid-template-columns:1fr 50px 1fr;align-items:start;padding:11px 0;}
   .tl-row.tl-click{cursor:pointer;}
   .tl-mid{display:flex;flex-direction:column;align-items:center;gap:3px;z-index:2;}
@@ -246,6 +294,20 @@
   .tl-tt{font:12px var(--mono);color:var(--ink);}
   .tl-pager{display:flex;align-items:center;gap:14px;justify-content:center;margin-top:16px;}
   .tl-pn{font:11px var(--mono);color:var(--ink2);}
+  /* 详情：单栏时间流——转写句和手写按时间顺序共享同一条轴，替代此前"左转写/右手写"两栏
+     （手写远多于转写时右栏挤满、左栏大片空白·2026-07-01 用户拍板重设计）。
+     手写卡片下方可带一行"附近转写"引用，把会议内容和当时的手写直接放在一起读。 */
+  .tl-flow{position:relative;padding-left:24px;}
+  .tl-flow::before{content:"";position:absolute;left:7px;top:5px;bottom:5px;width:1.5px;background:var(--hair2);}
+  .tl-fit{position:relative;padding:8px 0;}
+  .tl-fit::before{content:"";position:absolute;left:-20.5px;top:5px;width:7px;height:7px;border-radius:50%;background:var(--page);border:1.5px solid var(--ink2);} /* 空心=转写句 */
+  .tl-fit.tl-fmark::before{width:8px;height:8px;left:-21px;background:var(--ink);border-color:var(--ink);} /* 实心=手写 */
+  .tl-ftm{display:inline-block;font:10.5px var(--mono);color:var(--ink2);margin-right:7px;}
+  .tl-fcue-txt{font:12.5px/1.55 var(--sans);color:var(--ink2);}
+  .tl-fit.tl-fmark .tl-ink{display:block;font:12.5px/1.5 var(--sans);color:var(--ink);}
+  .tl-fnear{display:block;margin-top:3px;font:11px/1.5 var(--sans);color:var(--ink2);}
+  .tl-fnear::before{content:"“";}
+  .tl-fnear::after{content:"”";}
   .mtop{position:absolute;top:0;left:0;right:0;min-height:48px;display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--hair);background:var(--page);z-index:3;}
   .mtop .bk{width:26px;height:26px;display:grid;place-items:center;color:var(--ink);cursor:pointer;margin-left:-6px;}
   .mtop .bk svg{width:20px;height:20px;}

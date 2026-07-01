@@ -17,6 +17,8 @@ import { wrapSurfaceIndex } from '../evidence/target';
 import { ensureScannedPageLayer } from '../evidence/page-ocr';
 import { bus, getActiveContext, settings, state } from '../app/state';
 import { getReflow, openDoc, putReflow, storePdfBlob, loadPdfBlob, lastReadPage, activeDoc, setActiveDoc } from '../local/store';
+import { apiUrl } from '../core/api';
+import { authHeaders } from '../core/auth';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -40,12 +42,27 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string, onTimeout?: ()
     );
   });
 }
+/** 阶段E：只有走 /api/convert/* 才需要设备 session（票据机制在这条路径上生效）——其它目标（如已经是
+ *  PDF 的 feishu-svc 直链）不带这个头，维持原样。用解析后的绝对 URL 判断，避免相对/绝对写法误判。 */
+function shouldSendConvertAuth(raw: string): boolean {
+  try {
+    const u = new URL(apiUrl(raw), window.location.href);
+    const b = new URL(apiUrl('/api/convert/'), window.location.href);
+    const p = b.pathname.replace(/\/+$/, '');
+    return u.origin === b.origin && (u.pathname === p || u.pathname.startsWith(p + '/'));
+  } catch { return /^\/api\/convert(?:\/|$)/.test(raw); }
+}
+
 /** 带超时 + AbortController 的 PDF 字节下载：转换服务挂起时主动 abort，不泄漏连接。 */
 async function fetchPdfBytes(url: string, label: string): Promise<ArrayBuffer> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), PDF_FETCH_TIMEOUT_MS);
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
+    // codex 扫描出的真 bug：调用方传相对路径(/api/feishu-svc/... 或 /api/convert/...)时，安卓静态包(WebView appassets 源)
+    // 下裸 fetch 不会走 VITE_API_BASE_URL；apiUrl() 对已是绝对 URL 的入参是空操作，这里包一层不影响其它调用方。
+    // 阶段E：/api/convert/* 现在可能要求设备 session（docx 私有资源走票据）——精准只给这条路径带认证头。
+    const headers = shouldSendConvertAuth(url) ? authHeaders() : undefined;
+    const r = await fetch(apiUrl(url), { signal: ctrl.signal, headers });
     if (!r.ok) throw new Error(`${label} HTTP ${r.status}`);
     return await r.arrayBuffer();
   } catch (e) {

@@ -113,11 +113,13 @@ export async function getPanelMeetingSummary(meetingId: string, opts?: { signal?
   );
 }
 
-/** POST 触发 panel 现总结并落库（用户点「生成总结」时·panel 侧 in-flight 去重·M3 一次几秒~十几秒）。 */
+/** POST 触发 panel 现总结并落库（用户点「生成总结」时·panel 侧 in-flight 去重·M3 一次几秒~十几秒）。
+ *  ⚠️panel 缺妙记时用 409 携带 {status:'missing_minute',...}（不是真失败），必须 acceptStatuses:[409] 让 postJson
+ *  正常解析这份 body——不传的话 body 整个被丢弃、UI 里写好的"还没有妙记"友好提示永远走不到（codex 扫描出的真 bug）。 */
 export async function generatePanelMeetingSummary(meetingId: string, opts?: { signal?: AbortSignal }): Promise<{ status: PanelMeetingSummaryStatus; summary: PanelMeetingSummaryRecord | null }> {
   return postJson<{ status: PanelMeetingSummaryStatus; summary: PanelMeetingSummaryRecord | null }>(
     `${BASE}/meetings/${encodeURIComponent(meetingId)}/summary`,
     {},
-    opts,
+    { ...opts, acceptStatuses: [409] },
   );
 }

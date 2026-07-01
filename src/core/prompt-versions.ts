@@ -14,7 +14,6 @@ export const PROMPT_VERSIONS = {
   reflow_structure: 'v3',   // /api/reflow-ai[-stream] 结构重建
   reflow_vlm: 'v3',         // /api/reflow-vlm 看图重排
   meeting_summary: 'v2',    // /api/chat 会后思路总结（WS2-C·无状态·不进书 buffer）；v2=禁 markdown 纯文本
-  segment_digest: 'v1',     // /api/chat 会议某时段一句话摘要（WS2-C V2 概览 active 段·纯文本·无状态）
   concept_extractor: 'v2',  // /api/chat 从一条笔记抽 1-3 个规范概念词（Obsidian 概念层·纯文本逐行·无状态·缓存键含此版本）；v2=治过度抽象/低上下文幻觉/错误复用（真 LLM 探针后）
 } as const;
 

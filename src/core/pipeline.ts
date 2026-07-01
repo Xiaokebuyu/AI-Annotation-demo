@@ -308,7 +308,7 @@ interface CaptureContext {
   index: SurfaceIndex;
   event: AnnotationEvent;
   layers: { ink?: string; composite?: string };
-  inkSource: 'page_layer' | 'reader';
+  inkSource: 'page_layer' | 'reader' | 'ink_ref';
   ocrCrop?: string;
   targetPad?: number;
   recognizePoints: unknown;
@@ -335,11 +335,17 @@ function captureContextFor(event: AnnotationEvent): CaptureContext | null {
   const index = state.surfaceIndex;
   if (!index || event.page_id !== index.surface_id) return null;
   const rawLayers = grabLayers(event.geometry.bbox, 0.04);
+  // 离屏栅格化的 ink_ref（M103 日记白板零画布·从账本点串栅格化）优先——#ink-layer 此时是空的，抓它会得白图。
+  const inkRef = event.ink_ref ?? event.reflow_ink_ref;
+  // fail-closed(大忌兜底)：白板零画布下若离屏 ink_ref 缺失(极罕见·点全非有限/页未渲染)，别回退抓空白 #ink-layer 送 AI
+  //   ——grabLayers 对空层也产白底 PNG(truthy)、会让 recognizeInk 对白图瞎判=静默送白图。返回 null→captureMark 早退，
+  //   但 mark 仍在 resolveRegion 被 makeMark 持久化(只是这次不识别)，不丢数据。
+  if (index.surface_type === 'whiteboard' && !inkRef) return null;
   return {
     index,
     event,
-    layers: { ...rawLayers, ink: event.reflow_ink_ref ?? rawLayers.ink },
-    inkSource: event.reflow_ink_ref ? 'reader' : 'page_layer',
+    layers: { ...rawLayers, ink: inkRef ?? rawLayers.ink },
+    inkSource: event.ink_ref ? 'ink_ref' : event.reflow_ink_ref ? 'reader' : 'page_layer',
     ocrCrop: rawLayers.composite,
     recognizePoints: event.stroke_points,
   };
@@ -411,9 +417,13 @@ export async function captureMark(
   // markup 锚它所标的内容；freeform（手写/画）属 self_content——它本身就是内容，不锚到 bbox 碰巧蹭到的正文
   // （手写跟正文的位置关系靠叙事里同时出现的圈/划来带，避免"误锚正文→模型幻觉"）。
   const hmpTargets = resolved.type === 'markup' ? targets : [];
+  // 白板(日记)零画布：composite 是纯白背景(#ink-layer 空)→self_content 的 cropRef 改指离屏 ink 图，避免主模型视觉兜底拿白图。
+  const cropRef = index.surface_type === 'whiteboard' && resolved.type !== 'markup'
+    ? (layers.ink ?? layers.composite)
+    : layers.composite;
   const hmp = buildHmp({
     surfaceId: index.surface_id, action, targetBbox: captureEvent.geometry.bbox,
-    targetObjects: hmpTargets, cropRef: layers.composite,
+    targetObjects: hmpTargets, cropRef,
     vectorRef: resolved.type !== 'markup' ? layers.ink : undefined,
     textHint,
     captureSurface: captureEvent.capture_surface,

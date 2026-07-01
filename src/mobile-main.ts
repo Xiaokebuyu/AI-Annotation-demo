@@ -14,14 +14,17 @@ import { wireAnnotationLoop, flushRegion } from './app/annotation-loop';
 import { setTool, getActiveContext, state, settings, saveSettings, bus, type Tool } from './app/state';
 import { shortId } from './core/ids';
 import { createDiaryDoc, listDiaries, listBooks, setActiveDoc, setLastReadPage, setDiaryPageCount, renameDiary, deleteDiary } from './local/store';
-import { confirmSheet } from './mobile/sheet';
+import { confirmSheet, infoSheet } from './mobile/sheet';
 import { redrawInk } from './capture/ink';
 import { restoreLedgerState } from './controllers/ledger-restore';
 import { initEinkMirror } from './surface/eink';
+import { initM103HqHwArea } from './capture/m103-hqhw-area';
+import { initM103HqHwSocket } from './capture/m103-hqhw-socket';
 import { features } from './config/features';
 import { initMobileMeeting } from './mobile/meeting';
 import { initMobileDev } from './mobile/dev';
 import { initMobileShell } from './mobile/shell';
+import { initMobileAuthLogin } from './mobile/auth-login';
 import { publishVaultFromDevice, abortVaultPublish } from './integration/inksurface/vault-publish-device';
 import { createPager, mountPagerBar, type Pager, type PagerBar } from './surface/virtual-pager';
 import type { PersistedDoc } from './core/store-format';
@@ -42,7 +45,10 @@ initReader(el('reader'), { notePlacement: 'inline', restoreStrokes: true, replyM
 initInsightPanel({ cards: el('m-cards'), foot: el('m-panel-foot'), count: el('m-insight-count') }); // 本页洞察历史（复用桌面同款）
 initDevOverlay(); // dev 叠层（bbox/region/relation/HMP 浮窗·设置页 devOverlay/showRegion/showRelations 控·默认关）——接真桌面同款
 if (features.einkBridge) initEinkMirror(); // 电纸屏镜像：套壳内容变化 → 推 IT8951（web/dev 无桥则 no-op）
+initM103HqHwArea(); // M103 专用：上报当前画布矩形给原生 HqHwBridge 收窄画区（非 M103 直接 no-op）
+initM103HqHwSocket(); // M103 专用：接收硬件 socket 笔点（抬笔用同源点补画，消除微重影·非 M103 no-op）
 initMobileShell(); // 外壳交互（导航脊/子导航/工具/rail/文件浮层）——原 mobile.html 内联脚本，正规化后抽出
+initMobileAuthLogin(); // 阶段C：二维码设备登录门禁；有有效 session 时自动隐藏
 
 // AI 洞察抽屉开关（rail 💡）
 el('rl-ai').addEventListener('click', () => document.body.classList.toggle('insight-open'));
@@ -162,7 +168,13 @@ async function importPdfFile(f: File): Promise<void> {
   titleEl.contentEditable = 'false';
   titleEl.dataset.auto = '0';
   titleEl.textContent = f.name;
-  await loadFile(f); // 落库 + 渲首页 + emit document:loaded
+  try {
+    await loadFile(f); // 落库 + 渲首页 + emit document:loaded
+  } catch (e) {
+    // B7-bug2 联动：storePdfBlob 现在写失败会上抛，这里必须接住并告知用户，别让用户以为导入成功了。
+    void infoSheet({ title: '导入失败', message: `《${f.name}》未能保存：${e instanceof Error ? e.message : String(e)}` });
+    return;
+  }
   updatePageInd();
   void renderBookShelf(); // 新书进书架
 }
@@ -329,16 +341,18 @@ function pageNav(delta: number): void {
   if (state.surfaceType === 'article') {
     if (settings.viewMode === 'reader') {
       const r = readerFlip(delta);
-      if (r === 'moved') { updatePageInd(); return; }   // 在 PDF 页内翻了一张虚拟页
+      if (r === 'moved') { updatePageInd(); return; }   // 在 PDF 页内翻了一张虚拟页（同 pageId·不 reset·不用 flush）
       // 到 PDF 页边界 → 翻 PDF 页，但仅当真有目标页（否则首/末页 readerArmBackward+gotoPage 空转、landAtEnd 残留污染下次翻页落位）
       const hasTarget = delta < 0 ? state.pageIndex > 0 : state.pageIndex < state.pageCount - 1;
       if (!hasTarget) return;
+      flushRegion('manual'); // 翻 PDF 页会 page:rendered→resetAssembly 清掉在途笔→丢！先收口落库(空区域 no-op)
       if (delta < 0) readerArmBackward();               // 翻回上一 PDF 页 → 落其末屏
       gotoPage(delta);                                  // page:rendered → 重排 → settleV → reader:vpage → updatePageInd
       return;
     }
+    flushRegion('manual'); // 原版翻页同理，先收口
     gotoPage(delta);
-  } else gotoDiaryPage(state.pageIndex + delta);
+  } else { flushRegion('manual'); gotoDiaryPage(state.pageIndex + delta); } // 日记翻页也会换 pageId→reset，先收口
 }
 el('pg-prev').addEventListener('click', () => pageNav(-1));
 el('pg-next').addEventListener('click', () => pageNav(1)); // 日记：下一页可无限向前（空白新页·写了才落盘），取代原手动加页

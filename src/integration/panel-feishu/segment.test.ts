@@ -91,6 +91,22 @@ describe('buildSegments（分段对轴）', () => {
     expect(active[0].cues).toHaveLength(0);
     // 全部 cue 仍不丢
     expect(allCueIdx(segs)).toHaveLength(14);
+    // 会前 active 段后紧跟的 quiet 段不该继承负 cursor（quiet 段没有对应"会前"语义·codex 抓的真 bug）
+    const quiet = segs.find((s) => s.kind === 'quiet');
+    expect(quiet?.startMs).toBe(0);
+  });
+
+  it('会中首笔靠近 t0 时上下文裹垫不穿过 0（codex 补测）', () => {
+    const segs = buildSegments({ cues, marks: [mark('in', 5)], contextPreMs: 12_000 });
+    expect(segs.find((s) => s.kind === 'active')?.startMs).toBe(0);
+  });
+
+  it('会前和会中落笔混在同一簇时保留跨 0 的 active 段（codex 补测）', () => {
+    const segs = buildSegments({ cues, marks: [mark('pre', -5), mark('in', 10)] });
+    const active = segs.find((s) => s.kind === 'active')!;
+    expect(active.startMs).toBeLessThan(0);
+    expect(active.endMs).toBeGreaterThan(0);
+    expect(active.marks.map((m) => m.mark_id)).toEqual(['pre', 'in']);
   });
 
   it('启发式摘要取段内最长 cue 截断', () => {
@@ -98,14 +114,6 @@ describe('buildSegments（分段对轴）', () => {
     expect(segs[0].heuristicSummary).toContain('更长的讨论');
   });
 
-  it('cueHash 同内容稳定·内容变即变', () => {
-    const a = buildSegments({ cues, marks });
-    const b = buildSegments({ cues, marks });
-    expect(a.map((s) => s.cueHash)).toEqual(b.map((s) => s.cueHash));
-    const changed = buildSegments({ cues: [...cues.slice(0, 13), cue(14, 161, 170, '改了')], marks });
-    // 至少含末句的那段 hash 变了
-    expect(changed.map((s) => s.cueHash)).not.toEqual(a.map((s) => s.cueHash));
-  });
 });
 
 describe('buildSegmentMarks（relMs 换算）', () => {

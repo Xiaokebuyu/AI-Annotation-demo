@@ -26,6 +26,8 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import java.util.Locale
 
 /**
@@ -45,10 +47,13 @@ class MainActivity : ComponentActivity() {
         // 桌面 web 仍由 index.html 提供（浏览器访问）；两页都打进 assets（vite 多页构建）。
         private const val APP_URL = "https://appassets.androidplatform.net/assets/mobile.html"
         private const val META_DISPLAY_MODE = "com.inkloop.DISPLAY_MODE"
+        // 2026-07-01 重新打开：画区收窄(InkLoopHqHwArea) + 原生输入分类覆盖(InputSourceBridge) 都已接上。
+        private const val HQHW_BRIDGE_ENABLED = true
     }
 
     private lateinit var webView: WebView
     private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
+    private var hqHwEnabled = false
 
     // PDF 导入：前端 <input type=file accept=application/pdf> → 系统 SAF 文档选择器。
     private val filePicker = registerForActivityResult(
@@ -103,8 +108,27 @@ class MainActivity : ComponentActivity() {
         // 电纸屏推帧桥：注册 window.InkLoopEink。前端内容变化发 pageReady → PixelCopy 抓帧 → 灰度 →
         // abstract socket 交 eink-helper(root) 推 IT8951 电纸屏。无 helper/无电纸屏时静默失败、不影响 HDMI 显示。
         // DIRECT(BOOX)模式不 attach：避免无意义抓帧，也让前端 EinkPort 自然 no-op、改用 BOOX 原生刷新。
+        // DIRECT(M103 原生 EBC)模式改走 RkEinkBridge：两轮真机排查(含真实笔迹信号注入实测)证实 app 层做不到
+        // 精细控制刷新(厂商还有一条独立的 OSD/笔迹叠加层守护进程不受 app 控制)，改为固定原厂默认 mode=7，
+        // 不再注入 window.InkLoopEink——前端 eink.ts 在这类设备上自然走 no-op 分支（见该文件头注释）。
         if (displayMode == DisplayMode.IT8951) {
             com.example.hmpocrpoc.EinkBridge.attach(webView, this)
+        } else if (isRkNativeEinkDevice()) {
+            com.example.hmpocrpoc.RkEinkBridge.attach()
+            // 2026-07-01：HqHwBridge 武装厂商快速墨迹叠加层(hq.hw)，延迟真机确认大幅改善。曾因两个
+            // 问题临时关闭，现已修复：①画区曾是整个 WebView(含 UI chrome)，武装后 OSD 会在整个屏幕
+            // 响应笔迹、误伤 UI——现改成前端主动上报画布矩形(InkLoopHqHwArea，见 HqHwBridge.kt 头注释)。
+            // ②武装后真实笔到达 WebView 自己合成 PointerEvent 前会在底层丢失笔尖标识位，pointerType
+            // 被错报成 touch——现接入 InputSourceBridge，用一条更早的原生 OnTouchListener 拿到没被
+            // 污染的原始分类，前端 m103-input-source.ts 据此权威覆盖。
+            if (HQHW_BRIDGE_ENABLED) {
+                hqHwEnabled = true
+                com.example.hmpocrpoc.HqHwBridge.attach(webView)
+                com.example.hmpocrpoc.InputSourceBridge.attach(webView)
+            }
+            // 设备身份标记：只在真机确认为 M103 时注入，前端设备专用组件(如笔橡皮头识别)据此门控，
+            // 避免把这台设备的硬件专属细节(huion 笔 buttons 位约定等)泄漏进跨设备共用代码路径。
+            injectDeviceProfile(webView, "m103-haoqing")
         }
 
         // WebView 内文件浏览器桥：注册 window.InkLoopFiles（list/readBase64 /sdcard）。
@@ -212,12 +236,35 @@ class MainActivity : ComponentActivity() {
         return systemProp("ro.vendor.eink").equals("true", ignoreCase = true)
     }
 
+    /** DIRECT 设备里再细分：排除 ONYX/BOOX(纯直显、无 sys.eink./eink 服务这套)，
+     *  只有真正的 RK 原生 EBC 电纸屏(Haoqing M103 等)才走 RkEinkBridge 的 Binder 刷新桥。 */
+    private fun isRkNativeEinkDevice(): Boolean {
+        val fp = arrayOf(Build.MANUFACTURER, Build.BRAND, Build.MODEL, Build.DEVICE, Build.PRODUCT, Build.FINGERPRINT)
+            .joinToString(" ") { it.orEmpty() }.lowercase(Locale.ROOT)
+        if (fp.contains("onyx") || fp.contains("boox")) return false
+        if (fp.contains("haoqing") || fp.contains("rk3566") || fp.contains("_eink")) return true
+        return systemProp("ro.vendor.eink").equals("true", ignoreCase = true)
+    }
+
     /** 读系统属性(hidden android.os.SystemProperties，反射)。 */
     private fun systemProp(key: String): String = try {
         @Suppress("PrivateApi")
         Class.forName("android.os.SystemProperties")
             .getMethod("get", String::class.java).invoke(null, key) as? String ?: ""
     } catch (_: Throwable) { "" }
+
+    /** 注入只读设备身份标记 `window.__inkloopDeviceProfile`，供前端设备专用组件门控（不做交互通道，
+     *  纯一次性常量，调用方只传硬编码字面量，不需要 JSON 转义）。用 addDocumentStartJavaScript 在页面
+     *  脚本跑之前就位，避免竞态；不支持该 WebViewFeature 的旧内核直接跳过——设备专用功能本就该静默
+     *  降级，不影响主功能。 */
+    private fun injectDeviceProfile(webView: WebView, profile: String) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        WebViewCompat.addDocumentStartJavaScript(
+            webView,
+            "window.__inkloopDeviceProfile = '$profile';",
+            setOf("https://$APP_HOST"),
+        )
+    }
 
     /** Android 11+ 读 /sdcard 任意文件需「所有文件访问」。未授权则拉一次系统授权页（best-effort，失败静默）。
      *  电纸屏定制板多半可直接授予/已授；授权后 InkLoopFilesBridge.list 才能枚举到 /sdcard/Download 的书。 */
@@ -233,7 +280,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (hqHwEnabled) com.example.hmpocrpoc.HqHwBridge.onResume()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hqHwEnabled) com.example.hmpocrpoc.HqHwBridge.onWindowFocusChanged(hasFocus)
+    }
+
+    override fun onPause() {
+        if (hqHwEnabled) com.example.hmpocrpoc.HqHwBridge.onPause()
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        if (hqHwEnabled) com.example.hmpocrpoc.HqHwBridge.destroy()
         if (this::webView.isInitialized) webView.destroy()
         super.onDestroy()
     }

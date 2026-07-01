@@ -18,6 +18,7 @@ import { SurfaceContext } from '../../app/surface-context';
 import { icon } from '../../surface/icons';
 import { esc } from '../../core/escape';
 import type { MeetingStatus, PersistedDoc, PersistedMeeting } from '../../core/store-format';
+import { apiUrl } from '../../core/api';
 import './meeting.css';
 
 /** 会议 ↔ 导航壳的唯一桥。壳在 boot 时经 initMeeting 注入实现。 */
@@ -51,23 +52,26 @@ const MTG_STATUS: Record<MeetingStatus, { t: string; c: string; bg: string }> = 
   ended: { t: '已结束', c: '#5b5b66', bg: '#f0f0f2' },
 };
 
-// 独立飞书后端（feishu-service）。dev 默认 localhost:4321；服务不在就静默退回纯本地。
-const FEISHU_BASE = ((import.meta.env.VITE_FEISHU_BASE_URL as string | undefined) ?? 'http://localhost:4321').replace(/\/+$/, '');
-// 文档转换公共基础设施（convert-service）。任意可读文件 URL → 可标注 PDF。
-const CONVERT_BASE = ((import.meta.env.VITE_CONVERT_BASE_URL as string | undefined) ?? 'http://localhost:4330').replace(/\/+$/, '');
+// P0 安全止血：feishu-service/convert-service 之前零鉴权、前端直连裸端口（见项目记忆盲区扫描发现）。
+// 浏览器请求一律走同源代理（secret 服务端注入）；FEISHU_ABSOLUTE 只用于拼「喂给 convert-service 当抓取源」的地址
+// （convert-service 服务端 fetch，自己代填 secret，见 mobile/meeting.ts 同款注释）。
+const FEISHU_PROXY = '/api/feishu-svc';
+const CONVERT_PROXY = '/api/convert';
+const FEISHU_ABSOLUTE = ((import.meta.env.VITE_FEISHU_SERVICE_ABSOLUTE as string | undefined) ?? 'http://localhost:4321').replace(/\/+$/, '');
 /** 该群文件能不能直接转成可标注 PDF（v1 只 HTML）。 */
 const isConvertible = (f: FeishuMsg): boolean => f.msg_type === 'file' && /\.html?$/i.test(f.file_name || '');
-/** 群文件的飞书下载 URL（im:resource）。 */
-function feishuFileUrl(f: FeishuMsg): string {
+const feishuFilePath = (f: FeishuMsg): string => {
   const img = f.msg_type === 'image';
   const key = img ? f.image_key : f.file_key;
   const name = img ? '［图片］' : (f.file_name || '文件');
-  return `${FEISHU_BASE}/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
-}
-/** HTML 群文件 → convert-service 转出的可标注 PDF 的 URL。 */
-const convertedPdfUrl = (f: FeishuMsg): string => `${CONVERT_BASE}/convert/to-pdf?url=${encodeURIComponent(feishuFileUrl(f))}`;
+  return `/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
+};
+/** 群文件的飞书下载 URL（浏览器直接点开用·走同源代理）。apiUrl() 包一层：安卓静态包下要落到 VITE_API_BASE_URL。 */
+function feishuFileUrl(f: FeishuMsg): string { return apiUrl(`${FEISHU_PROXY}${feishuFilePath(f)}`); }
+/** HTML 群文件 → convert-service 转出的可标注 PDF 的 URL（内嵌的抓取源要用真绝对地址）。 */
+const convertedPdfUrl = (f: FeishuMsg): string => apiUrl(`${CONVERT_PROXY}/to-pdf?url=${encodeURIComponent(FEISHU_ABSOLUTE + feishuFilePath(f))}`);
 async function feishuGet<T>(path: string): Promise<T> {
-  const r = await fetch(FEISHU_BASE + path);
+  const r = await fetch(apiUrl(FEISHU_PROXY + path));
   if (!r.ok) throw new Error('feishu-service ' + r.status);
   return r.json() as Promise<T>;
 }
@@ -361,7 +365,7 @@ async function renderMtgHome(c: HTMLDivElement): Promise<void> {
   body.innerHTML =
     `<section class="mtg-sec"><div class="mtg-sec-h">${icon('calendar')} 会议日程 <span class="mtg-soon">飞书日历 + 本地 · 待开始 / 进行中</span>${connectCtl}</div>${schedHtml}</section>`
     + `<section class="mtg-sec"><div class="mtg-sec-h">${icon('library')} 群聊书架 <span class="mtg-soon">以群聊为单位</span></div>${wsHtml}</section>`;
-  body.querySelector('#mtg-fs-connect')?.addEventListener('click', () => { window.open(FEISHU_BASE + '/api/feishu/oauth/login', '_blank', 'noopener'); });
+  body.querySelector('#mtg-fs-connect')?.addEventListener('click', () => { window.open(apiUrl(FEISHU_PROXY + '/api/feishu/oauth/login'), '_blank', 'noopener'); });
   body.querySelectorAll<HTMLButtonElement>('.mtg-ws[data-ws]').forEach((b) => b.addEventListener('click', () => mtgGoWorkspace(b.dataset.ws!)));
   wireMeetingRows(body);
 }
@@ -472,9 +476,8 @@ async function renderMtgDetail(c: HTMLDivElement, mtgId: string): Promise<void> 
       groupHtml = files.length
         ? `<div class="mtg-shelf">` + files.map((f) => {
             const img = f.msg_type === 'image';
-            const key = img ? f.image_key : f.file_key;
             const name = img ? '［图片］' : (f.file_name || '文件');
-            const url = `${FEISHU_BASE}/api/feishu/messages/${encodeURIComponent(f.message_id)}/file/${encodeURIComponent(key || '')}?type=${img ? 'image' : 'file'}&name=${encodeURIComponent(name)}`;
+            const url = feishuFileUrl(f);
             return `<a class="mtg-mat" href="${esc(url)}" target="_blank" rel="noopener" title="从群下载查看（im:resource）">`
               + `${icon('file')}<span class="mtg-mat-body"><span class="mtg-mat-name">${esc(name)}</span>`
               + `<span class="mtg-mat-meta">群文件 · ${esc(fmtMs(f.create_time))}</span></span></a>`;

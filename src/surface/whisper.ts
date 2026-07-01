@@ -21,6 +21,17 @@ let popEl: HTMLElement | null = null;
 let backdropEl: HTMLElement | null = null;
 function closePop(): void { popEl?.remove(); popEl = null; backdropEl?.remove(); backdropEl = null; }
 
+function dropEl(id: string): void {
+  const el = els.get(id);
+  if (el) { el.remove(); els.delete(id); }
+}
+/** 清掉已脱离 state.overlays 的孤儿 DOM——换页/换日记时 renderer 会把 state.overlays 换掉但不发 overlay:remove，
+ *  旧页的旁注/星标 DOM 会漏在 layer 上残留（尤其电纸屏日记折叠星标·用户实测"星星持久钉死"）。 */
+function pruneOrphanEls(): void {
+  const liveIds = new Set(state.overlays.map((o) => o.overlay_id));
+  for (const id of [...els.keys()]) if (!liveIds.has(id)) dropEl(id);
+}
+
 /** 状态机（收下/改写/散去）单一来源：改 state[+改写文本] → emit overlay:state（annotation-loop 落账本）。 */
 function setOverlayState(o: ScreenOverlay, el: HTMLElement | undefined, next: ScreenOverlay['state'], newText?: string): void {
   if (o.state !== 'shown' && !(o.state === 'accepted' && next === 'edited')) return;
@@ -66,8 +77,10 @@ function openPop(o: ScreenOverlay): void {
   pop.style.top = `${p.y + 8}px`;
 }
 
-/** 折叠标记：在锚点放一个小点触标记（已处理态由 dataset.state 给视觉）。 */
+/** 折叠标记：只给「当前页未处理(shown)回复」放点触星标——它是"这页有条待处理 AI 回复"的入口，不是历史钉。
+ *  收下/改写/散去后 state 变→layoutMarkers 会清掉它；恢复已处理的 overlay 也不再钉星（账本/洞察历史仍在）。 */
 function addMarker(o: ScreenOverlay): void {
+  if (o.page_id !== state.pageId || o.state !== 'shown') return;
   const el = document.createElement('div');
   el.className = 'whisper-mark' + (o.result_type === 'error' ? ' error' : '');
   el.dataset.overlay = o.overlay_id;
@@ -78,12 +91,14 @@ function addMarker(o: ScreenOverlay): void {
   relayout();
 }
 
-/** 折叠模式排版：标记贴锚点（anchor 左上）；非当前页/散去则隐。 */
+/** 折叠模式排版：遍历现有星标 DOM，只保留「当前页未处理(shown)」的贴锚点；已收下/改写/散去、非当前页、
+ *  已脱离 state 的一律**清掉 DOM**（旧版只 display:none·处理后仍钉在页上→用户实测"星星持久留下"的根因）。 */
 function layoutMarkers(): void {
-  for (const o of state.overlays) {
-    const el = els.get(o.overlay_id);
-    if (!el) continue;
-    if (o.page_id !== state.pageId || o.state === 'dismissed') { el.style.display = 'none'; continue; }
+  const byId = new Map(state.overlays.map((o) => [o.overlay_id, o] as const));
+  for (const id of [...els.keys()]) {
+    const o = byId.get(id);
+    if (!o || o.page_id !== state.pageId || o.state !== 'shown') { dropEl(id); continue; }
+    const el = els.get(id)!;
     el.style.display = '';
     const [x, y] = o.geometry.anchor_bbox;
     const p = normToPx(x, y);
@@ -142,6 +157,7 @@ function layoutGutter(items: ScreenOverlay[]): void {
 
 /** 统一重排：先定可见性，再按落点排版。任何位置/状态/页面/设置变化都走这里。 */
 function relayout(): void {
+  pruneOrphanEls(); // 先清换页/换日记后脱离 state 的孤儿 DOM（两种落点共用）
   if (folded) { layoutMarkers(); return; } // 折叠模式：标记贴锚点
   const live: ScreenOverlay[] = [];
   for (const o of state.overlays) {
@@ -232,6 +248,7 @@ export function initWhisper(whisperLayer: HTMLElement, opts: { fold?: boolean } 
   bus.on('overlay:remove', (id) => { if (folded) closePop(); remove(id as string); });
   bus.on('overlay:state', (o) => {
     const ov = o as ScreenOverlay;
+    if (folded && ov.state !== 'shown') closePop(); // 折叠面：处理后关掉浮层（relayout 会连星标一起清）
     const el = els.get(ov.overlay_id);
     if (el) el.dataset.state = ov.state;
     relayout();

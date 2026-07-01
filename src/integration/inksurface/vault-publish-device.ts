@@ -8,6 +8,7 @@
  *       可吊销 token（见记忆 inkloop-obsidian-clean-vault·暂缓）——本件是单用户传输层。
  */
 import type { VaultExportBundle } from './vault-export';
+import type { VaultEntityRef } from './vault-collect';
 
 export const VAULT_PUBLISH_USER_ID = 'edy'; // 须三处一致：此处 / Obsidian 插件 userId / standalone INKLOOP_USER_ID（否则发上去 Obsidian 同步不到）
 export const VAULT_PUBLISH_DEVICE_ID = 'mobile'; // 仅来源元数据
@@ -122,4 +123,40 @@ export async function publishVaultFromDevice(opts: VaultPublishOpts = {}): Promi
     opts.signal?.removeEventListener('abort', onAbort);
     if (controller === ctrl) controller = null;
   }
+}
+
+export interface EntityPublishResult extends VaultPublishResult {
+  entityEmpty?: boolean; // true=预检发现这个实体没有可导出内容（无手写/无资料）——未发起网络请求
+}
+
+/**
+ * 阶段⑤·按需导出入口：单会议/单书「导出到 Obsidian」按钮调这个。
+ * 先用 collectVaultEntity 轻量预检这个实体是否有内容（没有就直接告知，不发请求）；
+ * 有内容才走 publishVaultFromDevice 的整包安全通道发布（原因见 vault-collect.ts collectVaultEntity 头注：
+ * panel latest release 是全量快照语义，真正「只传这一个实体」要等 panel 实体端点部署后才能做）。
+ * 发布成功且是会议 → 落 exported_at（recap 显示「上次导出」）。
+ */
+export async function publishEntityToVault(ref: VaultEntityRef, opts: VaultPublishOpts = {}): Promise<EntityPublishResult> {
+  const userId = opts.userId ?? VAULT_PUBLISH_USER_ID;
+  const deviceId = opts.deviceId ?? VAULT_PUBLISH_DEVICE_ID;
+  const { collectVaultEntity } = await import('./vault-collect');
+  let entity: Awaited<ReturnType<typeof collectVaultEntity>>;
+  try {
+    entity = await collectVaultEntity(ref, { generatedAt: opts.generatedAt, appVersion: opts.appVersion });
+  } catch (e) {
+    // 实体不存在/已被删（collectVaultEntity 现在对这种情况抛错·非"没内容"）——按钮层要弹失败提示,不能当 entityEmpty 轻提示放过（codex 抓）。
+    return { ok: false, stage: 'collect', userId, deviceId, error: String((e as Error)?.message || e) };
+  }
+  if (!entity) {
+    return {
+      ok: false, stage: 'collect', userId, deviceId, entityEmpty: true,
+      error: ref.mode === 'meeting' ? '这场会议还没有可导出内容（没有手写、也没有转写）' : '这份文档还没有可导出内容',
+    };
+  }
+  const result = await publishVaultFromDevice(opts);
+  if (result.ok && ref.mode === 'meeting') {
+    const { updateMeeting } = await import('../../local/store');
+    await updateMeeting(ref.meetingId, { exported_at: new Date().toISOString() }).catch(() => {});
+  }
+  return result;
 }

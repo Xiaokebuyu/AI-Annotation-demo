@@ -11,7 +11,6 @@
  */
 
 import type { TranscriptCue } from './align';
-import { promptVersion } from '../../core/prompt-versions';
 
 /** 段内手写（UI 右轴 + 详情用）。relMs＝相对会议时刻；可为负＝会前落笔（M6：不再 clamp ≥0）。 */
 export interface SegmentMark {
@@ -29,8 +28,7 @@ export interface RecapSegment {
   endMs: number;          // 段止
   cues: TranscriptCue[];  // 落在本段的转写句（按 startMs）——并集覆盖全部 cue·零丢失
   marks: SegmentMark[];   // 本段手写（quiet 恒空）
-  heuristicSummary: string; // 启发式一句话（无需 AI·即时）：active 段当 AI 摘要 fallback、quiet 段当简介
-  cueHash: string;        // 本段 cue 文本指纹（AI 段摘要缓存键·内容变即失效）
+  heuristicSummary: string; // 一句话（转写原文摘句）：active 段主展示文案、quiet 段当简介
 }
 
 export interface SegmentInput {
@@ -71,24 +69,10 @@ export function buildSegmentMarks(
     .sort((a, b) => a.relMs - b.relMs);
 }
 
-const fnv1a = (s: string): string => {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0; }
-  return h.toString(16).padStart(8, '0');
-};
 
-/** 段 cue 文本指纹（含段 kind + cue 数·防不同段同文撞键）。内容变 → 键变 → AI 摘要缓存自动失效。 */
-function hashCues(kind: string, cues: TranscriptCue[]): string {
-  return fnv1a(kind + '|' + cues.length + '|' + cues.map((c) => c.index + ':' + (c.speaker ?? '') + ':' + c.text).join(''));
-}
 
-/** active 段 AI 摘要缓存键＝段指纹 + segment_digest prompt 版本（prompt bump 后旧摘要自动失效·codex A#3）。
- *  meeting-recap（读写缓存）与 meeting-export（读缓存当 heading）共用此键，杜绝两侧 key 漂移。 */
-export function digestCacheKey(seg: RecapSegment): string {
-  return `segment_digest@${promptVersion('segment_digest')}:${seg.cueHash}`;
-}
-
-/** 启发式一句话：取段内最长 cue 文本截断（最能代表讨论密点）；空段给占位。 */
+/** 启发式一句话：取段内最长 cue 文本截断（最能代表讨论密点）；空段给占位。
+ *  概览/详情/导出统一直接用这句（不再另起 LLM 摘要一遍——转写本身就是妙记给的可信原文，没必要二次复述）。 */
 function heuristicOf(cues: TranscriptCue[], marks: SegmentMark[]): string {
   if (cues.length) {
     let best = cues[0];
@@ -182,18 +166,26 @@ export function buildSegments(input: SegmentInput): RecapSegment[] {
 
   // ⑥ 收口：丢掉「无 cue 的 quiet 段」（纯空隙不展示）；active 段恒保留（含手写）。
   //    段时间界＝frame 边界（frames 由游标行走铺成·连续且不重叠）→ 直接用，保证段间不重叠（别再 min/max 撑出界）。
+  //    ⚠️quiet 段单独 clamp startMs≥0（codex 抓：会前 active 段后紧跟的 quiet 段会继承负 cursor，quiet 段本无手写、
+  //    只用来兜 cue——而 cue.startMs 恒≥0，"会前 quiet" 没有对应语义，UI 会显示成误导的负时间范围）。
+  //    clamp 只发生在这里（灌 cue 时用的还是真实 frame 边界），不影响 cue 归属；active 段的负 startMs 不变（M6 本意）。
   const out: RecapSegment[] = [];
   frames.forEach((f, i) => {
     const segCues = bucket[i];
     if (f.kind === 'quiet' && !segCues.length) return;
-    out.push(finishSeg(f.kind, f.start, f.end, segCues, f.marks));
+    if (f.kind === 'quiet') {
+      const start = Math.max(0, f.start);
+      out.push(finishSeg('quiet', start, Math.max(start, f.end), segCues, []));
+      return;
+    }
+    out.push(finishSeg('active', f.start, f.end, segCues, f.marks));
   });
   return out;
 }
 
 function finishSeg(kind: 'active' | 'quiet', startMs: number, endMs: number, cues: TranscriptCue[], marks: SegmentMark[]): RecapSegment {
   // 不再 clamp ≥0：会前 active 段的负 startMs 要保留（M6·UI 靠它渲成时间轴左侧「会前」段）。
-  return { kind, startMs, endMs, cues, marks, heuristicSummary: heuristicOf(cues, marks), cueHash: hashCues(kind, cues) };
+  return { kind, startMs, endMs, cues, marks, heuristicSummary: heuristicOf(cues, marks) };
 }
 
 function nearestFrame(frames: Array<{ start: number; end: number }>, t: number): number {

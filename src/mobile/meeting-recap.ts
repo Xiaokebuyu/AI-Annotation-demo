@@ -12,7 +12,8 @@ import { postNdjson } from '../core/api';
 import { settings } from '../app/state';
 import { listRecentPanelMeetings, getMinuteTranscript, bindPanelMinute, getPanelMeetingSummary, generatePanelMeetingSummary, type PanelFeishuMeeting, type PanelMeetingSummaryStatus } from '../integration/panel-feishu/client';
 import { parseSrtTranscript, type TranscriptCue } from '../integration/panel-feishu/align';
-import { buildSegments, buildSegmentMarks, digestCacheKey, type RecapSegment } from '../integration/panel-feishu/segment';
+import { buildSegments, buildSegmentMarks, type RecapSegment } from '../integration/panel-feishu/segment';
+import { publishEntityToVault } from '../integration/inksurface/vault-publish-device';
 import type { PersistedMeeting, PersistedMark, PanelMeetingSummaryRecord } from '../core/store-format';
 
 const SUMMARY_TRANSCRIPT_CAP = 16000; // 喂 AI 的转写字数软上限（长转写分块留 P5）
@@ -144,26 +145,26 @@ export function wireRecapCard(root: HTMLElement, meetingId: string, rerender: ()
 
 const OV_PAGE = 6;             // 概览每页段数
 const DT_PAGE = 12;            // 详情每页句数
-const DIGEST_CONCURRENCY = 4; // active 段 AI 摘要并发上限
 const MARKS_CAP = 3;          // 概览段内手写最多列几条（余下折成「＋另 N 处」·详情看全）
 
+/** overview=时间脊(默认主体) · detail=段级详情(overview 下钻) · summary=思路总结整页 · panel=panel总结整页——
+ *  后两者是左侧 #recap-nav 三个入口里的两个，彼此平级（点入口直切·非抽屉）。 */
 interface RecapV2 {
   meeting: PersistedMeeting;
   segments: RecapSegment[];
-  digests: Record<string, string>; // 段 cueHash → AI 一句话（缓存命中 + 新生成合并）
-  view: 'overview' | 'detail';
+  view: 'overview' | 'detail' | 'summary' | 'panel';
   detailIdx: number;            // detail 视图当前段下标
   ovPage: number;               // 概览翻页
   dtPage: number;               // 详情翻页
-  bodyEl: HTMLElement;          // 供 recapHandleBack 复用重渲
+  bodyEl: HTMLElement;          // 供 recapHandleBack / 各页重渲复用
   transcriptMissing: boolean;   // 转写为空/未就绪但仍展示手写档案（提示用·防误以为没内容）
-  panelSummary: PanelMeetingSummaryRecord | null; // L5：panel 五要素总结（顶部全局摘要·和段级时间线互补）
+  panelSummary: PanelMeetingSummaryRecord | null; // L5：panel 五要素总结（独立整页·和时间脊互补）
   panelSummaryStatus: string;   // loading / ready / not_generated / missing_minute / generating / failed
 }
 let recapState: RecapV2 | null = null;
 // 防异步串会：打开 A 后快速返回/打开 B，A 的晚到结果（转写/AI 摘要）不能覆盖 B 的视图/状态。
 let recapLoadSeq = 0;
-export function resetRecapView(): void { recapLoadSeq++; recapState = null; }
+export function resetRecapView(): void { recapLoadSeq++; recapState = null; updateExportButton(); updateRecapNav(); }
 function recapAlive(seq: number, bodyEl: HTMLElement): boolean {
   // 含 data-mode：底部导航离开会议页后，晚到的异步 digest 不再更新隐藏 state/缓存（codex A#5）。
   return seq === recapLoadSeq && document.body.dataset.mode === 'meet' && document.body.dataset.mtg === 'recap' && document.body.contains(bodyEl);
@@ -200,8 +201,8 @@ async function loadTranscript(m: PersistedMeeting): Promise<{ srt: string; cues:
   return { srt: '', cues: [] };
 }
 
-// 负 ms＝会前（M6·segment.ts 不再 clamp≥0）：保留负号，如 -9:52。
-const clk = (ms: number): string => { const neg = ms < 0; const s = Math.round(Math.abs(ms) / 1000); return `${neg ? '-' : ''}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+// 负 ms＝会前（M6·segment.ts 不再 clamp≥0）：保留负号，如 -9:52。⚠️s 四舍五入到 0 时别显 "-0:00"（codex 抓）。
+const clk = (ms: number): string => { const s = Math.round(Math.abs(ms) / 1000); const neg = ms < 0 && s > 0; return `${neg ? '-' : ''}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const rng = (a: number, b: number): string => `${clk(a)}–${clk(b)}`;
 // t0/offset 防 NaN（started_at 可能解析失败·codex A#1）：取第一个有限值，否则 0。
 const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
@@ -214,10 +215,13 @@ const meetingT0 = (m: PersistedMeeting): number =>
 const inkLabel = (feat: string): string => (feat === 'drawing' ? '◇ 图形' : '✎ 手写');
 const inkText = (text: string, feat: string): string => text.trim() || (feat === 'drawing' ? '（图形标注 / 圈画）' : '（未识别手写）');
 
-/** 进 recap 视图：拉转写 + 手写档案 → 分段 → 渲染概览（段级时间线）；并异步补 active 段 AI 摘要。 */
+/** 进 recap 视图：拉转写 + 手写档案 → 分段 → 渲染概览（段级时间线为主体·左侧 #recap-nav 三个入口切到思路总结/panel总结整页）；
+ *  并异步补 active 段 AI 摘要。 */
 export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titleEl: HTMLElement): Promise<void> {
   const seq = ++recapLoadSeq;
   recapState = null;
+  updateExportButton(); // 加载中先隐藏导出按钮/nav（还没有有效 recapState）
+  updateRecapNav();
   bodyEl.innerHTML = '<p class="rc-note">正在拉取转写…</p>';
   const m = await getMeeting(meetingId);
   if (!recapAlive(seq, bodyEl)) return;
@@ -226,7 +230,19 @@ export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titl
   if (m.panel_summary_unread) void updateMeeting(m.meeting_id, { panel_summary_unread: false }); // 进 recap 即「已读」·清 home/detail 提醒
   const hasPanelMeeting = !!m.feishu_meeting_id;
   const hasMinute = !!m.feishu_minute_token;
-  if (!hasPanelMeeting && !hasMinute) { bodyEl.innerHTML = '<p class="rc-note">尚未关联飞书会议。</p>'; return; }
+  // codex 扫描出的真 bug：新版单页面 recap 没挂旧 detail 卡片的关联入口，日历来的会议一旦没关联上飞书会议就卡死在死文案、
+  // 用户没有任何办法自救。这里直接把 recap 空态变成一个可操作的关联入口（复用 associate()，成功后原地重载 recap）。
+  if (!hasPanelMeeting && !hasMinute) {
+    bodyEl.innerHTML = '<p class="rc-note">尚未关联飞书会议——关联后才能读 panel 总结和转写对轴。</p>'
+      + '<button class="hbtn pri" id="recap-assoc-empty" style="margin-top:2px">关联飞书会议</button>';
+    bodyEl.querySelector('#recap-assoc-empty')?.addEventListener('click', () => {
+      void (async () => {
+        if (!recapAlive(seq, bodyEl)) return;
+        if (await associate(m)) { if (recapAlive(seq, bodyEl)) void loadRecapView(meetingId, bodyEl, titleEl); }
+      })();
+    });
+    return;
+  }
 
   // 有妙记才拉转写；只有 panel 会议（妙记未绑）时跳过转写，靠 panel 总结 + 手写档案撑起 recap。
   let loaded: { srt: string; cues: TranscriptCue[] } | null = null;
@@ -248,77 +264,46 @@ export async function loadRecapView(meetingId: string, bodyEl: HTMLElement, titl
   if (!cues.length && !segMarks.length && !hasPanelMeeting) { bodyEl.innerHTML = '<p class="rc-note">转写为空或还在生成，本场也没有手写档案。</p>'; return; }
 
   const segments = buildSegments({ cues, marks: segMarks });
-  recapState = { meeting: m, segments, digests: { ...(m.segment_digests ?? {}) }, view: 'overview', detailIdx: 0, ovPage: 0, dtPage: 0, bodyEl, transcriptMissing: !cues.length,
+  recapState = { meeting: m, segments, view: 'overview', detailIdx: 0, ovPage: 0, dtPage: 0, bodyEl, transcriptMissing: !cues.length,
     panelSummary: m.panel_summary ?? null, panelSummaryStatus: m.panel_summary ? 'ready' : (m.panel_summary_status ?? 'loading') };
   renderRecap(bodyEl);
-  if (cues.length) void generateDigests(seq, bodyEl, m, segments); // 有转写才补 AI 段摘要（无转写没东西可总结）
-  void loadPanelSummary(seq, bodyEl, m); // L5：异步拉 panel 总结（不阻塞时间线·拉到后重渲顶部）
-}
-
-/** 只留当前分段 active 段的缓存键（剪掉旧分段/旧 prompt 版本残留键·codex A#4）。 */
-function keepCurrentDigests(segments: RecapSegment[], digests: Record<string, string>): Record<string, string> {
-  const keep: Record<string, string> = {};
-  for (const s of segments) { const k = digestCacheKey(s); if (s.kind === 'active' && digests[k]) keep[k] = digests[k]; }
-  return keep;
-}
-const sameMap = (a: Record<string, string>, b: Record<string, string>): boolean => {
-  const ak = Object.keys(a); return ak.length === Object.keys(b).length && ak.every((k) => a[k] === b[k]);
-};
-
-// ── active 段一句话 AI 摘要（缺缓存才调·并发受限·完成后单次重渲·失败回退启发式）──
-async function generateDigests(seq: number, bodyEl: HTMLElement, m: PersistedMeeting, segments: RecapSegment[]): Promise<void> {
-  // 全无 pending 也要把缓存剪到当前键（旧分段/旧 prompt 版本残留键清掉·A#4），与重渲解耦。
-  const persistPrune = async (): Promise<void> => {
-    if (seq !== recapLoadSeq || !recapState) return;
-    const keep = keepCurrentDigests(segments, recapState.digests);
-    if (!sameMap(m.segment_digests ?? {}, keep)) { try { await updateMeeting(m.meeting_id, { segment_digests: keep }); } catch { /* 缓存失败不阻断显示 */ } }
-  };
-  const pending = segments.filter((s) => s.kind === 'active' && s.cues.length && !recapState?.digests[digestCacheKey(s)]);
-  if (!pending.length) { await persistPrune(); return; }
-  let changed = false;
-  await runPool(pending, DIGEST_CONCURRENCY, async (seg) => {
-    const text = await digestSegment(seg);
-    if (!text || seq !== recapLoadSeq || !recapState) return;
-    recapState.digests[digestCacheKey(seg)] = text;
-    changed = true;
-  });
-  if (seq !== recapLoadSeq || !recapState) return;
-  await persistPrune();
-  if (changed && recapAlive(seq, bodyEl)) renderRecap(bodyEl);
-}
-
-/** 单段 AI 一句话摘要（segment_digest role·纯文本·不走 chatTurn 不污染书 buffer）。失败/中断返回 null（回退启发式）。 */
-async function digestSegment(seg: RecapSegment): Promise<string | null> {
-  const transcript = seg.cues.map((c) => (c.speaker ? c.speaker + '：' : '') + c.text).join('\n');
-  const prompt = `会议某时段转写片段（请只据此用一句话概括）：\n${transcript}`;
-  let full = ''; let done = false; let err = '';
-  try {
-    await postNdjson<{ k?: string; d?: string }>(
-      '/api/chat',
-      { messages: [{ role: 'user', content: prompt }], role: 'segment_digest', model: settings.inferModel, maxTokens: 120 },
-      (frame) => {
-        if (frame.k === 'e') { err = frame.d || '中断'; return; }
-        if (frame.k === 'done') { done = true; return; }
-        if (frame.k === 't' && frame.d) full += frame.d;
-      },
-    );
-  } catch { return null; }
-  if (err || !done) return null;
-  const out = full.trim().replace(/^摘要[:：]\s*/, '').replace(/[。.\s]+$/, '');
-  return out || null;
-}
-
-/** 并发池：items 经 n 路 worker 跑 fn，单项失败不影响其它。 */
-async function runPool<T>(items: T[], n: number, fn: (it: T) => Promise<void>): Promise<void> {
-  let i = 0;
-  const worker = async (): Promise<void> => { while (i < items.length) { const it = items[i++]; await fn(it).catch(() => {}); } };
-  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+  updateExportButton();
+  wireRecapExportButton();
+  updateRecapNav();
+  wireRecapNav();
+  void loadPanelSummary(seq, bodyEl, m); // L5：异步拉 panel 总结（不阻塞时间线·拉到后按当前 view 重渲）
 }
 
 function renderRecap(bodyEl: HTMLElement): void {
   if (!recapState) return;
   if (recapState.view === 'detail') renderRecapDetail(bodyEl);
+  else if (recapState.view === 'summary') renderRecapSummaryPage(bodyEl);
+  else if (recapState.view === 'panel') renderRecapPanelPage(bodyEl);
   else renderRecapOverview(bodyEl);
+}
+
+/** 导航脊 #recap-sub：时间脊/思路总结/panel总结三个入口互为平级页（点即切·非抽屉·同 #read-sub/#dev-sub 的图标+文字样式）。 */
+function updateRecapNav(): void {
+  if (!recapState) return; // 显隐交给 CSS(body[data-mtg="recap"])；无有效 recapState 时不瞎改高亮
+  const view = recapState.view;
+  document.querySelectorAll<HTMLElement>('#recap-sub [data-rc]').forEach((b) => {
+    // detail 是时间脊的下钻，没有独立入口——停在 detail 时"时间脊"仍高亮。
+    const on = b.dataset.rc === view || (b.dataset.rc === 'overview' && view === 'detail');
+    b.classList.toggle('on', on); b.classList.toggle('dim', !on);
+    b.closest('.rl-item')?.classList.toggle('cur', on);
+  });
+}
+function wireRecapNav(): void {
+  document.querySelectorAll<HTMLElement>('#recap-sub [data-rc]').forEach((b) => {
+    b.onclick = () => {
+      if (!recapState) return;
+      const rc = b.dataset.rc as RecapV2['view'] | undefined;
+      if (rc !== 'overview' && rc !== 'summary' && rc !== 'panel') return;
+      recapState.view = rc;
+      renderRecap(recapState.bodyEl);
+      updateRecapNav();
+    };
+  });
 }
 
 /** 翻页条（id 前缀区分概览/详情）。 */
@@ -332,7 +317,8 @@ function pagerHtml(id: string, page: number, total: number): string {
 /** 页码钳到 [0, total-1]（防负/越界渲染空页·codex A#6）。 */
 const clampPage = (p: number, total: number): number => Math.max(0, Math.min(p, total - 1));
 
-// M2b·思路总结迁 recap：本地 m.summary（summarizeMeeting 生成·手写档案 AI 综合）显示在 recap 顶部，与 panel AI 总结分开两块。
+// M2b·思路总结：本地 m.summary（summarizeMeeting 生成·手写档案 AI 综合）——左侧 #recap-nav「思路总结」入口整页，
+// 与 panel AI 总结（另一入口）分开（时间脊为主体这版布局：三个入口互为平级页，时间脊只呈现"我何时写了什么"）。
 function meetingSummaryHtml(): string {
   if (!recapState) return '';
   const m = recapState.meeting;
@@ -342,8 +328,8 @@ function meetingSummaryHtml(): string {
     : `<div class="empty" id="rs-body">${recapState.panelSummary ? '还没生成设备端思路总结；下方已同步 panel AI 总结。可点生成，把飞书转写和本场手写合在一起。' : (m.feishu_minute_token ? '还没生成思路总结。可基于飞书妙记转写和本场手写生成。' : '还没生成思路总结。先关联飞书妙记后再生成。')}</div>`;
   const label = m.summary ? '重新生成' : '生成思路总结';
   const disabled = m.feishu_minute_token ? '' : ' disabled style="opacity:.45"';
-  return `<div class="rc-msum" style="border:1px solid var(--hair2);border-radius:8px;padding:10px 12px;margin:0 0 12px">`
-    + `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b>思路总结</b><span style="flex:1"></span><button class="hbtn" id="rs-gen"${disabled}>${label}</button></div>`
+  return `<div class="rc-msum">`
+    + `<div class="rc-msum-h"><b>思路总结</b><button class="hbtn" id="rs-gen"${disabled}>${label}</button></div>`
     + body + `</div>`;
 }
 async function generateMeetingSummary(seq: number, bodyEl: HTMLElement, meetingId: string): Promise<void> {
@@ -374,6 +360,59 @@ function wireMeetingSummaryButton(bodyEl: HTMLElement): void {
     void generateMeetingSummary(recapLoadSeq, bodyEl, recapState.meeting.meeting_id);
   });
 }
+/** 左侧 nav「思路总结」入口整页。 */
+function renderRecapSummaryPage(bodyEl: HTMLElement): void {
+  if (!recapState) return;
+  bodyEl.innerHTML = meetingSummaryHtml();
+  wireMeetingSummaryButton(bodyEl);
+}
+
+// ── 阶段⑤·按需导出：顶栏「导出到 Obsidian」按钮（单会议触发·见 vault-publish-device.ts publishEntityToVault 头注） ──
+const fmtExportedAt = (iso: string): string => {
+  try { return new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }); } catch { return iso; }
+};
+/** 按当前 recapState 刷新顶栏导出按钮的文案/可见性（不动忙态——忙态由 runVaultExport 自己管）。 */
+function updateExportButton(): void {
+  const btn = document.getElementById('recap-export-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+  if (!recapState) { btn.hidden = true; return; }
+  btn.hidden = false;
+  if (btn.dataset.busy) return;
+  const m = recapState.meeting;
+  btn.textContent = m.exported_at ? '重新导出' : '导出到 Obsidian';
+  btn.title = m.exported_at ? `上次导出 · ${fmtExportedAt(m.exported_at)}` : '';
+  btn.disabled = false;
+}
+async function runVaultExport(seq: number, bodyEl: HTMLElement, meetingId: string): Promise<void> {
+  if (!recapState || !recapAlive(seq, bodyEl) || recapState.meeting.meeting_id !== meetingId) return;
+  const btn = document.getElementById('recap-export-btn') as HTMLButtonElement | null;
+  if (btn?.dataset.busy) return;
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = '收集中…'; }
+  try {
+    const r = await publishEntityToVault({ mode: 'meeting', meetingId }, {
+      concepts: false, // 单会议按需导出：跳过概念层 LLM 抽取（慢·且概念是跨文档的，单次触发意义不大）
+    });
+    if (!recapAlive(seq, bodyEl) || !recapState || recapState.meeting.meeting_id !== meetingId) return;
+    if (!r.ok) {
+      await infoSheet({ title: r.entityEmpty ? '没有可导出内容' : '导出到 Obsidian 失败', message: r.error || '未知错误' });
+      return;
+    }
+    const fresh = await getMeeting(meetingId); // 刷新 exported_at（同思路总结的刷新模式·不重 loadRecapView）
+    if (fresh && recapAlive(seq, bodyEl) && recapState && recapState.meeting.meeting_id === meetingId) recapState.meeting = fresh;
+  } finally {
+    if (btn) { delete btn.dataset.busy; btn.disabled = false; }
+    if (recapAlive(seq, bodyEl)) updateExportButton();
+  }
+}
+/** 顶栏导出按钮是静态 DOM（不随 renderRecap 重建），每次 loadRecapView 用 onclick 幂等重绑一次即可。 */
+function wireRecapExportButton(): void {
+  const btn = document.getElementById('recap-export-btn');
+  if (!btn) return;
+  btn.onclick = () => {
+    if (!recapState) return;
+    void runVaultExport(recapLoadSeq, recapState.bodyEl, recapState.meeting.meeting_id);
+  };
+}
 
 type StoredPanelSummaryStatus = NonNullable<PersistedMeeting['panel_summary_status']>;
 function toStoredPanelSummaryStatus(status: PanelMeetingSummaryStatus): StoredPanelSummaryStatus {
@@ -397,15 +436,18 @@ export async function refreshPanelSummaryCache(m: PersistedMeeting): Promise<{ s
   return r;
 }
 
-/** L5：recap 内异步拉 panel 总结、拉到后重渲顶部。失败标 failed（best-effort·不影响时间线）。 */
+/** L5：recap 内异步拉 panel 总结、拉到后按当前 view 重渲。失败标 failed（best-effort·不影响时间线）。 */
 async function loadPanelSummary(seq: number, bodyEl: HTMLElement, m: PersistedMeeting): Promise<void> {
   try {
     const r = await refreshPanelSummaryCache(m);
-    if (!recapAlive(seq, bodyEl) || !recapState) return;
+    if (!recapAlive(seq, bodyEl) || !recapState || recapState.meeting.meeting_id !== m.meeting_id) return;
     recapState.panelSummary = r.summary ?? recapState.panelSummary;
     recapState.panelSummaryStatus = r.summary ? 'ready' : r.status;
   } catch {
-    if (recapState) recapState.panelSummaryStatus = recapState.panelSummary ? 'ready' : 'failed';
+    // codex 扫描出的真 bug：漏了这条守卫时，A 会议请求晚到失败会污染此刻正在看的 B 会议的状态。
+    if (recapAlive(seq, bodyEl) && recapState && recapState.meeting.meeting_id === m.meeting_id) {
+      recapState.panelSummaryStatus = recapState.panelSummary ? 'ready' : 'failed';
+    }
   }
   if (recapAlive(seq, bodyEl)) renderRecap(bodyEl);
 }
@@ -431,30 +473,31 @@ async function generatePanelSummary(seq: number, bodyEl: HTMLElement, localMeeti
   if (recapAlive(seq, bodyEl)) renderRecap(bodyEl);
 }
 
-/** L5：panel 五要素总结块（recap 顶部全局摘要「会议讲了什么」·和下方手写时间线「我何时写了什么」互补·不塞进时间轴）。 */
+/** L5：panel 五要素总结块（左侧 nav「panel 总结」入口整页「会议讲了什么」·和时间脊「我何时写了什么」互补）。 */
 function panelSummaryHtml(): string {
   if (!recapState) return '';
   const rec = recapState.panelSummary;
   const status = recapState.panelSummaryStatus;
-  const box = (inner: string): string => `<div class="rc-psum" style="border:1px solid var(--ln,#ccc);border-radius:8px;padding:10px 12px;margin:0 0 12px">${inner}</div>`;
+  const box = (inner: string): string => `<div class="rc-psum">${inner}</div>`;
   if (rec?.summary) {
     const s = rec.summary;
-    const blk = (label: string, items: string[]): string => items.length ? `<div style="margin:6px 0"><b>${label}</b><br>${items.map((x) => `· ${esc(x)}`).join('<br>')}</div>` : '';
+    const blk = (label: string, items: string[]): string => items.length
+      ? `<div class="rc-blk"><span class="rc-blk-h">${label}</span>${items.map((x) => `<span class="rc-blk-li">${esc(x)}</span>`).join('')}</div>` : '';
     const ai = s.action_items.length
-      ? `<div style="margin:6px 0"><b>✅ 行动项</b><br>${s.action_items.map((a) => `· ${esc(a.task)}${a.owner && a.owner !== '未指定' ? ` 〔${esc(a.owner)}〕` : ''}${a.due ? ` · ${esc(a.due)}` : ''}`).join('<br>')}</div>`
+      ? `<div class="rc-blk"><span class="rc-blk-h">行动项</span>${s.action_items.map((a) => `<span class="rc-blk-li">${esc(a.task)}${a.owner && a.owner !== '未指定' ? `<span class="who">${esc(a.owner)}</span>` : ''}${a.due ? `<span class="who">${esc(a.due)}</span>` : ''}</span>`).join('')}</div>`
       : '';
-    return box(`<div style="font-weight:600;margin-bottom:4px">panel AI 总结 · 会议讲了什么${rec.model ? ` · ${esc(rec.model)}` : ''}</div>`
-      + blk('📌 结论', s.conclusions) + ai + blk('⚠️ 风险', s.risks) + blk('❓ 待决', s.open_questions) + blk('➡️ 后续', s.next_steps));
+    return box(`<div class="rc-psum-h"><b>panel AI 总结 · 会议讲了什么</b>${rec.model ? `<span class="mdl">${esc(rec.model)}</span>` : ''}</div>`
+      + blk('结论', s.conclusions) + ai + blk('风险', s.risks) + blk('待决', s.open_questions) + blk('后续', s.next_steps));
   }
   if (status === 'missing_minute') return box('这场会议在 panel 端还没拿到妙记转写——AI 总结会在妙记绑定后自动同步过来，设备会自己刷新，无需操作。');
   if (status === 'loading' || status === 'generating') return box(status === 'generating' ? '正在生成 panel 总结…（M3 读完整场转写，稍候）' : '正在拉取 panel 总结…');
-  if (status === 'failed') return box('拉取 panel 总结失败（网络/服务波动）。<button class="hbtn" id="ps-refresh" style="margin-top:6px">刷新重试</button>');
-  if (status === 'not_found') return box('panel 没找到这场会议（可能关联错了，可回上一页改关联）。<button class="hbtn" id="ps-refresh" style="margin-top:6px">刷新</button>');
+  if (status === 'failed') return box('拉取 panel 总结失败（网络/服务波动）。<button class="hbtn rc-psum-retry" id="ps-refresh">刷新重试</button>');
+  if (status === 'not_found') return box('panel 没找到这场会议（可能关联错了，可回上一页改关联）。<button class="hbtn rc-psum-retry" id="ps-refresh">刷新</button>');
   // not_generated → 可主动触发生成
-  return box('panel 还没生成这场会议的 AI 总结。<button class="hbtn" id="ps-gen" style="margin-top:6px">生成总结</button>');
+  return box('panel 还没生成这场会议的 AI 总结。<button class="hbtn rc-psum-retry" id="ps-gen">生成总结</button>');
 }
 
-/** 绑定 panel 总结块的按钮（生成 / 刷新重试）——概览正常态与空态共用。 */
+/** 绑定 panel 总结块的按钮（生成 / 刷新重试）——正常态与空态共用。 */
 function wirePanelSummaryButtons(bodyEl: HTMLElement): void {
   bodyEl.querySelector('#ps-gen')?.addEventListener('click', () => { // 生成 panel 总结（带 seq/会议守卫·防串会）
     if (!recapState) return;
@@ -468,16 +511,20 @@ function wirePanelSummaryButtons(bodyEl: HTMLElement): void {
   });
 }
 
+/** 左侧 nav「panel 总结」入口整页。 */
+function renderRecapPanelPage(bodyEl: HTMLElement): void {
+  if (!recapState) return;
+  bodyEl.innerHTML = panelSummaryHtml();
+  wirePanelSummaryButtons(bodyEl);
+}
+
 /** 概览：段级中轴时间线。active 段左摘要右手写、quiet 段轴上塌缩站点。点段→详情。 */
 function renderRecapOverview(bodyEl: HTMLElement): void {
   if (!recapState) return;
-  const { meeting, segments, digests } = recapState;
+  const { meeting, segments } = recapState;
   // 空态：有飞书会议但无转写无手写——别渲空时间轴误导用户「内容没加载出来」（意图 #3）。
   if (!segments.length) {
-    bodyEl.innerHTML = meetingSummaryHtml() + panelSummaryHtml()
-      + `<div class="rc-note">这场会议已关联飞书会议；panel 总结生成后会自动同步到这里。当前还没有转写和手写档案。</div>`;
-    wireMeetingSummaryButton(bodyEl);
-    wirePanelSummaryButtons(bodyEl);
+    bodyEl.innerHTML = `<div class="rc-note">这场会议已关联飞书会议；panel 总结生成后会自动同步到侧边栏。当前还没有转写和手写档案。</div>`;
     return;
   }
   const stateLabel = meeting.align_state ? ALIGN_LABEL[meeting.align_state] : '约对齐';
@@ -497,7 +544,7 @@ function renderRecapOverview(bodyEl: HTMLElement): void {
   const rows = slice.map((s, j) => {
     const idx = p * OV_PAGE + j;
     if (s.kind === 'active') {
-      const sum = digests[digestCacheKey(s)] || s.heuristicSummary;
+      const sum = s.heuristicSummary;
       const shown = s.marks.slice(0, MARKS_CAP);
       const marksHtml = shown.map((mk) => `<span class="tl-ink${mk.feature_type === 'drawing' ? ' tl-draw' : ''}"><span class="tl-ic">${inkLabel(mk.feature_type)}</span>${esc(inkText(mk.marked_text, mk.feature_type))}</span>`).join('')
         + (s.marks.length > MARKS_CAP ? `<span class="tl-more">＋另 ${s.marks.length - MARKS_CAP} 处</span>` : '');
@@ -513,12 +560,16 @@ function renderRecapOverview(bodyEl: HTMLElement): void {
     return `<div class="tl-row tl-click tl-quiet" data-seg="${idx}"><div class="tl-cl">${left}</div>${mid}<div class="tl-cr"></div></div>`;
   }).join('');
 
-  bodyEl.innerHTML = meetingSummaryHtml() + panelSummaryHtml()
-    + `<div class="rc-note">${note}</div>`
-    + `<div class="tl-seg"><div class="tl-ax"></div>${rows}</div>`
-    + pagerHtml('ov', p, total);
-  wireMeetingSummaryButton(bodyEl);
-  wirePanelSummaryButtons(bodyEl);
+  // 末页（真已到时间线尽头，不是被翻页截断）在最后一段后补一条空态行——脊柱本身靠 CSS flex 拉到页底
+  // 不需要这条也能到底，这条纯粹是「后面暂时没有了」的明确交代（用户拍板：左右两侧各放一句「暂时无内容」）。
+  const tailEmpty = p === total - 1
+    ? `<div class="tl-row tl-empty"><div class="tl-cl"><span class="tl-txt">暂时无内容</span></div>`
+      + `<div class="tl-mid"><span class="tl-md tl-pending"></span></div>`
+      + `<div class="tl-cr"><span class="tl-txt">暂时无内容</span></div></div>`
+    : '';
+  bodyEl.innerHTML = `<div class="tl-page"><div class="rc-note">${note}</div>`
+    + `<div class="tl-seg"><div class="tl-ax"></div>${rows}${tailEmpty}</div>`
+    + pagerHtml('ov', p, total) + `</div>`;
 
   bodyEl.querySelectorAll<HTMLElement>('[data-seg]').forEach((el) => el.addEventListener('click', () => {
     if (!recapState) return;
@@ -531,7 +582,17 @@ function renderRecapOverview(bodyEl: HTMLElement): void {
   bodyEl.querySelector('#ov-next')?.addEventListener('click', () => { if (recapState) { recapState.ovPage = p + 1; renderRecap(bodyEl); bodyEl.scrollTop = 0; } });
 }
 
-/** 详情：单段句级中轴时间线（左转写右手写按时刻）+ 翻页 + 返回概览。 */
+const NEAR_CUE_MS = 90_000; // 手写卡片下方带「附近转写」引用的最大间隔（超出就不硬凑上下文·近似语义）
+
+/** 段内离手写落点 relMs 最近的一句转写（超出 NEAR_CUE_MS 判无关联，返回 null）。 */
+function nearestCue(cues: TranscriptCue[], t: number): { text: string; speaker?: string; before: boolean } | null {
+  let best: TranscriptCue | null = null; let bd = Infinity;
+  for (const c of cues) { const d = Math.abs(c.startMs - t); if (d < bd) { bd = d; best = c; } }
+  if (!best || bd > NEAR_CUE_MS) return null;
+  return { text: best.text, speaker: best.speaker, before: best.startMs <= t };
+}
+
+/** 详情：单段单栏时间流（转写句 + 手写按时刻共享一条轴·手写卡片带「附近转写」引用）+ 翻页 + 返回概览。 */
 function renderRecapDetail(bodyEl: HTMLElement): void {
   if (!recapState) return;
   if (recapState.detailIdx < 0 || recapState.detailIdx >= recapState.segments.length) { recapState.view = 'overview'; renderRecapOverview(bodyEl); return; }
@@ -548,23 +609,27 @@ function renderRecapDetail(bodyEl: HTMLElement): void {
   recapState.dtPage = p;
   const slice = items.slice(p * DT_PAGE, (p + 1) * DT_PAGE);
 
+  let lastNearKey = ''; // 连续多笔手写离同一句转写最近时，只在第一笔标出来，别把同一句复读一整串
   const rows = slice.map((it) => {
     if (it.side === 'L') {
-      // 转写句：左·小空心点·精确时刻（cue 相对录音 t=0 是准的）
-      const mid = `<div class="tl-mid"><span class="tl-md tl-hollow"></span><span class="tl-mt tl-dim">${clk(it.t)}</span></div>`;
+      lastNearKey = '';
       const sp = it.speaker ? `<span class="tl-sp">${esc(it.speaker)}</span>` : '';
-      return `<div class="tl-row"><div class="tl-cl"><span class="tl-txt">${sp}${esc(it.text)}</span></div>${mid}<div class="tl-cr"></div></div>`;
+      return `<div class="tl-fit"><span class="tl-ftm">${clk(it.t)}</span><span class="tl-fcue-txt">${sp}${esc(it.text)}</span></div>`;
     }
-    // 手写：右·实心点·时刻带「~」（落点是估算的·别当精确锚定）
-    const mid = `<div class="tl-mid"><span class="tl-md"></span><span class="tl-mt">~${clk(it.t)}</span></div>`;
-    return `<div class="tl-row"><div class="tl-cl"></div>${mid}<div class="tl-cr"><span class="tl-ink${it.feat === 'drawing' ? ' tl-draw' : ''}"><span class="tl-ic">${inkLabel(it.feat || '')}</span>${esc(it.text)}</span></div></div>`;
+    const near = nearestCue(seg.cues, it.t);
+    const nearKey = near ? `${near.before ? 0 : 1}:${near.speaker || ''}:${near.text}` : '';
+    const showNear = !!near && nearKey !== lastNearKey;
+    if (near) lastNearKey = nearKey;
+    const nearHtml = showNear && near
+      ? `<span class="tl-fnear">${near.before ? '之前' : '之后'}${near.speaker ? esc(near.speaker) + '：' : '：'}${esc(near.text)}</span>` : '';
+    return `<div class="tl-fit tl-fmark"><span class="tl-ftm">~${clk(it.t)}</span><span class="tl-ink${it.feat === 'drawing' ? ' tl-draw' : ''}"><span class="tl-ic">${inkLabel(it.feat || '')}</span>${esc(it.text)}</span>${nearHtml}</div>`;
   }).join('');
 
-  const sum = recapState.digests[digestCacheKey(seg)] || seg.heuristicSummary;
+  const sum = seg.heuristicSummary;
   const head = seg.kind === 'active' ? `你在这段写了 ${seg.marks.length} 处` : '这段你没有手写';
   bodyEl.innerHTML = `<div class="tl-dtop"><button class="hbtn" id="tl-back">‹ 返回概览</button><span class="tl-tt">${rng(seg.startMs, seg.endMs)}</span></div>`
     + `<div class="rc-note">${head}：${esc(sum)}（逐句时刻为<b>近似</b>）。</div>`
-    + `<div class="tl-seg"><div class="tl-ax"></div>${rows}</div>`
+    + `<div class="tl-flow">${rows}</div>`
     + pagerHtml('dt', p, total);
 
   bodyEl.querySelector('#tl-back')?.addEventListener('click', () => { if (recapState) { recapState.view = 'overview'; renderRecap(bodyEl); bodyEl.scrollTop = 0; } });
