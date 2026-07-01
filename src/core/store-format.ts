@@ -16,8 +16,9 @@ import type { ReflowBlock } from '../surface/reflow';
 import type { RawRef } from './bedrock';
 
 export const STORE_VERSION = '2'; // 1→2：strokes/overlays 出 docs 进 marks/ai_turns 账本（干净断裂，旧 docs 弃）
-export const DB_VERSION = 9;      // v7→v9：WS2-C meeting_minutes（飞书妙记转写缓存·会后离线复盘不丢转写·store.ts ① 基线幂等建）。meeting_minutes 在幂等基线（任何升级都建）·任何升级都自愈缺表。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
-export const MARK_ENTRY_SCHEMA_VERSION = '3'; // v3：mark/stroke 明确区分 canonical page anchor 与用户落笔 surface evidence。
+export const DB_VERSION = 10;     // v9→v10：canonical_entities（存储原生跨文档实体注册表·store.ts ① 基线幂等建）。任何升级都自愈缺表。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
+export type MarkEntrySchemaVersion = '3' | '4';
+export const MARK_ENTRY_SCHEMA_VERSION: MarkEntrySchemaVersion = '4'; // v3→v4：mark/ai_turn 可选带 entity_refs/topic_refs（存储原生拓扑：采集声明/后台建议写回，导出期零 LLM 可读）。
 
 /** 一张图的解读：图本身可从 PDF 重渲，故只存 bbox + 文字解读。 */
 export interface PersistedImage {
@@ -71,6 +72,15 @@ export interface PersistedDoc {
 
 /* ── 账本条目（append-only，每条独立 IDB 记录）────────────────────────────── */
 
+/** 一条账本条目对某 canonical 实体的关联（存储原生拓扑真相源：mark/ai_turn 是成员关系唯一来源，KO 不持久化不能存这个）。 */
+export interface LedgerEntityRef {
+  entity_id: string;                                    // PersistedEntity.entity_id（归一化 slug）
+  display?: string;                                      // 声明当时的 UI 名称快照（entity 改名不影响历史 refs 语义）
+  source: 'declared' | 'llm_suggested' | 'imported';     // declared=采集时用户声明；llm_suggested=后台 suggester 写回；imported=外部导入
+  confidence?: number;                                   // 仅 llm_suggested 有意义
+  review_state?: 'suggested' | 'accepted' | 'rejected';  // 仅 llm_suggested 有意义；用户未过一遍时缺省视为 suggested
+}
+
 /** 条目公共基字段（marks / ai_turns 共用）。 */
 export interface BaseEntry {
   entry_id: string;     // shortId('ent')
@@ -79,11 +89,16 @@ export interface BaseEntry {
   page_index: number;
   seq: number;          // 每书单调递增（Date.now() 起跳，跨 reload 仍增），驱动折叠/水位线
   created_at: string;   // ISO 墙钟
+  entity_refs?: LedgerEntityRef[]; // 存储原生拓扑：本条关联到的跨文档实体（builder 据此确定性投影成员边，零 LLM）
+  topic_refs?: LedgerEntityRef[];  // 同 entity_refs，语义上更松散的主题标注（渲染/过滤可分开处理）
+  source_created_at?: string;      // 仅当本条是"补写 refs 的 revision"（append 同 mark_id/overlay_id 新条目、只改 refs 不改内容）时设置：
+                                    // 记录被补写对象的原始语义创建时间，供 builder 投影 KO.created_at 时使用（≠本条 created_at）。
+                                    // 若不设，builder 直接用 created_at；这样内容不变的补写不会让既有 KO 的 content_hash 漂移。
 }
 
 /** 页账本条目 = 一次组装手势（marks store）。is_tombstone=true 表示擦除携同 mark_id。 */
 export interface PersistedMark extends BaseEntry {
-  schema_version?: typeof MARK_ENTRY_SCHEMA_VERSION; // 老条目缺=v2；新条目写 v3。
+  schema_version?: MarkEntrySchemaVersion; // 老条目缺=v2；v3=双 surface 取证；v4=新增可选 entity_refs/topic_refs。新条目写 MARK_ENTRY_SCHEMA_VERSION。
   mark_id: string;                  // = 代表 event 的 event_id，跨 reload 稳定引用
   strokes: PersistedStroke[];       // 构成笔（tool+points），redraw 保真（不存合并点）
   bbox: NormBBox;                   // union bbox
@@ -133,6 +148,39 @@ export interface PersistedAiTurn extends BaseEntry {
   trigger: 'idle' | 'handwriting' | 'discussion';
   model: string;
   supersedes: string | null;       // 被本条取代的上一条 entry_id（同 overlay_id 链）
+}
+
+/* ── canonical_entities（存储原生拓扑）───────────────────────────────────────
+ * 跨文档实体/主题注册表（Tier2 canonical）。与 marks/ai_turns 不同：这是**可更新
+ * registry**，不是 append-only 账本——改名/合并直接 put。成员关系的真相仍在
+ * marks/ai_turns 的 entity_refs/topic_refs（见 BaseEntry），这里只登记实体本身。
+ * builder 导出投影时读 entities + 账本 refs，纯确定性、零 LLM。 */
+
+export type PersistedEntityKind = 'entity' | 'topic' | 'person' | 'org' | 'project' | 'place' | 'concept';
+
+export interface PersistedEntityProvenanceItem {
+  source: 'user' | 'llm_suggestion' | 'import' | 'merge';
+  document_id?: string;
+  entry_id?: string;    // 触发本条 provenance 的 mark/ai_turn entry_id
+  confidence?: number;  // 仅 llm_suggestion 有意义
+  created_at: string;
+}
+
+/** 一个跨文档实体（entity_id 稳定不变；display/aliases/status 可改）。 */
+export interface PersistedEntity {
+  entity_id: string;       // 归一化 slug（normalizeEntityId(display)），稳定身份，跨 reload/设备不变
+  normalized_key: string;  // 当前等于 entity_id；单独存以便未来 entity_id 与归一键分离时不破坏兼容
+  display: string;         // 用户可见名称（可改）
+  kind: PersistedEntityKind;
+  aliases?: string[];
+  provenance: {
+    document_ids: string[];                    // 出现过的文档（去重·不驱动成员关系，只供 UI/后台参考）
+    entries: PersistedEntityProvenanceItem[];
+  };
+  status?: 'active' | 'merged' | 'deprecated';  // 缺省 active
+  merged_into?: string;                          // status='merged' 时指向目标 entity_id；builder 投影时按此归并，不改历史 refs
+  created_at: string;
+  updated_at: string;
 }
 
 /* ── 会议工作区（v4）────────────────────────────────────────────────────────
@@ -200,6 +248,7 @@ export interface PersistedMeeting {
   panel_summary_fetched_at?: string;
   panel_summary_status?: 'ready' | 'not_generated' | 'missing_minute' | 'not_found' | 'failed';
   panel_summary_unread?: boolean;   // 总结由 summary_ready 事件后台到达、用户还没进 recap 看过（home/detail 提醒用·进 recap 即清）
+  live_unread?: boolean;            // 飞书 started 事件把这场会议推成 live、用户还没点开看过（M7·nav 徽标+home 顶部提醒用·openMeeting 即清）
   // ── 日程会议（日历来源）+ 实时归群（optional 零迁移）──
   source_kind?: 'calendar' | 'vc' | 'manual'; // 来源：calendar=飞书日历日程预占位 · vc=panel VC started 事件 · manual=手建/模拟（缺省按已有字段推断）
   feishu_calendar_event_id?: string;          // 日历 event_id（日程落库幂等键·防重复建）

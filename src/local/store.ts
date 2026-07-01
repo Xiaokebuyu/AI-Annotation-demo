@@ -8,7 +8,7 @@
  */
 import type { NormBBox, OverlayState, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
-import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting, PersistedMeetingMinute, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
+import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedEntity, PersistedMark, PersistedMeeting, PersistedMeetingMinute, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
 import { DB_VERSION, MARK_ENTRY_SCHEMA_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
 import { vectorStore } from './vector';
@@ -24,6 +24,7 @@ const MEETINGS = 'meetings';     // 会议（属某 workspace）
 const INK_SEGMENTS = 'ink_segments'; // 基岩：录制段头（profile + 时间锚）
 const INK_SAMPLES = 'ink_samples';   // 基岩：采样块（批量 flush）
 const MEETING_MINUTES = 'meeting_minutes'; // WS2-C：飞书妙记转写缓存（会后离线复盘）
+const ENTITIES = 'canonical_entities'; // 存储原生拓扑：跨文档实体注册表（可更新 registry，非 append-only）
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
 /** 幂等建 store（连同建表时的初始 index）。已存在则跳过——自愈"版本到位却缺表"。 */
@@ -60,12 +61,15 @@ function openDB(): Promise<IDBDatabase | null> {
         ensureStore(db, INK_SEGMENTS, 'segment_id', ['by_doc', 'document_id']); // 基岩段头
         ensureStore(db, INK_SAMPLES, 'chunk_id', ['by_doc', 'document_id']);     // 基岩采样块
         ensureStore(db, MEETING_MINUTES, 'minute_token');                        // WS2-C 妙记转写缓存
+        ensureStore(db, ENTITIES, 'entity_id');                                  // 存储原生拓扑：跨文档实体注册表
 
         // ② 阶梯迁移：每次 DB_VERSION 升级追加一块 if (oldV < N) {...}——给已存在 store 加 index /
         //    字段级 backfill（须恰好跑一次的数据迁移放这）。
         if (oldV < 6) ensureIndex(tx, MARKS, 'by_context', 'context_id'); // v6 时间脊（C2）
         // v7：基岩 ink_segments/ink_samples 由上方 ① 基线幂等建，无需额外迁移步。
         // v8：meeting_minutes 由上方 ① 基线幂等建，无需额外迁移步。
+        // v9→v10：canonical_entities 由上方 ① 基线幂等建，无需额外迁移步（键=entity_id 已够用，
+        //         暂无消费者需要按 kind/normalized_key 查询，需要时再补 index，不预先加）。
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -648,6 +652,22 @@ export async function upsertPanelWorkspace(name = '飞书会议'): Promise<Persi
   const ws: PersistedWorkspace = { workspace_id: id, name: name.trim() || '飞书会议', source: 'manual', created_at: cur?.created_at ?? now, updated_at: now };
   await putInto(WORKSPACES, ws);
   return ws;
+}
+
+/** upsert 一个 canonical entity（存储原生拓扑注册表）：不存在则建，存在则整份覆盖并保留原 created_at。
+ *  调用方算好 entity_id（归一化 slug）与本次的 display/kind/aliases/provenance——这里不做合并语义。 */
+export async function upsertCanonicalEntity(entity: Omit<PersistedEntity, 'updated_at'>): Promise<PersistedEntity> {
+  const cur = await getOneFrom<PersistedEntity>(ENTITIES, entity.entity_id);
+  const rec: PersistedEntity = { ...entity, created_at: cur?.created_at ?? entity.created_at, updated_at: new Date().toISOString() };
+  await putInto(ENTITIES, rec);
+  return rec;
+}
+/** 列出所有 canonical entities（含 merged/deprecated；调用方按需筛）。 */
+export function listCanonicalEntities(): Promise<PersistedEntity[]> {
+  return getAllFrom<PersistedEntity>(ENTITIES);
+}
+export function getCanonicalEntity(id: string): Promise<PersistedEntity | null> {
+  return getOneFrom<PersistedEntity>(ENTITIES, id);
 }
 
 /** 日程占位工作区（日历日程会议归群前的归属·日程子页按 status 过滤显示·不依赖此 ws；归群后 workspace_id 迁真群）。 */
