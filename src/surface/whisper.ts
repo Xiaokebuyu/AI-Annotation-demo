@@ -13,6 +13,85 @@ const GUTTER_GAP_Y = 16; // 留白内卡片纵向间距
 let layer: HTMLElement;
 const els = new Map<string, HTMLElement>();
 
+// 折叠模式（Phase F·电纸屏日记/白板）：AI 旁注不再常显成卡片，而是在锚点放一个点触标记，
+// 点开才弹浮层（文本 + 收下/改写/散去）——和 reader 重排面的 replyMode 体验一致。
+// 桌面/原版页 folded=false，保持原 margin/inline 卡片行为（零回归）。
+let folded = false;
+let popEl: HTMLElement | null = null;
+let backdropEl: HTMLElement | null = null;
+function closePop(): void { popEl?.remove(); popEl = null; backdropEl?.remove(); backdropEl = null; }
+
+/** 状态机（收下/改写/散去）单一来源：改 state[+改写文本] → emit overlay:state（annotation-loop 落账本）。 */
+function setOverlayState(o: ScreenOverlay, el: HTMLElement | undefined, next: ScreenOverlay['state'], newText?: string): void {
+  if (o.state !== 'shown' && !(o.state === 'accepted' && next === 'edited')) return;
+  if (newText != null) o.display_text = newText;
+  o.state = next;
+  if (el) el.dataset.state = next;
+  bus.emit('overlay:state', o);
+}
+
+/** 点折叠标记 → 弹浮层（☆回复 + 收下/改写/散去）·定位标记下方、夹进画布。 */
+function openPop(o: ScreenOverlay): void {
+  closePop();
+  // 背板：浮层开着时铺一层（pointer-events:auto·#whisper-layer 本身 none），点空白处收起浮层（layer none 时收不到 tap）。
+  const bd = document.createElement('div');
+  bd.className = 'whisper-pop-backdrop';
+  bd.addEventListener('pointerdown', () => closePop());
+  layer.appendChild(bd);
+  backdropEl = bd;
+  const mark = els.get(o.overlay_id);
+  const pop = document.createElement('div');
+  pop.className = 'whisper-pop';
+  const body = document.createElement('div'); body.className = 'whisper-pop-text'; body.textContent = o.display_text;
+  pop.appendChild(body);
+  const acts = document.createElement('div'); acts.className = 'whisper-pop-acts';
+  const mk = (label: string, fn: () => void): void => {
+    const b = document.createElement('button'); b.textContent = label;
+    b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+    acts.appendChild(b);
+  };
+  mk('收下', () => { setOverlayState(o, mark, 'accepted'); closePop(); });
+  mk('改写', () => {
+    if (body.isContentEditable) { body.contentEditable = 'false'; setOverlayState(o, mark, 'edited', body.textContent ?? ''); closePop(); }
+    else { body.contentEditable = 'true'; body.focus(); }
+  });
+  mk('散去', () => { setOverlayState(o, mark, 'dismissed'); closePop(); });
+  pop.appendChild(acts);
+  pop.addEventListener('pointerdown', (e) => e.stopPropagation()); // 浮层内点按不冒泡触发外层关闭
+  layer.appendChild(pop);
+  popEl = pop;
+  const [x, y, w, h] = o.geometry.anchor_bbox;
+  const p = normToPx(x, y + h);
+  pop.style.left = `${Math.max(6, Math.min(p.x, pageCss.w - 244))}px`;
+  pop.style.top = `${p.y + 8}px`;
+}
+
+/** 折叠标记：在锚点放一个小点触标记（已处理态由 dataset.state 给视觉）。 */
+function addMarker(o: ScreenOverlay): void {
+  const el = document.createElement('div');
+  el.className = 'whisper-mark' + (o.result_type === 'error' ? ' error' : '');
+  el.dataset.overlay = o.overlay_id;
+  el.dataset.state = o.state;
+  el.addEventListener('click', (e) => { e.stopPropagation(); openPop(o); });
+  layer.appendChild(el);
+  els.set(o.overlay_id, el);
+  relayout();
+}
+
+/** 折叠模式排版：标记贴锚点（anchor 左上）；非当前页/散去则隐。 */
+function layoutMarkers(): void {
+  for (const o of state.overlays) {
+    const el = els.get(o.overlay_id);
+    if (!el) continue;
+    if (o.page_id !== state.pageId || o.state === 'dismissed') { el.style.display = 'none'; continue; }
+    el.style.display = '';
+    const [x, y] = o.geometry.anchor_bbox;
+    const p = normToPx(x, y);
+    el.style.left = `${p.x}px`;
+    el.style.top = `${p.y}px`;
+  }
+}
+
 function splitSentences(text: string): string[] {
   return text
     .split(/(?<=[。！？!?…])/)
@@ -63,6 +142,7 @@ function layoutGutter(items: ScreenOverlay[]): void {
 
 /** 统一重排：先定可见性，再按落点排版。任何位置/状态/页面/设置变化都走这里。 */
 function relayout(): void {
+  if (folded) { layoutMarkers(); return; } // 折叠模式：标记贴锚点
   const live: ScreenOverlay[] = [];
   for (const o of state.overlays) {
     const el = els.get(o.overlay_id);
@@ -83,6 +163,7 @@ function relayout(): void {
 }
 
 function add(o: ScreenOverlay): void {
+  if (folded) { addMarker(o); return; } // 电纸屏日记：折叠成点触标记
   const el = document.createElement('div');
   el.className = 'whisper' + (o.result_type === 'error' ? ' error' : '');
   el.dataset.overlay = o.overlay_id;
@@ -144,10 +225,11 @@ function remove(overlayId: string): void {
   relayout();
 }
 
-export function initWhisper(whisperLayer: HTMLElement): void {
+export function initWhisper(whisperLayer: HTMLElement, opts: { fold?: boolean } = {}): void {
   layer = whisperLayer;
+  folded = !!opts.fold; // 移动版电纸屏传 true：AI 旁注折叠成点触标记
   bus.on('overlay:add', (o) => add(o as ScreenOverlay));
-  bus.on('overlay:remove', (id) => remove(id as string));
+  bus.on('overlay:remove', (id) => { if (folded) closePop(); remove(id as string); });
   bus.on('overlay:state', (o) => {
     const ov = o as ScreenOverlay;
     const el = els.get(ov.overlay_id);
@@ -155,6 +237,7 @@ export function initWhisper(whisperLayer: HTMLElement): void {
     relayout();
   });
   bus.on('page:rendered', () => {
+    if (folded) closePop(); // 翻页/重渲：关掉残留浮层（锚已变）
     // 持久化恢复的 overlays 在 state 里但还没 DOM → 当前页的补上
     for (const o of state.overlays) if (o.page_id === state.pageId && !els.has(o.overlay_id)) add(o);
     relayout();

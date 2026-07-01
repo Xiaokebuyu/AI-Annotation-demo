@@ -18,6 +18,7 @@ export interface FeishuFileItem {
   resource_type: 'file' | 'image';
   resource_key: string;
   download_path: string; // 形如 /api/feishu/messages/:id/file/:key?type=file&name=...
+  create_time?: string;  // 群文件消息时刻（epoch ms 字符串·捕获窗口过滤用·feishu-service listChatFiles 返回）
 }
 
 export interface SyncMaterialsResult { imported: number; cached: number; skipped: number; failed: number; changed: boolean; }
@@ -26,13 +27,20 @@ export interface SyncMaterialsResult { imported: number; cached: number; skipped
 export const materialDocId = (meetingId: string, messageId: string): string => `mtgdoc_${meetingId}_${messageId}`;
 
 /** 能转成可标注 PDF 的源 URL：PDF 直接拉·HTML 经 convert；其它（图片/docx/压缩包）返回 null = 先跳过。 */
-function pdfSourceUrl(f: FeishuFileItem, feishuBase: string, convertBase: string): string | null {
+export function pdfSourceUrl(f: FeishuFileItem, feishuBase: string, convertBase: string): string | null {
   const name = f.file_name || '';
   const raw = `${feishuBase}${f.download_path}`;
   if (f.resource_type === 'image') return `${convertBase}/convert/to-pdf?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(name || 'image')}`; // 图片→单页 PDF（convert 靠 content-type 判）
   if (/\.pdf$/i.test(name)) return raw;                                                                       // PDF：直接拉字节
   if (/\.html?$/i.test(name)) return `${convertBase}/convert/to-pdf?url=${encodeURIComponent(raw)}&name=${encodeURIComponent(name)}`;
   return null; // docx/pptx/压缩包等：先跳过（段B 接 LibreOffice 后再开）
+}
+
+/** 拉一个群的文件列表（不入库·供「添加资料 · 飞书群文件」让用户挑选·M3）。失败抛（调用方提示）。 */
+export async function listMeetingGroupMaterialFiles(opts: { chatId: string; feishuBase: string; limit?: number }): Promise<FeishuFileItem[]> {
+  const r = await fetch(`${opts.feishuBase}/api/feishu/workspaces/${encodeURIComponent(opts.chatId)}/files?limit=${opts.limit ?? 50}`);
+  if (!r.ok) throw new Error(`拉取群文件失败：HTTP ${r.status}`);
+  return ((await r.json()) as { files?: FeishuFileItem[] }).files || [];
 }
 
 /**
@@ -47,11 +55,14 @@ export async function syncMeetingGroupMaterials(opts: {
   if (!meeting || !opts.chatId) return out;
 
   let files: FeishuFileItem[] = [];
-  try {
-    const r = await fetch(`${opts.feishuBase}/api/feishu/workspaces/${encodeURIComponent(opts.chatId)}/files?limit=${opts.limit ?? 50}`);
-    if (!r.ok) return out;
-    files = ((await r.json()) as { files?: FeishuFileItem[] }).files || [];
-  } catch { return out; } // feishu-service 不在 → 静默退回
+  try { files = await listMeetingGroupMaterialFiles({ chatId: opts.chatId, feishuBase: opts.feishuBase, limit: opts.limit ?? 50 }); }
+  catch { return out; } // feishu-service 不在 → 静默退回
+
+  // 捕获窗口：只抓「会议开始前 1h ~ 结束后 1h」内的群文件（用 create_time·缺时刻则保留不误删）。
+  const HOUR = 3600_000;
+  const winStart = new Date(meeting.scheduled_at).getTime() - HOUR;
+  const winEnd = (meeting.ended_at ? new Date(meeting.ended_at).getTime() : Date.now()) + HOUR;
+  files = files.filter((f) => { const t = Number(f.create_time) || 0; return !t || (t >= winStart && t <= winEnd); });
 
   const docIds = new Set(meeting.material_doc_ids || []);
   for (const f of files) {

@@ -9,6 +9,8 @@
 //   const bar = mountPagerBar(pager, footEl);   // ‹ n/m › 控件
 // 翻页：bar 的 ‹ › 调 pager.flip(±1)；越界返回 'boundary'（caller 可据此切上层 PDF/段落页）。
 
+import { signalPageReady } from './eink';
+
 const VPAGE_EPS = 1; // 亚像素容差：仅挡舍入/0 高 spacer，真切口（≥2px）一律消除
 
 export interface PageInfo { index: number; count: number; }
@@ -168,11 +170,14 @@ export function createPager(container: HTMLElement, opts: PagerOpts = {}): Pager
   return {
     content,
     relayout,
-    goto(i) { vIndex = i; applyV(); },
+    // 翻页/跳页只改 container.scrollTop（非 DOM 变动）→ 电纸屏 MutationObserver 抓不到、面板不重刷，
+    // 表现为「页号变了但显示没变」（电纸屏专属·preview 有真显示器看不出）。故 flip/goto 显式触发整屏刷新
+    // （翻页=页级变化·GC16 合适·与 reader 自带翻页一致；relayout 的内容增删本身是 DOM 变动·全局 MO 已覆盖）。
+    goto(i) { vIndex = i; applyV(); signalPageReady(); },
     flip(dir) {
       const next = vIndex + (dir >= 0 ? 1 : -1);
       if (next < 0 || next >= vCount()) return 'boundary';
-      vIndex = next; applyV(); return 'moved';
+      vIndex = next; applyV(); signalPageReady(); return 'moved';
     },
     info() { return { index: vIndex, count: vCount() }; },
     vh,

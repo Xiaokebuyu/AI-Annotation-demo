@@ -88,6 +88,7 @@ export function placeAnchor(c: AnchorContent): void {
   }
   it.pageId = c.pageId; it.bbox = bbox; it.kind = kind;
   it.el.dataset.kind = kind;
+  it.el.dataset.pending = /思考中|处理中|生成中/.test(c.text) ? '1' : '0';
   it.el.textContent = c.text;
   it.el.title = '点击：定位回原文';
   it.el.onclick = () => flashAnchor(bbox);

@@ -10,7 +10,7 @@
  */
 import { makeSurfaceIndex } from '../core/surface-index';
 import type {
-  AnnotationEvent, HMP, HmpMode, HmpObjectHint, MarkShape, NormBBox,
+  AnnotationEvent, CaptureSurface, HMP, HmpMode, HmpObjectHint, MarkShape, NormBBox, StrokeCoordSpace,
   OcrTextBlock, SurfaceIndex, SurfaceObject, SurfaceObjectType,
 } from '../core/contracts';
 import { HMP_SCHEMA_VERSION } from '../core/contracts';
@@ -134,6 +134,8 @@ export function buildHmp(opts: {
   cropRef?: string;
   vectorRef?: string;
   confidence?: number;
+  captureSurface?: CaptureSurface;
+  coordSpace?: StrokeCoordSpace;
 }): HMP {
   const { targetObjects: objs, action } = opts;
   const hasBlank = objs.some((o) => o.type === 'blank_region');
@@ -160,6 +162,8 @@ export function buildHmp(opts: {
   return {
     hmp_id: shortId('hmp'),
     surface_id: opts.surfaceId,
+    capture_surface: opts.captureSurface,
+    coord_space: opts.coordSpace,
     mode,
     action,
     target_region: opts.targetBbox,

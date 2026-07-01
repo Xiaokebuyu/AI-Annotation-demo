@@ -20,13 +20,17 @@ const SWIPE_MIN_PX = 60; // 横滑超过此距离且以横向为主 → 翻页
 
 /**
  * 输入意图分流 —— 笔 / 手指的「硬件接口」，policy 只在这一处：
- *  - pointerType 'pen'          → 标注（触控笔 / iPad Apple Pencil）
- *  - pointerType 'touch' / 鼠标 → 跟随当前工具：hand 工具翻页，其它(笔/荧光/擦)落笔
- * 电纸屏电容触摸(WingCool HID)枚举为 'touch'，故手指默认能写、切 hand 工具才翻页。
+ *  - pointerType 'pen'   → 标注（触控笔，带真压感）
+ *  - pointerType 'touch' → 导航（手指：横划翻页 / 竖划滚动 / 点按），绝不画墨
+ *  - 鼠标(桌面/preview)  → 跟随当前工具：hand 翻页，其它落笔（便于桌面调试）
+ * 2026-06-30 M103：设备有独立笔(huion·真压感)与手指(FocalTech)两套数字化仪，Android 原生区分 pen/touch，
+ *   故按 pointerType 硬分流——笔写、手指导航，掌/指落画布天然不画墨(palm rejection 免费)。
+ *   旧 RK3588(纯电容枚举 'touch'·手指即笔) 的「手指默认能写、切 hand 才翻页」假设在此弃用。
  */
 function resolveIntent(pointerType: string): 'annotate' | 'navigate' {
   if (pointerType === 'pen') return 'annotate';
-  return state.tool === 'hand' ? 'navigate' : 'annotate';
+  if (pointerType === 'touch') return 'navigate';
+  return state.tool === 'hand' ? 'navigate' : 'annotate'; // mouse：桌面调试保留旧行为
 }
 
 function drawSeg(a: StrokePoint, b: StrokePoint, tool: Tool): void {
@@ -46,12 +50,26 @@ function drawSeg(a: StrokePoint, b: StrokePoint, tool: Tool): void {
   ctx.globalCompositeOperation = 'source-over';
 }
 
+function drawDot(p: StrokePoint, tool: Tool): void {
+  const dpr = window.devicePixelRatio || 1;
+  const s = styleFor(tool, p.pressure);
+  const px = normToPx(p.x, p.y);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalCompositeOperation = s.composite;
+  ctx.fillStyle = s.stroke;
+  ctx.beginPath();
+  ctx.arc(px.x, px.y, Math.max(1, s.width / 2), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+}
+
 export function redrawInk(): void {
   if (!ctx) return;
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, pageCss.w, pageCss.h);
   for (const s of currentStrokes()) {
+    if (s.points.length === 1) { drawDot(s.points[0], s.tool); continue; }
     for (let i = 1; i < s.points.length; i++) drawSeg(s.points[i - 1], s.points[i], s.tool);
   }
 }
@@ -137,6 +155,7 @@ export function initInk(
     if (state.tool === 'eraser') { eraseAt(e); return; }
     try { cv.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
     const p = evtNorm(e);
+    drawDot({ x: p.x, y: p.y, t: 0, pressure: e.pressure || 0 }, state.tool);
     live = {
       tool: state.tool,
       t0: performance.now(),

@@ -29,6 +29,8 @@ export type DevEventKind =
   | 'bedrock'    // 基岩录制（Tier 1 影子）：起段(profile/锚) + 每次 flush 的采样块摘要(帧数/seq区间/首末帧)
   | 'reflow';    // 重排锚定：draw=落笔每笔命中的重排块(id/runs/屏幕中心·看多笔是否跨段)；reproj=mark 的 live 落点 vs 重投影落点 + 认到的块（live==restored 即逐笔块锚恒等·不漂；查漂移/塌缩用）
 
+import { settings } from '../app/state';
+
 const DEV = (import.meta as { env?: { DEV?: boolean } }).env?.DEV === true;
 
 /**
@@ -40,13 +42,29 @@ const DEV = (import.meta as { env?: { DEV?: boolean } }).env?.DEV === true;
  *   · `ts`=客户端事件时刻、放最前，**payload 可覆盖**（inspect 用 rec.ts 回填记录自身时刻）；server 另盖 `t`=落库时刻。
  */
 export function devEmit(kind: DevEventKind, build: () => Record<string, unknown>): void {
-  if (!DEV) return;
+  // preview(DEV) 总开；板上生产构建靠运行时旋钮 settings.devtel 开（默认关）——
+  // 让"开发者侧 Claude"无需 DEV 构建/服务端落点，也能直读设备遥测（见下 window.__devtel + console）。
+  if (!DEV && !settings.devtel) return;
   try {
-    const payload = build();
-    void fetch('/api/__debug/event', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ts: new Date().toISOString(), ...payload, kind }),
-    }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
+    const env = { ts: new Date().toISOString(), ...build(), kind };
+    const line = JSON.stringify(env);
+    if (settings.devtel) {
+      // 设备遥测双出：① 环形缓冲 window.__devtel（随时 cdp.py 读最近 N 条·不必卡在事件发生那刻）
+      //               ② console.log（cdp_capture.py 实时抓）。两者都纯文本无图、不连累 UI。
+      try {
+        const w = window as unknown as { __devtel?: unknown[] };
+        if (!w.__devtel) w.__devtel = [];
+        w.__devtel.push(env);
+        if (w.__devtel.length > 400) w.__devtel.shift();
+        console.log('[devtel] ' + line);
+      } catch { /* 缓冲/打印出错无所谓 */ }
+    }
+    if (DEV) {
+      void fetch('/api/__debug/event', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: line,
+      }).catch(() => { /* dev sink 不在/出错都无所谓 */ });
+    }
   } catch { /* 取值/序列化出错也不连累 UI */ }
 }

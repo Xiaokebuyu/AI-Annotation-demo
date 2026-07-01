@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>InkLoop · 移动版</title>
 </head>
-<body class="eink-shell" data-mode="read" data-read="diary" data-mtg="home" data-dev="chat">
+<body class="eink-shell" data-mode="read" data-read="diary" data-mtg="home" data-meet="schedule" data-dev="chat">
 <div id="m-app">
 
   <!-- ════ 导航脊 ════ -->
@@ -32,6 +32,8 @@
       <div class="rl-item"><button class="rl-btn dim" data-dev="set" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/></svg></button><span class="rl-lab">设置</span></div>
     </div>
 
+    <!-- 会议子导航已删（单页面收敛·阶段①）：会议=单一会议流，home 直接是会议列表，无日程/群聊双子页 -->
+
     <!-- 工具收纳格子 -->
     <div id="tools">
       <button class="rl-btn on" id="tools-toggle" aria-label="工具">
@@ -40,6 +42,7 @@
       </button>
       <div id="tools-list">
         <button class="rl-btn on" data-tool="pen" aria-label="钢笔"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg></button>
+        <button class="rl-btn" data-tool="ai" aria-label="AI 笔（写给 AI · 圈点提问）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21l.7-2.8L12 9.9l2.1 2.1L5.8 20.3 3 21z"/><path d="M17.5 2.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg></button>
         <button class="rl-btn" data-tool="hi" aria-label="高亮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l-1 4h8M8.5 14.5l7-7 3 3-7 7h-3v-3z"/><path d="M3 21h18" opacity=".4"/></svg></button>
         <button class="rl-btn" data-tool="er" aria-label="橡皮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16l8.5-8.5a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8L12 18H8l-2-2z"/><path d="M5 21h14" opacity=".4"/></svg></button>
         <button class="rl-btn" data-tool="hand" aria-label="手型"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-1.5a4 4 0 0 1-3-1.4L5 16.5a1.5 1.5 0 0 1 2.3-2L8 15.3"/></svg></button>
@@ -107,95 +110,11 @@
     <section class="surf" id="surf-meet">
 
       <!-- home -->
-      <div class="mview" id="mv-home">
-        <div class="vhead"><h1>会议</h1><span class="cnt">2 群 · 5 场</span><span class="sp"></span><button class="hbtn pri">+ 新建群聊</button></div>
-        <div class="mbody">
-          <section class="msec">
-            <div class="msec-h"><span class="mt">会议日程</span><span class="mb">飞书 · 待开始 / 进行中</span><span class="fs-ok"><span class="d"></span>飞书已连 · 14 条</span></div>
-            <div class="tl">
-              <div class="tl-now"><span class="d"></span><span class="l">今天<br>6.26 周四</span></div>
-              <div class="tl-card"><div class="d">6.26 今天</div><div class="t">15:00</div><div class="n">项目同步周会</div><span class="bd">每周</span></div>
-              <div class="tl-card"><div class="d">6.27 明天</div><div class="t">10:00</div><div class="n">端侧 OCR 方案评审</div><span class="bd">单次</span></div>
-              <div class="tl-card"><div class="d">6.28 周六</div><div class="t">14:00</div><div class="n">硬件选型终审</div><span class="bd">单次</span></div>
-              <div class="tl-card"><div class="d">7.01 周二</div><div class="t">11:00</div><div class="n">季度复盘</div><span class="bd">每月</span></div>
-              <div class="tl-more">还有 3 场 ›</div>
-            </div>
-            <button class="mrow" data-detail><span class="st live"><span class="d"></span>进行中</span><span class="mc"><span class="mt">项目同步周会</span><span class="mm">15:00 · Nova 群</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
-            <button class="mrow" data-detail><span class="st up"><span class="d"></span>待开始</span><span class="mc"><span class="mt">端侧 OCR 方案评审</span><span class="mm">明天 10:00 · Nova 群</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
-          </section>
+      <div class="mview" id="mv-home"></div><!-- renderHome 全量填充（清掉静态假数据占位·阶段②） -->
 
-          <section class="msec">
-            <div class="msec-h"><span class="mt">群聊书架</span><span class="mb">以群聊为单位</span></div>
-            <div class="ws-grid">
-              <div class="ws-card" data-ws><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15 5.2a3 3 0 0 1 0 5.6"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg></div><div class="wn">Nova <span class="fs">飞书</span></div><div class="wm">3 场会议</div></div>
-              <div class="ws-card" data-ws><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15 5.2a3 3 0 0 1 0 5.6"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg></div><div class="wn">DeskHub</div><div class="wm">2 场会议</div></div>
-            </div>
-          </section>
-        </div>
-      </div>
+      <!-- ws 群页已删（单页面收敛·阶段②）：群成员/动态/三桶对「参加会议」价值低 → 会议统一走 home 列表 -->
 
-      <!-- workspace -->
-      <div class="mview" id="mv-ws">
-        <div class="mtop"><span class="bk" data-back="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti">Nova</span><span class="sp"></span><button class="hbtn">+ 新建会议</button></div>
-        <div class="mbody">
-          <section class="msec">
-            <div class="msec-h"><span class="mt">参会人</span><span class="mb">10 人 · 飞书群成员</span></div>
-            <div class="chips"><span class="chip">宋健</span><span class="chip">王辰炜</span><span class="chip">金哲帆</span><span class="chip">姚梦娜</span><span class="chip">刘万钢</span><span class="chip">徐智强</span><span class="chip">倪子璇</span><span class="chip">张宇</span><span class="chip">蒋蕾</span><span class="chip">王晓东</span></div>
-          </section>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">群动态</span><span class="mb">近 5 条 · 3 资料</span></div>
-            <div class="feed">
-              <div class="fitem"><span class="fs-n">王辰炜</span><span class="fb mat">[文件] 端云协同_v3.html<span class="matbadge">资料</span></span><span class="ft">09:12</span></div>
-              <div class="fitem"><span class="fs-n">张宇</span><span class="fb mat">[文件] 硬件选型页.html<span class="matbadge">资料</span></span><span class="ft">昨天</span></div>
-              <div class="fitem"><span class="fs-n">徐智强</span><span class="fb">端侧 OCR POC 跑通了，CER 0.0075</span><span class="ft">昨天</span></div>
-              <div class="fitem"><span class="fs-n">蒋蕾</span><span class="fb mat">[图片]<span class="matbadge">资料</span></span><span class="ft">周二</span></div>
-              <div class="fitem"><span class="fs-n">金哲帆</span><span class="fb">同步会改到今天下午 3 点</span><span class="ft">周二</span></div>
-            </div>
-          </section>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">进行中</span><span class="mb">1</span></div>
-            <button class="mrow" data-detail><span class="st live"><span class="d"></span>进行中</span><span class="mc"><span class="mt">项目同步周会</span><span class="mm">15:00</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
-          </section>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">待开始</span><span class="mb">2</span></div>
-            <button class="mrow" data-detail><span class="st up"><span class="d"></span>待开始</span><span class="mc"><span class="mt">端侧 OCR 方案评审</span><span class="mm">明天 10:00</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
-            <button class="mrow" data-detail><span class="st up"><span class="d"></span>待开始</span><span class="mc"><span class="mt">硬件选型终审</span><span class="mm">6.28 14:00</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
-          </section>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">已结束</span><span class="mb">2</span></div>
-            <button class="mrow" data-detail><span class="st end"><span class="d"></span>已结束</span><span class="mc"><span class="mt">上周项目同步</span><span class="mm">6.19</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
-            <button class="mrow" data-detail><span class="st end"><span class="d"></span>已结束</span><span class="mc"><span class="mt">飞书接入对齐</span><span class="mm">6.17</span></span><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></button>
-          </section>
-        </div>
-      </div>
-
-      <!-- meeting detail -->
-      <div class="mview" id="mv-detail">
-        <div class="mtop"><span class="bk" data-back="ws"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti">项目同步周会</span><span class="st live" style="margin-left:8px"><span class="d"></span>进行中</span></div>
-        <div class="mbody">
-          <div class="dact"><button class="hbtn pri" data-enter>✏ 进入会议</button><button class="hbtn">⏹ 结束会议</button><button class="hbtn">+ 添加资料</button></div>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">可能有用的文件</span><span class="mb">2 份</span></div>
-            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">注意力与工作记忆.pdf</div><div class="mt">248 页 · 借阅读器打开</div></div></div>
-            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">端云协同 v3</div><div class="mt">9 页 · HTML→PDF</div></div></div>
-          </section>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">群里收集到的资料</span><span class="mb">机器人捞 · Nova</span></div>
-            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">端云协同_v3.html</div><div class="mt">群文件 · 09:12 · 可批注</div></div></div>
-            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">硬件选型页.html</div><div class="mt">群文件 · 昨天 · 可批注</div></div></div>
-            <div class="matcard"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 14l4-3 4 3 4-4 4 3"/></svg></span><div><div class="nm">白板草图.png</div><div class="mt">群文件 · 周二</div></div></div>
-          </section>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">你的手写档案</span></div>
-            <div class="empty">会议进行 / 结束后，你在资料与转写上的手写会汇总在这里。</div>
-          </section>
-          <section class="msec">
-            <div class="msec-h"><span class="mt">思路总结</span><span class="sp" style="flex:1"></span><button class="hbtn" disabled style="opacity:.45">生成思路总结</button></div>
-            <div class="empty">会议结束后可对手写档案做思路总结。
-会后 AI 综合（送云端处理）——接线后置。</div>
-          </section>
-        </div>
-      </div>
+      <div class="mview" id="mv-detail"></div><!-- renderDetail 全量填充（清掉静态假数据占位·阶段②） -->
 
       <!-- WS2-C 会后记录（转写句列 + 手写档案·纯文本·JS 填充 #recap-body） -->
       <div class="mview" id="mv-recap">

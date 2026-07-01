@@ -13,7 +13,7 @@
 import type { TranscriptCue } from './align';
 import { promptVersion } from '../../core/prompt-versions';
 
-/** 段内手写（UI 右轴 + 详情用）。relMs＝相对会议时刻（已 clamp ≥0）。 */
+/** 段内手写（UI 右轴 + 详情用）。relMs＝相对会议时刻；可为负＝会前落笔（M6：不再 clamp ≥0）。 */
 export interface SegmentMark {
   mark_id: string;
   relMs: number;
@@ -51,7 +51,8 @@ const CONTEXT_POST = 8_000;  // 段在末笔后裹 8s
 const MERGE_GAP = 5_000;     // 仅间隔 ≤5s 的两 active 才合并
 const SUMMARY_MAX = 28;
 
-/** 由 PersistedMark 列表算 SegmentMark：relMs = abs_timestamp − t0 − offset（clamp ≥0），按 relMs 升序。
+/** 由 PersistedMark 列表算 SegmentMark：relMs = abs_timestamp − t0 − offset，按 relMs 升序。
+ *  负值＝落笔早于会议 t0（会前记录·M6 不再 clamp ≥0，UI 呈现在时间轴左侧）。
  *  调用方传已折叠、已去墓碑的 marks。t0AbsMs = 录音 t0 近似（panel start）；offsetMs = 人工/启发式微调。 */
 export function buildSegmentMarks(
   marks: Array<{ mark_id: string; abs_timestamp: number; feature_type?: string; marked_text?: string; page_index?: number }>,
@@ -62,7 +63,7 @@ export function buildSegmentMarks(
   return marks
     .map((m) => ({
       mark_id: m.mark_id,
-      relMs: Math.max(0, m.abs_timestamp - base),
+      relMs: m.abs_timestamp - base,
       feature_type: m.feature_type || 'handwriting',
       marked_text: (m.marked_text || '').trim(),
       page_index: m.page_index ?? 0,
@@ -134,10 +135,12 @@ export function buildSegments(input: SegmentInput): RecapSegment[] {
     return [finishSeg('quiet', cueStartMin, cueEndMax, cues, [])];
   }
 
-  // ① 手写聚簇 → 每簇一个 active 时间窗 [簇首−pre, 簇末+post]（clamp ≥0）。
+  // ① 手写聚簇 → 每簇一个 active 时间窗 [簇首−pre, 簇末+post]。
+  //    簇首在会中(≥0)：裹上下文但不越过 t0（clamp ≥0）；簇首在会前(<0)：本就是会前记录，窗口起点＝簇首本身
+  //    （不再倒贴 pre——那只是徒增一段无意义的「更早会前」空白，M6）。
   const groups = clusterMarks(marks, clusterGap);
   let spans = groups.map((g) => ({
-    start: Math.max(0, g[0].relMs - pre),
+    start: g[0].relMs >= 0 ? Math.max(0, g[0].relMs - pre) : g[0].relMs,
     end: g[g.length - 1].relMs + post,
     marks: g,
   }));
@@ -189,7 +192,8 @@ export function buildSegments(input: SegmentInput): RecapSegment[] {
 }
 
 function finishSeg(kind: 'active' | 'quiet', startMs: number, endMs: number, cues: TranscriptCue[], marks: SegmentMark[]): RecapSegment {
-  return { kind, startMs: Math.max(0, startMs), endMs, cues, marks, heuristicSummary: heuristicOf(cues, marks), cueHash: hashCues(kind, cues) };
+  // 不再 clamp ≥0：会前 active 段的负 startMs 要保留（M6·UI 靠它渲成时间轴左侧「会前」段）。
+  return { kind, startMs, endMs, cues, marks, heuristicSummary: heuristicOf(cues, marks), cueHash: hashCues(kind, cues) };
 }
 
 function nearestFrame(frames: Array<{ start: number; end: number }>, t: number): number {

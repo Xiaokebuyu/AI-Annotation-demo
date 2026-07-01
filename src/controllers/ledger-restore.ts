@@ -20,6 +20,8 @@ function persistedToMark(pm: PersistedMark, baseT: number, wall: number): Mark {
     event_type: pm.scored_type as EventType, geometry: { bbox: pm.bbox }, stroke_points: points,
     text_note: null, created_at: pm.created_at, device_id: pm.device_id, session_id: '',
     pointer_type: pm.pointer_type, version: SCHEMA_VERSION,
+    capture_surface: pm.capture_surface,
+    coord_space: pm.coord_space,
   };
   const feature: StrokeFeature = {
     type: pm.feature_type, confidence: pm.feature_confidence, scaleRatio: NaN,

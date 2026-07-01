@@ -25,6 +25,37 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 const publicAssetUrl = (path: string): string =>
   new URL(`${import.meta.env.BASE_URL || './'}${path}`, window.location.href).toString();
 
+// ── PDF 加载防 hang（P0）：转换服务/网络/pdfjs worker 任一不响应都不让上层永久卡住 ──
+const PDF_FETCH_TIMEOUT_MS = 45_000;   // 下载/导入 PDF 字节（含 convert-service 转换）
+const PDF_DECODE_TIMEOUT_MS = 45_000;  // pdfjs 解码（worker 加载/坏 PDF 可能永不结算）
+const PDF_META_TIMEOUT_MS = 8_000;     // 元信息/目录（非关键，超时即退空）
+/** 给 promise 加超时：到点 reject + 可选清理（abort/destroy）。底层不一定真停，但上层不再卡。 */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string, onTimeout?: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let done = false;
+    const timer = window.setTimeout(() => { if (!done) { done = true; try { onTimeout?.(); } catch { /* noop */ } reject(new Error(`${label}超时`)); } }, ms);
+    p.then(
+      (v) => { if (!done) { done = true; window.clearTimeout(timer); resolve(v); } },
+      (e) => { if (!done) { done = true; window.clearTimeout(timer); reject(e); } },
+    );
+  });
+}
+/** 带超时 + AbortController 的 PDF 字节下载：转换服务挂起时主动 abort，不泄漏连接。 */
+async function fetchPdfBytes(url: string, label: string): Promise<ArrayBuffer> {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), PDF_FETCH_TIMEOUT_MS);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    if (!r.ok) throw new Error(`${label} HTTP ${r.status}`);
+    return await r.arrayBuffer();
+  } catch (e) {
+    if ((e as { name?: string })?.name === 'AbortError') throw new Error(`${label}超时`);
+    throw e;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 // pdf（当前 PDFDocumentProxy）已迁入 SurfaceContext（方案 B Stage 1）：读写走 getActiveContext().pdf，
 // 切回主阅读/已开会议资料免重新 fetch/decode。renderTask 是单 DOM 渲染锁，留模块级（单激活不双渲）。
 let renderTask: { cancel(): void; promise: Promise<void> } | null = null;
@@ -124,19 +155,20 @@ async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob |
   sctx.fileName = filename;
   sctx.surfaceType = 'article';
   // cMapUrl/standardFontDataUrl：救老中文 PDF（非嵌入 CID 字体 + 预定义 CJK CMap），否则中文渲染/取文出空白。资产在 public/。
-  const pdf = await pdfjsLib.getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     data: buf,
     cMapUrl: publicAssetUrl('cmaps/'),
     cMapPacked: true,
     standardFontDataUrl: publicAssetUrl('standard_fonts/'),
-  }).promise;
+  });
+  const pdf = await withTimeout(loadingTask.promise, PDF_DECODE_TIMEOUT_MS, `解析 PDF ${filename}`, () => { void loadingTask.destroy(); });
   if (!fresh()) { try { void pdf.destroy(); } catch { /* noop */ } return; } // 被抢占：销毁这份没人要的 PDF，免泄漏
   sctx.pdf = pdf; // 迁入归属实例（切回免重新 fetch/decode）
   sctx.pageCount = pdf.numPages;
   sctx.strokesByPage.clear();
   // 文档级元信息：Info 字典 + 大纲目录（真书常有，喂重排/AI 排版）。
-  const docMeta = await pdf.getMetadata().then((m) => (m && m.info ? (m.info as Record<string, unknown>) : null)).catch(() => null);
-  const outline = await pdf.getOutline().catch(() => null);
+  const docMeta = await withTimeout(pdf.getMetadata(), PDF_META_TIMEOUT_MS, '读取 PDF 元信息').then((m) => (m && m.info ? (m.info as Record<string, unknown>) : null)).catch(() => null);
+  const outline = await withTimeout(pdf.getOutline(), PDF_META_TIMEOUT_MS, '读取 PDF 目录').catch(() => null);
   if (!fresh()) return;
   sctx.docMeta = docMeta;
   sctx.outline = outline;
@@ -190,9 +222,7 @@ export async function reopenBook(documentId: string, filename: string): Promise<
  */
 export async function openPdfFromUrl(documentId: string, filename: string, pdfUrl: string): Promise<void> {
   if (await reopenBook(documentId, filename)) return; // 之前转过 → 库里有，直接重开（免重转）
-  const r = await fetch(pdfUrl);
-  if (!r.ok) throw new Error('open pdf ' + r.status);
-  const buf = await r.arrayBuffer();
+  const buf = await fetchPdfBytes(pdfUrl, '下载会议资料');
   const blob = new Blob([buf.slice(0)], { type: 'application/pdf' }); // 拷贝：getDocument 可能 detach
   await loadIntoState(buf, filename, blob, documentId);
 }
@@ -204,16 +234,15 @@ export async function openPdfFromUrl(documentId: string, filename: string, pdfUr
  */
 export async function importPdfFromUrl(documentId: string, filename: string, pdfUrl: string): Promise<'cached' | 'imported'> {
   if (await loadPdfBlob(documentId)) return 'cached'; // 去重：稳定 docId 已导入
-  const r = await fetch(pdfUrl);
-  if (!r.ok) throw new Error('import pdf ' + r.status);
-  const buf = await r.arrayBuffer();
+  const buf = await fetchPdfBytes(pdfUrl, '导入资料');
   const fileHash = await sha256Hex(buf.slice(0));
-  const pdf = await pdfjsLib.getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     data: buf.slice(0),
     cMapUrl: publicAssetUrl('cmaps/'),
     cMapPacked: true,
     standardFontDataUrl: publicAssetUrl('standard_fonts/'),
-  }).promise;
+  });
+  const pdf = await withTimeout(loadingTask.promise, PDF_DECODE_TIMEOUT_MS, `解析 PDF ${filename}`, () => { void loadingTask.destroy(); });
   const pageCount = pdf.numPages;
   try { void pdf.destroy(); } catch { /* noop */ }
   const prevDoc = activeDoc(); // openDoc 改 current → 导入后还原回原活跃文档

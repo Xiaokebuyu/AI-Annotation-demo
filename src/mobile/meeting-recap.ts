@@ -200,7 +200,8 @@ async function loadTranscript(m: PersistedMeeting): Promise<{ srt: string; cues:
   return { srt: '', cues: [] };
 }
 
-const clk = (ms: number): string => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+// 负 ms＝会前（M6·segment.ts 不再 clamp≥0）：保留负号，如 -9:52。
+const clk = (ms: number): string => { const neg = ms < 0; const s = Math.round(Math.abs(ms) / 1000); return `${neg ? '-' : ''}${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const rng = (a: number, b: number): string => `${clk(a)}–${clk(b)}`;
 // t0/offset 防 NaN（started_at 可能解析失败·codex A#1）：取第一个有限值，否则 0。
 const finiteMs = (...xs: Array<number | null | undefined>): number => { for (const x of xs) if (typeof x === 'number' && Number.isFinite(x)) return x; return 0; };
@@ -331,6 +332,49 @@ function pagerHtml(id: string, page: number, total: number): string {
 /** 页码钳到 [0, total-1]（防负/越界渲染空页·codex A#6）。 */
 const clampPage = (p: number, total: number): number => Math.max(0, Math.min(p, total - 1));
 
+// M2b·思路总结迁 recap：本地 m.summary（summarizeMeeting 生成·手写档案 AI 综合）显示在 recap 顶部，与 panel AI 总结分开两块。
+function meetingSummaryHtml(): string {
+  if (!recapState) return '';
+  const m = recapState.meeting;
+  const stale = !!(m.summary && m.summary_source?.feishu_minute_token && m.summary_source.feishu_minute_token !== m.feishu_minute_token);
+  const body = m.summary
+    ? `${stale ? '<div class="empty" style="margin:0 0 6px">⚠ 此总结基于旧的飞书关联生成，可能不对应当前转写，建议重新生成。</div>' : ''}<div class="summary" id="rs-body">${esc(m.summary)}</div>`
+    : `<div class="empty" id="rs-body">${recapState.panelSummary ? '还没生成设备端思路总结；下方已同步 panel AI 总结。可点生成，把飞书转写和本场手写合在一起。' : (m.feishu_minute_token ? '还没生成思路总结。可基于飞书妙记转写和本场手写生成。' : '还没生成思路总结。先关联飞书妙记后再生成。')}</div>`;
+  const label = m.summary ? '重新生成' : '生成思路总结';
+  const disabled = m.feishu_minute_token ? '' : ' disabled style="opacity:.45"';
+  return `<div class="rc-msum" style="border:1px solid var(--hair2);border-radius:8px;padding:10px 12px;margin:0 0 12px">`
+    + `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b>思路总结</b><span style="flex:1"></span><button class="hbtn" id="rs-gen"${disabled}>${label}</button></div>`
+    + body + `</div>`;
+}
+async function generateMeetingSummary(seq: number, bodyEl: HTMLElement, meetingId: string): Promise<void> {
+  if (!recapState || !recapAlive(seq, bodyEl) || recapState.meeting.meeting_id !== meetingId) return;
+  const btn = bodyEl.querySelector<HTMLButtonElement>('#rs-gen');
+  if (btn?.dataset.busy) return;
+  if (btn) { btn.dataset.busy = '1'; btn.textContent = '生成中…'; btn.disabled = true; }
+  let lastPaint = 0;
+  try {
+    const out = await summarizeMeeting(meetingId, (full) => {
+      const now = Date.now();
+      if (now - lastPaint < 500) return; // 电纸屏 500ms 合并刷新·防残影
+      lastPaint = now;
+      if (!recapAlive(seq, bodyEl)) return;
+      const sumEl = bodyEl.querySelector<HTMLElement>('#rs-body');
+      if (sumEl) { sumEl.className = 'summary'; sumEl.textContent = full; }
+    });
+    if (!out || !recapAlive(seq, bodyEl) || !recapState || recapState.meeting.meeting_id !== meetingId) return;
+    const fresh = await getMeeting(meetingId); // 刷新 recapState.meeting → renderRecap 重渲（不重 loadRecapView·免重拉转写/重算分段）
+    if (fresh && recapAlive(seq, bodyEl) && recapState && recapState.meeting.meeting_id === meetingId) recapState.meeting = fresh;
+  } finally {
+    if (recapAlive(seq, bodyEl)) renderRecap(bodyEl);
+  }
+}
+function wireMeetingSummaryButton(bodyEl: HTMLElement): void {
+  bodyEl.querySelector('#rs-gen')?.addEventListener('click', () => {
+    if (!recapState) return;
+    void generateMeetingSummary(recapLoadSeq, bodyEl, recapState.meeting.meeting_id);
+  });
+}
+
 type StoredPanelSummaryStatus = NonNullable<PersistedMeeting['panel_summary_status']>;
 function toStoredPanelSummaryStatus(status: PanelMeetingSummaryStatus): StoredPanelSummaryStatus {
   if (status === 'ready' || status === 'not_generated' || status === 'missing_minute' || status === 'not_found') return status;
@@ -430,8 +474,9 @@ function renderRecapOverview(bodyEl: HTMLElement): void {
   const { meeting, segments, digests } = recapState;
   // 空态：有飞书会议但无转写无手写——别渲空时间轴误导用户「内容没加载出来」（意图 #3）。
   if (!segments.length) {
-    bodyEl.innerHTML = panelSummaryHtml()
+    bodyEl.innerHTML = meetingSummaryHtml() + panelSummaryHtml()
       + `<div class="rc-note">这场会议已关联飞书会议；panel 总结生成后会自动同步到这里。当前还没有转写和手写档案。</div>`;
+    wireMeetingSummaryButton(bodyEl);
     wirePanelSummaryButtons(bodyEl);
     return;
   }
@@ -456,7 +501,9 @@ function renderRecapOverview(bodyEl: HTMLElement): void {
       const shown = s.marks.slice(0, MARKS_CAP);
       const marksHtml = shown.map((mk) => `<span class="tl-ink${mk.feature_type === 'drawing' ? ' tl-draw' : ''}"><span class="tl-ic">${inkLabel(mk.feature_type)}</span>${esc(inkText(mk.marked_text, mk.feature_type))}</span>`).join('')
         + (s.marks.length > MARKS_CAP ? `<span class="tl-more">＋另 ${s.marks.length - MARKS_CAP} 处</span>` : '');
-      const left = `<span class="tl-lb">会议 · ${rng(s.startMs, s.endMs)} · ${s.cues.length}句</span><span class="tl-txt">${esc(sum)}</span><span class="tl-hint">详情 ›</span>`;
+      // 整段落在 t0 之前（endMs<=0）＝会前记录（M6）：换标签别再叫「会议」误导成会中内容。
+      const kindLb = s.endMs <= 0 ? '会前' : '会议';
+      const left = `<span class="tl-lb">${kindLb} · ${rng(s.startMs, s.endMs)} · ${s.cues.length}句</span><span class="tl-txt">${esc(sum)}</span><span class="tl-hint">详情 ›</span>`;
       const mid = `<div class="tl-mid"><span class="tl-md"></span><span class="tl-mt">${clk(s.startMs)}</span></div>`;
       return `<div class="tl-row tl-click" data-seg="${idx}"><div class="tl-cl">${left}</div>${mid}<div class="tl-cr">${marksHtml}</div></div>`;
     }
@@ -466,10 +513,11 @@ function renderRecapOverview(bodyEl: HTMLElement): void {
     return `<div class="tl-row tl-click tl-quiet" data-seg="${idx}"><div class="tl-cl">${left}</div>${mid}<div class="tl-cr"></div></div>`;
   }).join('');
 
-  bodyEl.innerHTML = panelSummaryHtml()
+  bodyEl.innerHTML = meetingSummaryHtml() + panelSummaryHtml()
     + `<div class="rc-note">${note}</div>`
     + `<div class="tl-seg"><div class="tl-ax"></div>${rows}</div>`
     + pagerHtml('ov', p, total);
+  wireMeetingSummaryButton(bodyEl);
   wirePanelSummaryButtons(bodyEl);
 
   bodyEl.querySelectorAll<HTMLElement>('[data-seg]').forEach((el) => el.addEventListener('click', () => {

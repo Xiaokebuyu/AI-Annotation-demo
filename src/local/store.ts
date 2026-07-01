@@ -9,7 +9,7 @@
 import type { NormBBox, OverlayState, ScreenOverlay } from '../core/contracts';
 import type { ReflowBlock } from '../surface/reflow';
 import type { MeetingStatus, PersistedAiTurn, PersistedDoc, PersistedMark, PersistedMeeting, PersistedMeetingMinute, PersistedPage, PersistedPdfBlob, PersistedWorkspace } from '../core/store-format';
-import { DB_VERSION, STORE_VERSION } from '../core/store-format';
+import { DB_VERSION, MARK_ENTRY_SCHEMA_VERSION, STORE_VERSION } from '../core/store-format';
 import { shortId } from '../core/ids';
 import { vectorStore } from './vector';
 import type { PersistedInkChunk, PersistedInkSegment } from '../core/bedrock';
@@ -363,7 +363,7 @@ function entriesByContext<T extends { seq: number }>(storeName: string, contextI
 
 /** 追加一条 mark 条目（含 tombstone）。store 填 entry_id/seq/created_at。 */
 export function appendMarkEntry(m: Omit<PersistedMark, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
-  const rec: PersistedMark = { ...m, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
+  const rec: PersistedMark = { schema_version: MARK_ENTRY_SCHEMA_VERSION, ...m, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
   // C6：标注落账本同时排入向量库 seam（今 no-op）——真向量库接上时历史数据已在库，免冷启动 backfill。
   if (!rec.is_tombstone && rec.marked_text) {
     void vectorStore.upsert({ id: rec.entry_id, bookId: rec.document_id, pageIndex: rec.page_index, text: rec.marked_text, anchorRefs: rec.hmp?.target_object_refs });
@@ -646,6 +646,17 @@ export async function upsertPanelWorkspace(name = '飞书会议'): Promise<Persi
   if (cur && cur.source === 'manual') return cur;
   const now = new Date().toISOString();
   const ws: PersistedWorkspace = { workspace_id: id, name: name.trim() || '飞书会议', source: 'manual', created_at: cur?.created_at ?? now, updated_at: now };
+  await putInto(WORKSPACES, ws);
+  return ws;
+}
+
+/** 日程占位工作区（日历日程会议归群前的归属·日程子页按 status 过滤显示·不依赖此 ws；归群后 workspace_id 迁真群）。 */
+export async function upsertScheduleWorkspace(name = '日程'): Promise<PersistedWorkspace> {
+  const id = 'ws_schedule';
+  const cur = await getOneFrom<PersistedWorkspace>(WORKSPACES, id);
+  if (cur && cur.source === 'manual') return cur;
+  const now = new Date().toISOString();
+  const ws: PersistedWorkspace = { workspace_id: id, name: name.trim() || '日程', source: 'manual', created_at: cur?.created_at ?? now, updated_at: now };
   await putInto(WORKSPACES, ws);
   return ws;
 }

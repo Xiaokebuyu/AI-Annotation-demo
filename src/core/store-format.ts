@@ -11,12 +11,13 @@
  * 页保持纯净：marks 只装用户笔迹+取证，AI 文本全在 ai_turns（显示靠 anchor refs 挂回页）。
  * 文字级、几 KB/页，墨水屏轻松装下；浏览器用 IndexedDB，映射到设备 SQLite。
  */
-import type { HMP, InferenceView, MarkFeatureType, NormBBox, OverlayState, PipelineStage, ScreenOverlay, StrokePoint } from './contracts';
+import type { CaptureSurface, HMP, InferenceView, MarkFeatureType, NormBBox, OverlayState, PipelineStage, ScreenOverlay, StrokeCoordSpace, StrokePoint, SurfaceBBox } from './contracts';
 import type { ReflowBlock } from '../surface/reflow';
 import type { RawRef } from './bedrock';
 
 export const STORE_VERSION = '2'; // 1→2：strokes/overlays 出 docs 进 marks/ai_turns 账本（干净断裂，旧 docs 弃）
 export const DB_VERSION = 9;      // v7→v9：WS2-C meeting_minutes（飞书妙记转写缓存·会后离线复盘不丢转写·store.ts ① 基线幂等建）。meeting_minutes 在幂等基线（任何升级都建）·任何升级都自愈缺表。升级走幂等基线 + 阶梯迁移（store.ts openDB），老数据不丢
+export const MARK_ENTRY_SCHEMA_VERSION = '3'; // v3：mark/stroke 明确区分 canonical page anchor 与用户落笔 surface evidence。
 
 /** 一张图的解读：图本身可从 PDF 重渲，故只存 bbox + 文字解读。 */
 export interface PersistedImage {
@@ -34,10 +35,15 @@ export interface PersistedPdfBlob {
   size_bytes: number;
 }
 
-/** 一笔的低成本序列：归一化点串 + 工具（redraw 据此还原原貌、保多笔保真）。 */
+/** 一笔的低成本序列：canonical 点串 + 工具（redraw 据此还原原貌、保多笔保真）。 */
 export interface PersistedStroke {
   tool: 'pen' | 'aipen' | 'highlighter' | 'eraser' | 'hand';
-  points: StrokePoint[];
+  points: StrokePoint[];              // canonical page_norm 点串（跨面锚定/原版重绘）；旧数据只有这一套。
+  coord_space?: StrokeCoordSpace;     // points 的坐标系；缺省 page_norm。
+  capture_surface?: CaptureSurface;   // 该笔实际落笔 surface；缺省 page。
+  surface_points?: StrokePoint[];     // 用户落笔 surface 的原始点串；reader 落笔=reader_px，不拿来当 PDF 坐标。
+  surface_coord_space?: StrokeCoordSpace;
+  surface_bbox?: SurfaceBBox;         // surface_points bbox；reader_px 时这是内容 px，不夹 [0,1]。
   anchor_runs?: string[];           // 位置真相锚（逐笔）：该笔落笔时命中重排块的 source run ids → 重投影时各笔认各自的块（多笔手写跨段不被拉拢/塌缩·恒等）。仅重排落笔有；原版/老条目缺=undefined
 }
 
@@ -77,9 +83,14 @@ export interface BaseEntry {
 
 /** 页账本条目 = 一次组装手势（marks store）。is_tombstone=true 表示擦除携同 mark_id。 */
 export interface PersistedMark extends BaseEntry {
+  schema_version?: typeof MARK_ENTRY_SCHEMA_VERSION; // 老条目缺=v2；新条目写 v3。
   mark_id: string;                  // = 代表 event 的 event_id，跨 reload 稳定引用
   strokes: PersistedStroke[];       // 构成笔（tool+points），redraw 保真（不存合并点）
   bbox: NormBBox;                   // union bbox
+  coord_space?: StrokeCoordSpace;    // bbox/strokes.points 的坐标系；缺省 page_norm。
+  capture_surface?: CaptureSurface;  // 用户实际落笔 surface；缺省 page。
+  surface_bbox?: SurfaceBBox;        // 用户落笔 surface 的 union bbox；reader_px 时是内容 px。
+  surface_coord_space?: StrokeCoordSpace;
   tool: 'pen' | 'highlighter';      // 代表工具（自 event_type 派生）
   color: string;                    // 据 tool 派生的颜色（取证完整性；redraw 仍按 tool）
   pointer_type: string;             // pen / touch / mouse / unknown
@@ -189,6 +200,11 @@ export interface PersistedMeeting {
   panel_summary_fetched_at?: string;
   panel_summary_status?: 'ready' | 'not_generated' | 'missing_minute' | 'not_found' | 'failed';
   panel_summary_unread?: boolean;   // 总结由 summary_ready 事件后台到达、用户还没进 recap 看过（home/detail 提醒用·进 recap 即清）
+  // ── 日程会议（日历来源）+ 实时归群（optional 零迁移）──
+  source_kind?: 'calendar' | 'vc' | 'manual'; // 来源：calendar=飞书日历日程预占位 · vc=panel VC started 事件 · manual=手建/模拟（缺省按已有字段推断）
+  feishu_calendar_event_id?: string;          // 日历 event_id（日程落库幂等键·防重复建）
+  calendar_meeting_no?: string;               // 从日历 vchat.meeting_url 解析的会议号（桥接 panel started.meeting_no 实时归群）
+  group_claimed_at?: string;                  // 用户手动认领群的时刻（区别 group_ids 自动归·认领映射来源·UI 显示「已认领」）
   created_at: string;
   updated_at: string;
 }

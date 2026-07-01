@@ -17,5 +17,9 @@ export function styleFor(tool: Tool, pressure: number): SegStyle {
     // 规范色 #D4CFCA（E-ink 友好浅灰高亮），multiply 让文字透出
     return { stroke: 'rgba(212,207,202,0.85)', width: 16, cap: 'butt', composite: 'multiply' };
   }
+  if (tool === 'aipen') {
+    // AI 笔触：靛蓝（彩屏一眼看出"这笔会进 AI"；电纸屏渲成中灰、与纯黑内容笔区分）。略细、圆帽。
+    return { stroke: '#4338CA', width: 1.4 + 1.6 * (pressure || 0.45), cap: 'round', composite: 'source-over' };
+  }
   return { stroke: '#1A1A1A', width: 1.2 + 2.2 * (pressure || 0.45), cap: 'round', composite: 'source-over' };
 }

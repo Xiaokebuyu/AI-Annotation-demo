@@ -22,6 +22,7 @@ import { features } from './config/features';
 import { initMobileMeeting } from './mobile/meeting';
 import { initMobileDev } from './mobile/dev';
 import { initMobileShell } from './mobile/shell';
+import { publishVaultFromDevice, abortVaultPublish } from './integration/inksurface/vault-publish-device';
 import { createPager, mountPagerBar, type Pager, type PagerBar } from './surface/virtual-pager';
 import type { PersistedDoc } from './core/store-format';
 
@@ -35,7 +36,7 @@ initRenderer({
   stageWrap: el('stage-wrap'),
 });
 wireAnnotationLoop(el<HTMLCanvasElement>('ink-layer'));
-initWhisper(el('whisper-layer'));
+initWhisper(el('whisper-layer'), { fold: true }); // 电纸屏：AI 旁注折叠成点触标记（点开才显·像 reader replyMode）
 initAnchorLayer(el('stage')); // 流式 anchor:place 锚点预览（原版/canvas 视图·重排时 #stage hidden 自然不显）——与桌面对齐
 initReader(el('reader'), { notePlacement: 'inline', restoreStrokes: true, replyMode: true, paginate: true }); // 重排阅读视图（书籍态·AI 注内联段落下方·重画旧 mark 真笔触·电纸屏分页翻虚拟页·复用桌面 reader.ts 行为层）
 initInsightPanel({ cards: el('m-cards'), foot: el('m-panel-foot'), count: el('m-insight-count') }); // 本页洞察历史（复用桌面同款）
@@ -68,11 +69,13 @@ bus.on('context:switched', (ctx) => {
   }
 });
 
-// 左缘工具格子（data-tool）→ 引擎 setTool：笔/荧光/擦/手（resolveIntent：非 hand 即落笔，手指默认能写）。
-const TOOL: Record<string, Tool> = { pen: 'pen', hi: 'highlighter', er: 'eraser', hand: 'hand' };
+// 左缘工具格子（data-tool）→ 引擎 setTool：笔/AI 笔/荧光/擦/手（resolveIntent：非 hand 即落笔，手指默认能写）。
+const TOOL: Record<string, Tool> = { pen: 'pen', ai: 'aipen', hi: 'highlighter', er: 'eraser', hand: 'hand' };
 for (const b of document.querySelectorAll<HTMLElement>('[data-tool]')) {
   b.addEventListener('click', () => { const t = TOOL[b.dataset.tool ?? '']; if (t) setTool(t); });
 }
+// AI 笔是"激活 AI（意图识别）"的开关：选中 AI 笔写 → 走 recognize+fold/respond 分类器；普通笔=纯内容。
+// 故 AI 笔按钮常显。AI 笔"原功能"（圈选识别 + 总是回应）已停用·降级为 dev 开关 settings.aiPenExplicit（默认关）。
 
 // ════ 日记：先有文件再写内容 ════
 const titleEl = el('diary-title');
@@ -431,6 +434,16 @@ el('read-sub').querySelector<HTMLElement>('[data-read="diary"]')?.addEventListen
   // 主写盘路径＝scripts/render-vault.ts（干净 .md·消费 conceptLayer→ 出 Concepts/ 枢纽 + 叶子相关概念·Vision A 知识图谱）。
   // scripts/export-vault.ts（SDK adapter·带 sidecar·**不消费概念层**）保留给将来插件/L2 双向同步那条消费方，别拿它当默认导出。
   exportVaultBundle: () => import('./integration/inksurface/vault-collect').then((m) => m.collectVaultBundle()),
+  // buildVaultRelease：bundle → 整包干净 .md 发布包（manifest sha256 + files）·交付路线 Y 的设备侧产物·dev-only。
+  // 上传 panel 存 + Obsidian 下载器拉 = 跨仓库/部署的后续件（panel 加端点 + 插件下载器）。
+  buildVaultRelease: async () => {
+    const [{ collectVaultBundle }, { buildVaultRelease }] = await Promise.all([import('./integration/inksurface/vault-collect'), import('./integration/inksurface/vault-release')]);
+    return buildVaultRelease(await collectVaultBundle());
+  },
+  // publishVaultRelease：一个动作 collect → build → POST panel（交付路线 Y 设备侧闭环）。逻辑在 vault-publish-device（设置页按钮共用）。
+  // 默认 userId=edy（须与 Obsidian 下载器插件一致）·概念层默认关（传 {concepts:true} 才出 Concepts/）。
+  publishVaultRelease: publishVaultFromDevice,
+  abortVaultPublish,
 };
 
 // ════ 线格开关 boot 态：复选框绑定移到 mobile/dev.ts（设置页重渲会重建该控件）════

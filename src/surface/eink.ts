@@ -85,7 +85,9 @@ function pushDirty(x0: number, y0: number, x1: number, y1: number): void {
 }
 /** 抬笔即调：页归一化 bbox → 视口矩形 → A2 局部快刷（原版画布·经 #ink-layer）。 */
 export function signalInkArea(bbox: [number, number, number, number]): void {
-  const vp = pageBoxToViewport(bbox[0], bbox[1], bbox[2], bbox[3]);
+  const min = 8 / Math.max(window.innerWidth || 1, window.innerHeight || 1);
+  const bw = bbox[2] || min, bh = bbox[3] || min;
+  const vp = pageBoxToViewport(bbox[0] - (bw - bbox[2]) / 2, bbox[1] - (bh - bbox[3]) / 2, bw, bh);
   if (vp) pushDirty(vp.x, vp.y, vp.x + vp.w, vp.y + vp.h);
 }
 /** 通用 A2 脏区：直接给视口归一化矩形[0,1]（不经 #ink-layer）。重排面手写/橡皮/AI 标记/小反馈用。 */
@@ -160,9 +162,21 @@ export function initEinkMirror(): void {
     });
     mo.observe(document.body, {
       childList: true, subtree: true, characterData: true,
-      attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-pressed', 'aria-expanded', 'aria-selected', 'data-active', 'open', 'value'],
+      attributes: true, attributeFilter: ['class', 'style', 'hidden', 'disabled', 'aria-pressed', 'aria-expanded', 'aria-selected', 'data-active', 'data-state', 'data-mode', 'data-read', 'data-mtg', 'data-dev', 'data-surface', 'open', 'value'],
     });
   } catch { /* 老 WebView 无 MutationObserver 时静默 */ }
+  // 原生表单控件（select/checkbox/radio/number）改值是改 property、**不产生 DOM 变动** → MutationObserver 抓不到 →
+  // 电纸屏不刷（"改了看不见"）。补一条：change 冒泡到 document 时按目标元素局部 A2 刷一发。
+  // 用 change（离散提交）不用 input（文本逐字太频）；range 拖动结束才 change，够用。
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t instanceof Element && !einkIgnored(t)) signalElementArea(t);
+  }, true);
+  // 仅 range/number 补 input（实时可见）；不给文本框补 input——逐字会过刷。
+  document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t instanceof HTMLInputElement && (t.type === 'range' || t.type === 'number') && !einkIgnored(t)) signalElementArea(t);
+  }, true);
   // 首帧：首屏渲染稳定后镜像一次当前 UI（含导航壳空态）
   setTimeout(() => signalPageReady(), 600);
 }

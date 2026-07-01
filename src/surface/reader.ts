@@ -1,4 +1,4 @@
-import type { AnnotationEvent, EventType, NormBBox, OverlayState, ScreenOverlay, StrokePoint, SurfaceObject } from '../core/contracts';
+import type { AnnotationEvent, EventType, NormBBox, OverlayState, ScreenOverlay, StrokePoint, SurfaceIndex, SurfaceObject } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
 import type { PersistedAiTurn, PersistedMark, PersistedStroke } from '../core/store-format';
 import type { ReflowBlock } from './reflow';
@@ -8,7 +8,7 @@ import { styleFor } from '../capture/stroke-style';
 import { reflowProviders, reflowAiStream } from './reflow-provider';
 import { reflowLocal } from './reflow';
 import { extractPageBlocks } from './renderer';
-import { signalViewportArea } from './eink';
+import { signalViewportArea, signalPageReady } from './eink';
 import { grabRegion } from '../evidence/ocr';
 import { postJson } from '../core/api';
 import { getBookAiTurns, getFoldedMarks, getImageExplain, getReflow, putImageExplain, putReflow } from '../local/store';
@@ -67,10 +67,15 @@ function resolveBlockByRuns(runs: string[]): BlockRef | null {
 }
 /** 几何就近兜底：ref 空/未命中（如空白手写、旧缓存、VLM）时，取 source bbox y 中心最近的块。 */
 function nearestBlockByBbox(bb: NormBBox): BlockRef | null {
-  const aMid = bb[1] + bb[3] / 2;
+  // 2D 就近(到块矩形的边距·非只 y 中心)：page 笔无块锚退到这里时，只看 y 会选到 x 差很远的块 → 投影出负 x。
+  // x 权重略大(1.35)：重排单列、块 x 跨度窄，x 偏差更能说明"不在这一列/这一块"。
+  const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
   let best: BlockRef | null = null, bestD = Infinity;
   for (const ref of blockRefs) {
-    const d = Math.abs((ref.source[1] + ref.source[3] / 2) - aMid);
+    const [x, y, w, h] = ref.source;
+    const dx = cx < x ? x - cx : cx > x + w ? cx - (x + w) : 0;
+    const dy = cy < y ? y - cy : cy > y + h ? cy - (y + h) : 0;
+    const d = Math.hypot(dx * 1.35, dy);
     if (d < bestD) { bestD = d; best = ref; }
   }
   return best;
@@ -82,6 +87,10 @@ interface RPoint { x: number; y: number; pressure: number; t: number }
 interface ReaderStroke { tool: Tool; points: RPoint[]; committed?: Stroke }
 const inkStrokes: ReaderStroke[] = []; // 已落的笔迹（内容坐标）
 let live: { tool: Tool; t0: number; points: RPoint[] } | null = null;
+/** 持久笔 → 重排面工具：保住 highlighter 与 aipen（AI 笔靛蓝），其余归 pen。否则重载/切重排后 AI 笔被降级成普通黑笔。 */
+function persistedTool(ps: PersistedStroke): Tool {
+  return ps.tool === 'highlighter' || ps.tool === 'aipen' ? ps.tool : 'pen';
+}
 // 旧 mark 真笔触重画通道（仅 restoreStrokes 开=移动版重排）：把持久 mark 的页归一化 strokes 反投影回所属块、
 // 独立于 live inkStrokes（免被橡皮/收口/在途笔误伤），每次 layout 变（重排 rebuild / 内联旁注插入致块位移）重算。
 let restoreStrokes = false;
@@ -259,9 +268,16 @@ function blockContentOrigin(ref: BlockRef): { left: number; top: number } {
  *  位置锚到块左上、随文本换行近似（不保证精准套原字，但保形）。 */
 function projectPersistedStroke(ps: PersistedStroke, ref: BlockRef): ReaderStroke {
   const o = blockContentOrigin(ref);
-  const w = pageCss.w || 1, h = pageCss.h || 1;
+  // 跨面(page/其它面捕获的笔投到 reader)：重排块的渲染尺寸≠原版页比例 → 必须用「块 reader 渲染 px ÷ 块源跨度(page归一)」
+  // 的**本地比例**换算，否则按全局 pageCss 缩放会大小失真(实测 page 笔投 reader 又小又偏)。
+  // reader 笔同面投影仍用全局 pageCss——与采集端 onPenUp 一致、round-trip 自洽，保真不破；
+  // capture_surface 缺省按契约视为 page → 走跨面块本地比例（修：老 page 数据原判 local=false 走全局 pageCss 会比例失真）。
+  const local = (ps.capture_surface ?? 'page') !== 'reader';
+  const rr = local ? ref.el.getBoundingClientRect() : null;
+  const w = (rr && ref.source[2] > 1e-6) ? rr.width / ref.source[2] : (pageCss.w || 1);
+  const h = (rr && ref.source[3] > 1e-6) ? rr.height / ref.source[3] : (pageCss.h || 1);
   return {
-    tool: ps.tool === 'highlighter' ? 'highlighter' : 'pen',
+    tool: persistedTool(ps),
     points: ps.points.map((p) => ({ x: o.left + (p.x - ref.source[0]) * w, y: o.top + (p.y - ref.source[1]) * h, pressure: p.pressure, t: p.t })),
   };
 }
@@ -327,9 +343,171 @@ function rectsForObject(objId: string): CRect[] {
   objRectCache.set(objId, out);
   return out;
 }
+
+function bboxOfLocal(points: Array<{ x: number; y: number }>): NormBBox {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of points) {
+    x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
+    x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+  }
+  return Number.isFinite(x0) ? [x0, y0, x1 - x0, y1 - y0] : [0, 0, 0, 0];
+}
+const rectBBox = (r: CRect): NormBBox => [r.left, r.top, r.width, r.height];
+function contentRect(node: Element): CRect {
+  const er = el.getBoundingClientRect();
+  const r = node.getBoundingClientRect();
+  return { left: r.left - er.left, top: r.top - er.top + el.scrollTop, width: r.width, height: r.height };
+}
+function intersects(a: NormBBox, b: NormBBox): boolean {
+  return b[0] < a[0] + a[2] && b[0] + b[2] > a[0] && b[1] < a[1] + a[3] && b[1] + b[3] > a[1];
+}
+
+/** 当前 reader DOM/layout 的 surface-local 对象表。坐标系是 #reader 内容 px，object id 优先沿用 canonical 字符 id。 */
+export function buildReaderSurfaceIndex(): SurfaceIndex | null {
+  if (!state.pageId || !blockRefs.length) return null;
+  anchorCachesReset();
+  const objects: SurfaceObject[] = [];
+  const seen = new Set<string>();
+  for (const obj of anchorObjs) {
+    const rects = rectsForObject(obj.id);
+    if (!rects.length) continue;
+    const r = rects[0];
+    objects.push({ ...obj, bbox: rectBBox(r), source: 'reflow' });
+    seen.add(obj.id);
+  }
+  for (const ref of blockRefs) {
+    if (ref.runIds.some((run) => [...seen].some((id) => runIdOf(id) === run))) continue;
+    const r = contentRect(ref.el);
+    const tag = ref.el.tagName.toLowerCase();
+    objects.push({
+      id: `reader_block_${ref.id}`,
+      type: tag.startsWith('h') ? 'title' : 'text_block',
+      bbox: rectBBox(r),
+      text: ref.el.textContent ?? '',
+      source: 'reflow',
+    });
+  }
+  for (const fig of el.querySelectorAll<HTMLElement>('.reader-fig')) {
+    const id = fig.dataset.block || `reader_fig_${objects.length}`;
+    const r = contentRect(fig);
+    objects.push({ id, type: 'image', bbox: rectBBox(r), role: 'embedded_image', source: 'reflow' });
+  }
+  return objects.length ? { surface_id: state.pageId, surface_type: 'article', page_index: state.pageIndex, objects } : null;
+}
+
+function clampCaptureBox(bbox: NormBBox, padPx: number): { sx: number; sy: number; sw: number; sh: number } | null {
+  const contentH = Math.max(pageContentH(), el.clientHeight, 1);
+  const x0 = Math.max(0, bbox[0] - padPx);
+  const y0 = Math.max(0, bbox[1] - padPx);
+  const x1 = Math.min(el.clientWidth || 1, bbox[0] + bbox[2] + padPx);
+  const y1 = Math.min(contentH, bbox[1] + bbox[3] + padPx);
+  const sw = Math.max(1, x1 - x0), sh = Math.max(1, y1 - y0);
+  return Number.isFinite(sw) && Number.isFinite(sh) ? { sx: x0, sy: y0, sw, sh } : null;
+}
+
+function canvasFromBox(box: { sw: number; sh: number }, max: number): { canvas: HTMLCanvasElement; scale: number; w: number; h: number } {
+  const scale = Math.min(1, max / Math.max(box.sw, box.sh));
+  const w = Math.max(1, Math.round(box.sw * scale));
+  const h = Math.max(1, Math.round(box.sh * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  return { canvas, scale, w, h };
+}
+
+function readerFont(node: Element): string {
+  const cs = getComputedStyle(node);
+  return `${cs.fontStyle} ${cs.fontVariant} ${cs.fontWeight} ${cs.fontSize}/${cs.lineHeight} ${cs.fontFamily}`;
+}
+
+function drawTextNode(ctx: CanvasRenderingContext2D, textNode: Text, box: { sx: number; sy: number }, scale: number): void {
+  const parent = textNode.parentElement;
+  if (!parent) return;
+  const text = textNode.textContent ?? '';
+  if (!text.trim()) return;
+  const er = el.getBoundingClientRect();
+  const cs = getComputedStyle(parent);
+  ctx.font = readerFont(parent);
+  ctx.fillStyle = cs.color || '#111111';
+  ctx.textBaseline = 'alphabetic';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (!ch.trim()) continue;
+    try {
+      const range = document.createRange();
+      range.setStart(textNode, i);
+      range.setEnd(textNode, i + 1);
+      const r = range.getClientRects()[0];
+      range.detach();
+      if (!r) continue;
+      const x = r.left - er.left - box.sx;
+      const y = r.top - er.top + el.scrollTop - box.sy + r.height * 0.82;
+      ctx.fillText(ch, x, y);
+    } catch { /* ignore malformed DOM range */ }
+  }
+}
+
+function drawReaderContent(ctx: CanvasRenderingContext2D, box: { sx: number; sy: number; sw: number; sh: number }, scale: number): void {
+  const capture: NormBBox = [box.sx, box.sy, box.sw, box.sh];
+  ctx.save();
+  ctx.scale(scale, scale);
+  for (const ref of blockRefs) {
+    if (!intersects(capture, rectBBox(contentRect(ref.el)))) continue;
+    const walker = document.createTreeWalker(ref.el, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) drawTextNode(ctx, n as Text, box, scale);
+  }
+  for (const fig of el.querySelectorAll<HTMLElement>('.reader-fig')) {
+    const r = contentRect(fig);
+    if (!intersects(capture, rectBBox(r))) continue;
+    const img = fig.querySelector('img');
+    if (!img?.complete || !img.naturalWidth) continue;
+    try { ctx.drawImage(img, r.left - box.sx, r.top - box.sy, r.width, r.height); } catch { /* canvas may refuse stale image */ }
+  }
+  ctx.restore();
+}
+
+export function grabReaderLayers(bbox: NormBBox, padPx = 24, max = 900): { ink?: string; composite?: string } {
+  if (!el || !inkCv) return {};
+  const box = clampCaptureBox(bbox, padPx);
+  if (!box) return {};
+  const dpr = window.devicePixelRatio || 1;
+  const hasInk = !!(inkCv.width && inkCv.height && box.sy * dpr < inkCv.height);
+  const make = (draw: (ctx: CanvasRenderingContext2D, scale: number) => void, mime = 'image/png', q?: number): string | undefined => {
+    try {
+      const { canvas, scale, w, h } = canvasFromBox(box, max);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      draw(ctx, scale);
+      return canvas.toDataURL(mime, q);
+    } catch { return undefined; }
+  };
+  const drawInk = (ctx: CanvasRenderingContext2D, scale: number): void => {
+    if (!hasInk) return;
+    ctx.drawImage(inkCv, box.sx * dpr, box.sy * dpr, box.sw * dpr, box.sh * dpr, 0, 0, box.sw * scale, box.sh * scale);
+  };
+  return {
+    ink: hasInk ? make((ctx, scale) => drawInk(ctx, scale)) : undefined,
+    composite: make((ctx, scale) => { drawReaderContent(ctx, box, scale); drawInk(ctx, scale); }, 'image/jpeg', 0.78),
+  };
+}
+
+export function captureReaderMark(event: AnnotationEvent): { index: SurfaceIndex; event: AnnotationEvent; layers: { ink?: string; composite?: string }; targetPad: number } | null {
+  if (event.capture_surface !== 'reader' || !event.reflow_ink_points?.length) return null;
+  const index = buildReaderSurfaceIndex();
+  if (!index) return null;
+  const bbox = bboxOfLocal(event.reflow_ink_points);
+  const localEvent: AnnotationEvent = {
+    ...event,
+    geometry: { bbox },
+    stroke_points: event.reflow_ink_points,
+    coord_space: 'reader_px',
+    capture_surface: 'reader',
+  };
+  return { index, event: localEvent, layers: grabReaderLayers(bbox), targetPad: 8 };
+}
 /** 整笔平移：保形保真迹（pageCss 等比）·把源锚点(页归一)摆到目标 content 矩形左上。符号/箭头/手写/圈用。 */
 function translateWhole(strokes: PersistedStroke[], srcX: number, srcY: number, dst: CRect): ReaderStroke[] {
-  return strokes.map((ps) => ({ tool: (ps.tool === 'highlighter' ? 'highlighter' : 'pen') as Tool,
+  return strokes.map((ps) => ({ tool: (persistedTool(ps)) as Tool,
     points: ps.points.map((p) => ({ x: dst.left + (p.x - srcX) * W(), y: dst.top + (p.y - srcY) * Hn(), pressure: p.pressure, t: p.t })) }));
 }
 /** 最近文本对象 + 其重排矩形（refs 空的手写符号 why/? 靠这条就近锚·= 用户说的"空间线"）。取最近 8 个里第一个能定位的。 */
@@ -352,7 +530,7 @@ function segmentByChars(strokes: PersistedStroke[], located: Array<{ obj: Surfac
   const pick = (x: number, y: number): Col => { let best = cols[0], bd = Infinity; for (const c of cols) { const d = Math.hypot((c.b[0] + c.b[2] / 2) - x, (c.b[1] + c.b[3] / 2) - y); if (d < bd) { bd = d; best = c; } } return best; }; // 2D 最近（原标注跨多原文行也分对行）
   const out: ReaderStroke[] = [];
   for (const ps of strokes) {
-    const tool: Tool = ps.tool === 'highlighter' ? 'highlighter' : 'pen';
+    const tool: Tool = persistedTool(ps);
     // 按「重排行」分组（非按单字）：同一重排行的连续点是一段（连得上·避免单点段画不出）；换到另一行才断 → 自然跟随换行拆段。
     let cur: { lineTop: number; pts: RPoint[] } | null = null;
     const flush = (): void => { if (cur && cur.pts.length >= 2) out.push({ tool, points: cur.pts }); cur = null; }; // <2 点 drawStroke 画不出 → 丢
@@ -441,9 +619,9 @@ async function syncRestoredMarks(): Promise<void> {
         liveBbox: bb(livePts), restoredBbox: bb(restPts) }));
     }
     for (const rs of segs) if (rs.points.length) restoredStrokes.push({ ...rs, markId: m.mark_id });
-    if (segs.some((s) => s.points.length >= 2)) restoredMarkIds.add(m.mark_id); // 只有真画出可绘 restored 才标记（否则去重会误跳该 mark 的 live inkStroke）
+    if (segs.some((s) => s.points.length)) restoredMarkIds.add(m.mark_id); // drawStroke 支持单点，任何可绘 restored 都可用于去重
   }
-  if (restoreStrokes) resizeInk(); // 重画（restored 笔此刻才就位）；桌面 restoreStrokes=false 不多画一次
+  if (restoreStrokes) { resizeInk(); signalPageReady(); } // 重画（restored 笔此刻才就位）；笔画在被忽略的 .reader-ink 上→电纸屏显式刷一发。桌面 restoreStrokes=false 不多画一次
   if (replyMode && state.documentId === docId && state.pageId === pageId && seq === reflowSeq) { // AI 回复点触标记（用上面已加载的 marks + 现取 ai_turns join 判类型；restored 已就位故 box 取得到手写包围盒）
     const turns = await getBookAiTurns(docId);
     if (state.documentId === docId && state.pageId === pageId && seq === reflowSeq && settings.viewMode === 'reader') { // 第二 await 后补 documentId 守卫·两表都在守卫内赋值（免 stale 覆盖）
@@ -600,6 +778,7 @@ let replyMode = false;
 let popoverEl: HTMLElement | null = null;
 let turnByOverlay = new Map<string, PersistedAiTurn>();   // overlay_id → ai_turn（判类型用·join 而来）
 let markByIdR = new Map<string, PersistedMark>();          // mark_id → mark
+const pendingReplies = new Map<string, { pageId: string; bbox: NormBBox }>(); // anchor:place 的生成中入口（重排态 #stage hidden，需在 reader 自己显示）
 /** 加载 ai_turns + marks 建 join 表（判"被回复内容类型"用·和 M10 同款异步）。 */
 async function refreshReplyMeta(): Promise<boolean> {
   const docId = state.documentId, pageId = state.pageId, seq = reflowSeq;
@@ -655,6 +834,16 @@ function addReplyMark(cls: string, box: CRect, o: ScreenOverlay): void {
   m.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); openPopover(m, o); }); // 阻断 reader 落笔
   el.appendChild(m); // 直接挂 #reader（滚动容器·随内容滚·像 ink 画布）
 }
+function addPendingReplyMark(id: string, bbox: NormBBox): void {
+  const r = nearestObjectRect(bbox)?.rect;
+  const m = document.createElement('div');
+  m.className = 'reader-reply-mark edge-star st-pending';
+  m.dataset.pending = id;
+  const top = (r?.top ?? el.scrollTop) + 1;
+  m.style.cssText = `left:1px;top:${top}px;width:16px;height:16px;`;
+  m.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); });
+  el.appendChild(m);
+}
 /** 重排里画出所有 AI 回复的标记（替代常驻内联低语）。 */
 function renderReplyMarkers(): void {
   if (!replyMode) return;
@@ -675,6 +864,7 @@ function renderReplyMarkers(): void {
       addReplyMark('edge-star', { left: 1, top: (r?.top ?? el.scrollTop) + 1, width: 16, height: 16 }, o);
     }
   }
+  pendingReplies.forEach((p, id) => { if (p.pageId === state.pageId) addPendingReplyMark(id, p.bbox); });
 }
 function closePopover(): void { popoverEl?.remove(); popoverEl = null; }
 /** 点标记 → 弹浮层（☆回复 + 收下/改写/散去）·定位标记下方夹进视口。 */
@@ -762,6 +952,17 @@ function drawSegR(a: RPoint, b: RPoint, tool: Tool): void {
 }
 
 function drawStroke(st: ReaderStroke): void {
+  if (st.points.length === 1 && inkCtx) {
+    const p = st.points[0];
+    const s = styleFor(st.tool, p.pressure);
+    inkCtx.globalCompositeOperation = s.composite;
+    inkCtx.fillStyle = s.stroke;
+    inkCtx.beginPath();
+    inkCtx.arc(p.x, p.y, Math.max(1, s.width / 2), 0, Math.PI * 2);
+    inkCtx.fill();
+    inkCtx.globalCompositeOperation = 'source-over';
+    return;
+  }
   for (let i = 1; i < st.points.length; i++) drawSegR(st.points[i - 1], st.points[i], st.tool);
 }
 
@@ -784,16 +985,39 @@ function hitBlock(pts: { x: number; y: number }[]): { ref: BlockRef; left: numbe
   return null;
 }
 
+// 组装近邻外扩半径（near_bbox 同坐标=按 #reader 列宽归一）：按命中块的 DOM 行高折算，让"连续写一行字"的相邻字
+// 落进同一区域（紧 bbox 不含排版 advance·固定 0.06 太紧会按字切碎）。夹在 [0.06, 0.12]，慢停/远处仍由 annotation-loop 时间窗收紧。
+function cssPx(v: string): number {
+  const n = Number.parseFloat(v);
+  return Number.isFinite(n) ? n : 0;
+}
+function blockLineHeightPx(node: Element): number {
+  const cs = getComputedStyle(node);
+  const lh = cssPx(cs.lineHeight);
+  if (lh > 0) return lh;
+  const fs = cssPx(cs.fontSize);
+  return fs > 0 ? fs * 1.6 : 28;
+}
+function nearPadForBlock(node: Element, widthPx: number): number {
+  const line = blockLineHeightPx(node) / Math.max(widthPx, 1);
+  return Math.min(0.12, Math.max(0.06, line * 1.6));
+}
+
 // geometry.bbox 用该笔的**紧 bbox**（PDF 归一化），与原版页一致——main.ingestStroke 的 nearRegion/unionBb 要按
 // 笔粒度判近邻才能正确组装（旧版传整块 bbox 会让组装退化到整块粒度）。pts 已由 onPenUp 映进命中块的 PDF 坐标。
-function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[]): AnnotationEvent {
+function makeEvent(kind: EventType, pts: StrokePoint[], anchorRuns: string[], nearBbox?: NormBBox, reflowInkPoints?: StrokePoint[], nearPad?: number): AnnotationEvent {
   return {
     event_id: shortId('evt'), trace_id: shortId('trc'),
     document_id: state.documentId ?? '', page_id: state.pageId ?? '',
     event_type: kind, geometry: { bbox: bboxOf(pts) }, stroke_points: pts,
     text_note: null, created_at: new Date().toISOString(),
     device_id: DEVICE_ID, session_id: SESSION_ID, pointer_type: 'reader', version: SCHEMA_VERSION,
+    capture_surface: 'reader',
+    coord_space: 'page_norm',
     anchor_runs: anchorRuns,         // 命中块的 source run ids → 随 mark 落库当位置锚（repr 经手保留）
+    ...(nearBbox ? { near_bbox: nearBbox } : {}), // 屏幕空间 bbox → 组装近邻判定用（跨块视觉相邻才判 near·见 annotation-loop nearBoxOf）
+    ...(nearPad ? { near_pad: nearPad } : {}),     // 按行高折算的近邻外扩半径 → 连续写字不被按字切碎（annotation-loop 仅 reader+快写时用）
+    ...(reflowInkPoints?.length ? { reflow_ink_points: reflowInkPoints } : {}), // #reader 内容坐标原始点 → resolveRegion 直接栅格化给识别
   };
 }
 
@@ -841,9 +1065,16 @@ function onPenUp(st: ReaderStroke): void {
   devEmit('reflow', () => ({ at: 'draw', block: ref.id, runs: ref.runIds.slice(0, 5), nr: ref.runIds.length,
     scYc: Math.round(raw.reduce((s, p) => s + p.y, 0) / raw.length), scXc: Math.round(raw.reduce((s, p) => s + p.x, 0) / raw.length),
     blkTop: Math.round(top), styp: scored.type }));
+  // 组装近邻判定用的**屏幕空间 bbox**：raw 是 #reader 内容坐标(含 scrollTop·跨块一致)，按内容列宽归一化(x/y 同尺度)。
+  // 这样重排里跨块/跨行但视觉相邻的连续笔会判 near 攒成一个 mark（不再因按块映射的 PDF 坐标隔很远而碎成单笔）。
+  const rw = el.clientWidth || 1;
+  const rb = bboxOfLocal(raw);
+  const nearBbox: NormBBox = [rb[0] / rw, rb[1] / rw, rb[2] / rw, rb[3] / rw];
+  const nearPad = nearPadForBlock(ref.el, rw); // 按命中块行高折算的近邻外扩 → 连续写字攒一团（见 makeEvent/annotation-loop）
+  const reflowInkPoints = raw.map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure }));
   // 当正常 page-ledger mark：发 bus 给 main 走 ingestStroke（组装 + 跨视图 + 持久 + 同享 session/idle）
   // ref.runIds = 命中块的 source run ids → 随事件落库当**位置真相锚**（重投影认它定段、不靠坐标猜，治"刚画完就乱飘"）
-  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds), stroke });
+  bus.emit('reader:gesture', { event: makeEvent(scored.type, pts, ref.runIds, nearBbox, reflowInkPoints, nearPad), stroke });
 }
 
 /** 落笔意图（仅重排面）：tool 决定——hand=滚动浏览、pen/highlighter=落笔(笔与手指都画)。
@@ -998,7 +1229,7 @@ export function readerFlip(dir: number): 'moved' | 'boundary' {
   const next = vIndex + (dir >= 0 ? 1 : -1);
   if (next < 0 || next >= vCount()) return 'boundary';
   landAtEnd = false; // 用户手动翻 → 撤销任何待落"末屏"（防占位/流式期间被 landAtEnd 抢位）
-  vIndex = next; applyV(); return 'moved';
+  vIndex = next; applyV(); signalPageReady(); return 'moved'; // 翻页只改 scrollTop·MO 抓不到→电纸屏显式整屏刷（同 virtual-pager）
 }
 /** 翻回上一 PDF 页前置：下次重排落地后停在其最后一张虚拟页。 */
 export function readerArmBackward(): void { landAtEnd = true; }
@@ -1017,9 +1248,14 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
   el.appendChild(inkCv);
   inkCtx = inkCv.getContext('2d');
 
+  // M103 笔指分流：手指 → 导航（横划翻页），绝不落墨；只有 pen（或桌面鼠标按工具）才画。
+  let rnav: { pointerId: number; x0: number; y0: number } | null = null;
+  const READER_SWIPE_MIN_PX = 60;
+
   el.addEventListener('pointerdown', (e) => {
     if (settings.viewMode !== 'reader' || !state.pageId) return;
-    if (state.tool === 'hand') return;                    // 让出给 #reader 原生滚动
+    if (e.pointerType === 'touch') { rnav = { pointerId: e.pointerId, x0: e.clientX, y0: e.clientY }; return; } // 手指=导航·不落墨
+    if (state.tool === 'hand') return;                    // 让出给 #reader 原生滚动（桌面鼠标 hand 工具）
     if (reflowSettling) return;                           // 重排未稳：让出原生滚动、不落笔/不擦（内容与画布尺寸不稳）
     e.preventDefault();
     if (state.tool === 'eraser') { eraseAt(e); return; }  // 橡皮：擦命中的笔/整 mark，不落 live、不滚
@@ -1051,8 +1287,15 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
     inkStrokes.push(st);
     onPenUp(st);
   };
-  el.addEventListener('pointerup', finish);
-  el.addEventListener('pointercancel', () => { live = null; resizeInk(); }); // 清掉已增量画上的 live 线段，否则留视觉幽灵墨
+  el.addEventListener('pointerup', (e) => {
+    if (rnav && e.pointerId === rnav.pointerId) {  // 手指抬：横划够长且以横向为主 → 翻页（走 nav:flip→pageNav，到边界自动切真实 PDF 页）
+      const dx = e.clientX - rnav.x0, dy = e.clientY - rnav.y0; rnav = null;
+      if (Math.abs(dx) > READER_SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy)) bus.emit('nav:flip', dx < 0 ? 1 : -1);
+      return;
+    }
+    finish(e);
+  });
+  el.addEventListener('pointercancel', () => { live = null; rnav = null; resizeInk(); }); // 清掉已增量画上的 live 线段，否则留视觉幽灵墨
 
   bus.on('view:changed', rebuild);
   // 切到重排（含开书直接进重排态）：#reader 此刻才从 hidden 露出 → 重置 ink 画布尺寸（隐藏时 clientWidth=0 被缓存成 0×0）
@@ -1069,6 +1312,19 @@ export function initReader(readerEl: HTMLElement, opts?: { notePlacement?: 'marg
   bus.on('overlay:remove', (id) => { if (replyMode) { if (settings.viewMode === 'reader') renderReplyMarkers(); } else { el.querySelector(`.reader-note[data-for="${id as string}"]`)?.remove(); scheduleSyncRestoredMarks(); } });
   bus.on('overlay:state', (o) => { const ov = o as ScreenOverlay; if (settings.viewMode !== 'reader' || ov.page_id !== state.pageId) return; if (replyMode) refreshReplyMarkers(); else { renderNote(ov); scheduleSyncRestoredMarks(); } });
   bus.on('aiturn:appended', () => refreshReplyMarkers()); // 回复落账(overlay:add 早于它)→重 join 刷新·修首帧粗分错标记一直留着
+  bus.on('anchor:place', (c) => {
+    const a = c as { id: string; pageId: string; bbox?: NormBBox; text?: string };
+    if (!replyMode || settings.viewMode !== 'reader' || a.pageId !== state.pageId || !a.text?.trim()) return;
+    pendingReplies.set(a.id, { pageId: a.pageId, bbox: a.bbox ?? [0, 0, 0, 0] });
+    el.querySelectorAll(`.reader-reply-mark[data-pending="${CSS.escape(a.id)}"]`).forEach((n) => n.remove());
+    addPendingReplyMark(a.id, a.bbox ?? [0, 0, 0, 0]);
+  });
+  bus.on('anchor:clear', (id) => {
+    if (!replyMode) return;
+    const key = id as string | undefined;
+    if (key) { pendingReplies.delete(key); el.querySelectorAll(`.reader-reply-mark[data-pending="${CSS.escape(key)}"]`).forEach((n) => n.remove()); }
+    else { pendingReplies.clear(); el.querySelectorAll('.reader-reply-mark[data-pending]').forEach((n) => n.remove()); }
+  });
 
   // 重排里落的笔收口成 mark 后 → 重投影（把那条仍是内容px的 live inkStroke 升级成锚到块的 restored·不然旁注插入致内容移位它不跟随）。scheduleSyncRestoredMarks 内部已 gate 移动版+重排态。
   bus.on('mark:resolved', () => scheduleSyncRestoredMarks());

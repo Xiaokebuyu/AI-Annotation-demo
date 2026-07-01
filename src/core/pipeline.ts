@@ -28,6 +28,7 @@ import { classifyContext, LOCAL_RULES } from '../chat/classify-client';
 import { getPageOcrText } from '../evidence/page-ocr';
 import { postJson, postBeacon } from './api';
 import { promptVersion } from './prompt-versions';
+import { captureReaderMark } from '../surface/reader';
 
 /** 伴读 persona 已搬到服务端 server/prompts.ts（按 role 索引、与模型解耦）；/api/chat 收 role='annotator'。
  *  下面这个标签随账本存 system_prompt_hash，标识本轮提示词版本。版本号取自前后端单源 prompt-versions，
@@ -60,6 +61,8 @@ export function makeEvent(stroke: Stroke, traceId: string): AnnotationEvent | nu
     session_id: SESSION_ID,
     pointer_type: 'unknown',
     version: SCHEMA_VERSION,
+    capture_surface: 'page',
+    coord_space: 'page_norm',
   };
 }
 
@@ -80,13 +83,13 @@ export function recordEvent(stroke: Stroke, traceId: string, pointerType: string
  *  · step⑥ self_content：空白手写 → 白底笔迹图 → /api/interpret（Kimi 读手写）。
  * 失败一律静默，不连累主推理闭环。
  */
-async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[], pl?: PipelineStage[]): Promise<void> {
+async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[], pl?: PipelineStage[], ocrCrop?: string): Promise<void> {
   // step⑤：命中图区或无文字的内容对象（如 embedded_image），结构里拿不到字 → 局部 OCR 兜底。
   // （freeform 的"手写 vs 画 + 转写"已在 captureMark 由识别裁判，不在此处理。）
   const needsOcr = hmp.mode !== 'self_content'
     && targets.some((o) => o.type === 'image' || (o.type !== 'blank_region' && !o.text));
   if (!needsOcr || hmp.text_hint) return;
-  const crop = grabRegion(evt.geometry.bbox, 0.04);
+  const crop = ocrCrop ?? grabRegion(evt.geometry.bbox, 0.04);
   if (!crop) return;
   hmp.crop_ref = crop;
   try {
@@ -122,9 +125,10 @@ async function enrichHmp(hmp: HMP, evt: AnnotationEvent, targets: SurfaceObject[
  * 把 target_object_refs 解析成原文——开发者侧不进浏览器也能逐字段核对采集准确性。
  * 传输/容错/DEV 闸统一在 devEmit；payload 在 thunk 内塑形（生产零开销）。
  */
-function mirrorHmp(hmp: HMP): void {
+function mirrorHmp(hmp: HMP, index?: SurfaceIndex): void {
   devEmit('hmp', () => {
-    const objs = state.surfaceIndex?.objects ?? [];
+    const surfaceIndex = index ?? state.surfaceIndex;
+    const objs = surfaceIndex?.objects ?? [];
     const targets = hmp.target_object_refs.map((id) => {
       const o = objs.find((x) => x.id === id);
       return o ? { id: o.id, type: o.type, role: o.role ?? null, text: o.text ?? null } : { id, missing: true };
@@ -132,7 +136,9 @@ function mirrorHmp(hmp: HMP): void {
     return {
       hmp_id: hmp.hmp_id,
       surface_id: hmp.surface_id,
-      surface_type: state.surfaceIndex?.surface_type ?? null,
+      surface_type: surfaceIndex?.surface_type ?? null,
+      capture_surface: hmp.capture_surface ?? 'page',
+      coord_space: hmp.coord_space ?? 'page_norm',
       mode: hmp.mode,
       action: hmp.action,
       object_hint: hmp.object_hint,
@@ -156,7 +162,7 @@ function mirrorHmp(hmp: HMP): void {
 function mirrorRecognize(o: {
   event_id: string; page_id: string; region: NormBBox;
   feature_in: string; feature_out: string; ocrWorthy: boolean; hasInk: boolean;
-  interpretCalled: boolean; gate: string;
+  interpretCalled: boolean; gate: string; inkSource?: string;
   feat?: StrokeFeature;
   kind?: string; reading?: string; description?: string; source?: string;
 }): void {
@@ -168,7 +174,7 @@ function mirrorRecognize(o: {
     return {
       event_id: o.event_id, page_id: o.page_id, region: o.region.map((n) => +n.toFixed(4)),
       feature_in: o.feature_in, feature_out: o.feature_out, ocrWorthy: o.ocrWorthy, hasInk: o.hasInk,
-      interpretCalled: o.interpretCalled, gate: o.gate,
+      interpretCalled: o.interpretCalled, gate: o.gate, ink_source: o.inkSource ?? 'page_layer',
       ...(r ? { feat: {
         tpl_type: r.templateType, tpl_score: +r.templateScore.toFixed(3),
         tpl_span: +r.tplSpan.toFixed(4), span_ratio: +(r.tplSpan / markLong).toFixed(3),
@@ -230,7 +236,7 @@ export const LOCAL_HWR = '__local_hwr__';
  *       （dev=mac OpenVINO 跑徐方案模型；图像式行识别，只出 reading、kind 当 handwriting）。
  * 否则降级云端 /api/interpret（source=cloud）；判 kind / 画描述本就留云 VLM。两路均失败默认 none。
  */
-async function recognizeInk(
+export async function recognizeInk(
   inkData: string, strokes?: unknown,
 ): Promise<{ kind: string; reading: string; description: string; source: 'local_board' | 'cloud' }> {
   const local = await ondeviceRecognizeInk(inkData, strokes);
@@ -298,6 +304,47 @@ function markupLooksLikeDrawing(feature: StrokeFeature, event: AnnotationEvent, 
   return !enclosesContent;
 }
 
+interface CaptureContext {
+  index: SurfaceIndex;
+  event: AnnotationEvent;
+  layers: { ink?: string; composite?: string };
+  inkSource: 'page_layer' | 'reader';
+  ocrCrop?: string;
+  targetPad?: number;
+  recognizePoints: unknown;
+}
+
+function captureContextFor(event: AnnotationEvent): CaptureContext | null {
+  if (event.capture_surface === 'reader') {
+    const reader = captureReaderMark(event);
+    if (reader) {
+      return {
+        index: reader.index,
+        event: reader.event,
+        layers: {
+          ...reader.layers,
+          ink: event.reflow_ink_ref ?? reader.layers.ink,
+        },
+        inkSource: 'reader',
+        ocrCrop: reader.layers.composite,
+        targetPad: reader.targetPad,
+        recognizePoints: event.reflow_ink_points ?? event.stroke_points,
+      };
+    }
+  }
+  const index = state.surfaceIndex;
+  if (!index || event.page_id !== index.surface_id) return null;
+  const rawLayers = grabLayers(event.geometry.bbox, 0.04);
+  return {
+    index,
+    event,
+    layers: { ...rawLayers, ink: event.reflow_ink_ref ?? rawLayers.ink },
+    inkSource: event.reflow_ink_ref ? 'reader' : 'page_layer',
+    ocrCrop: rawLayers.composite,
+    recognizePoints: event.stroke_points,
+  };
+}
+
 /**
  * 落笔当时（该页仍是当前页）就建好这个 mark 的 HMP + 定型 + 解析所标文字。
  * 跨页 session 提交时画布已是别页、无法重取，故必须在此刻捕获并随 mark 存下。
@@ -308,15 +355,16 @@ function markupLooksLikeDrawing(feature: StrokeFeature, event: AnnotationEvent, 
 export async function captureMark(
   event: AnnotationEvent, feature: StrokeFeature, score: number,
 ): Promise<{ hmp: HMP | null; markedText: string; feature: StrokeFeature; kind?: string; kindSource?: string; trace?: PipelineStage[] }> {
-  const index = state.surfaceIndex;
-  if (!index || event.page_id !== index.surface_id) return { hmp: null, markedText: '', feature };
-  const targets = resolveTarget([event], event.geometry.bbox, index);
-  const layers = grabLayers(event.geometry.bbox, 0.04);
+  const ctx = captureContextFor(event);
+  if (!ctx) return { hmp: null, markedText: '', feature };
+  const { index, layers, inkSource } = ctx;
+  const captureEvent = ctx.event;
+  const targets = resolveTarget([captureEvent], captureEvent.geometry.bbox, index, ctx.targetPad);
   const pl: PipelineStage[] = []; // 这笔经手的组件阶段（识别/OCR兜底/取证），提交时拼进整轮流水线
 
   // 识别定型：freeform 过几何门(ocrWorthy) → 送识别判 handwriting/drawing；markup 默认几何定型不送识别。
   // 但"跳出来"复判会推翻明显是涂鸦的圈（没真圈住内容+含多笔 → 疑表情）→ 也走识别（见 markupLooksLikeDrawing）。
-  const freeformOverride = feature.type === 'markup' && markupLooksLikeDrawing(feature, event, index);
+  const freeformOverride = feature.type === 'markup' && markupLooksLikeDrawing(feature, captureEvent, index);
   let resolved = feature;
   let textHint: string | undefined;
   let recog: { kind: string; reading: string; description: string; source: 'local_board' | 'cloud' } | null = null; // 识别结果（仅调用时）
@@ -324,7 +372,7 @@ export async function captureMark(
   if (feature.type === 'markup' && !freeformOverride) {
     recogGate = 'markup（几何已定型）·不送识别';
   } else if (layers.ink && (feature.raw.ocrWorthy || freeformOverride)) {
-    recog = await recognizeInk(layers.ink, event.stroke_points);
+    recog = await recognizeInk(layers.ink, ctx.recognizePoints);
     const isText = recog.kind === 'handwriting' || recog.kind === 'mixed';
     const hasDrawing = recog.kind === 'sketch' || recog.kind === 'mixed'; // 含可视化的画（mixed=图+字，仍含画）
     resolved = { ...feature, type: isText ? 'handwriting' : 'drawing', confidence: recog.kind === 'none' ? 0.3 : 0.85, hasDrawing };
@@ -336,7 +384,7 @@ export async function captureMark(
     if (DEV) pl.push({
       stage: 'recognize', label: '识别分类器 · ' + (recog.source === 'local_board' ? '端侧 OCR (local_board)' : '/api/interpret'), status: 'ran',
       note: (freeformOverride ? '⤷ markup 圈复判：没圈住内容+含多笔→疑涂鸦/表情，推翻几何 markup。' : '自由笔且过几何门(ocrWorthy)。') + '判「手写 vs 画」、转写文字、给画一句粗描述（context-free，不揣测意图）',
-      input: [{ k: '识别源', v: recog.source }, { k: '模型', v: recog.source === 'cloud' ? (settings.interpretModel || settings.inferModel) : '端侧模型' }, { k: '输入', v: '白底笔迹图 ink' + (recog.source === 'local_board' ? ' + 笔迹点序' : '') }],
+      input: [{ k: '识别源', v: recog.source }, { k: '模型', v: recog.source === 'cloud' ? (settings.interpretModel || settings.inferModel) : '端侧模型' }, { k: '输入', v: `${inkSource === 'reader' ? '重排画布' : '页面墨水层'}白底笔迹图 ink` + (recog.source === 'local_board' ? ' + 笔迹点序' : '') }],
       output: [
         { k: '判定 kind', v: recog.kind },
         { k: '转写 reading', v: recog.reading || '（无）' },
@@ -355,32 +403,34 @@ export async function captureMark(
   }
   // dev：每笔都发识别裁判（含 markup 跳过的、含被复判推翻的——哭脸式漏判靠这条一眼看穿）
   mirrorRecognize({
-    event_id: event.event_id, page_id: event.page_id, region: event.geometry.bbox,
+    event_id: event.event_id, page_id: event.page_id, region: captureEvent.geometry.bbox,
     feature_in: feature.type, feature_out: resolved.type, ocrWorthy: !!feature.raw.ocrWorthy, hasInk: !!layers.ink,
-    interpretCalled: !!recog, gate: recogGate, feat: feature, kind: recog?.kind, reading: recog?.reading, description: recog?.description, source: recog?.source,
+    interpretCalled: !!recog, gate: recogGate, inkSource, feat: feature, kind: recog?.kind, reading: recog?.reading, description: recog?.description, source: recog?.source,
   });
   const action = markActionOf(resolved.type, event.event_type, score);
   // markup 锚它所标的内容；freeform（手写/画）属 self_content——它本身就是内容，不锚到 bbox 碰巧蹭到的正文
   // （手写跟正文的位置关系靠叙事里同时出现的圈/划来带，避免"误锚正文→模型幻觉"）。
   const hmpTargets = resolved.type === 'markup' ? targets : [];
   const hmp = buildHmp({
-    surfaceId: index.surface_id, action, targetBbox: event.geometry.bbox,
+    surfaceId: index.surface_id, action, targetBbox: captureEvent.geometry.bbox,
     targetObjects: hmpTargets, cropRef: layers.composite,
     vectorRef: resolved.type !== 'markup' ? layers.ink : undefined,
     textHint,
+    captureSurface: captureEvent.capture_surface,
+    coordSpace: captureEvent.coord_space,
   });
   state.lastHmps.unshift(hmp);
   if (state.lastHmps.length > 10) state.lastHmps.length = 10;
   trace('HMP', hmp as unknown as Record<string, unknown>);
   bus.emit('hmp:updated', hmp);
-  await enrichHmp(hmp, event, targets, pl); // 仅图区 OCR 兜底（freeform 转写已在上面完成）
-  mirrorHmp(hmp);
+  await enrichHmp(hmp, captureEvent, targets, pl, ctx.ocrCrop); // 仅图区 OCR 兜底（freeform 转写已在上面完成）
+  mirrorHmp(hmp, index);
   const markedText = resolveMarkedText(hmp, index);
   if (DEV) pl.push({
     stage: 'hmp', label: 'HMP 取证（落笔当时）', status: 'ran',
     note: `mode=${hmp.mode} · action=${hmp.action} · 命中类型=${hmp.object_hint}`,
     input: [
-      { k: '标注框 bbox', v: event.geometry.bbox.map((n) => +n.toFixed(3)).join(', ') },
+      { k: '标注框 bbox', v: captureEvent.geometry.bbox.map((n) => +n.toFixed(3)).join(', ') },
       { k: '命中对象', v: targets.map((o) => `${o.type}「${(o.text || '').slice(0, 12)}」`).join(' / ') || '（无）' },
     ],
     output: [
@@ -433,6 +483,7 @@ async function slidingContext(maxChars = 3000): Promise<string> {
 export type CommitOutcome = 'committed' | 'folded' | 'failed';
 export async function commitSessionDiscussion(
   session: Session, reason: 'idle' | 'handwriting', triggerMark: Mark | undefined, discId: string,
+  alwaysRespond = false, // AI 笔触：显式找 AI → 跳过 respond/fold 分类器、必回应（上下文装配照常·在分类闸之前完成）
 ): Promise<CommitOutcome> {
   // B1 守卫：回答/旁注/水位线都只写「发起本次综合的归属实例」，回答期间切走也不灌进切换后的文档。
   const ownerCtx = getActiveContext();
@@ -449,8 +500,9 @@ export async function commitSessionDiscussion(
   // crop 仅兜底：锚点 mark 没解析出文字、但有图可看（图区 OCR 没读出 / 空白手写）才带图（dev 显示用）
   let crop: { role: 'ink' | 'composite'; data: string } | undefined;
   const ah = anchorMark.hmp;
-  if (settings.sendMarkImage || (!anchorMark.markedText.trim() && ah && (ah.object_hint === 'image_region' || ah.mode === 'self_content'))) {
+  if (settings.sendMarkImage || (!anchorMark.markedText.trim() && ah && (ah.vector_ref || ah.object_hint === 'image_region' || ah.mode === 'self_content'))) {
     if (ah?.mode === 'self_content' && ah.vector_ref) crop = { role: 'ink', data: ah.vector_ref };
+    else if (ah?.vector_ref) crop = { role: 'ink', data: ah.vector_ref };
     else if (ah?.crop_ref) crop = { role: 'composite', data: ah.crop_ref };
   }
   // 原图送达：上面没选出图、但本段里有"画"（self_content 带笔迹图）→ 选最近一张画的原图送进推理模型。
@@ -512,12 +564,19 @@ export async function commitSessionDiscussion(
   mirrorView(view, reason, discId); // dev 通道：喂模型前的精简载荷可离线核对
 
   const bookId = session.bookId;
+  const pageId = view.page_id || anchorMark.event.page_id;
+  const anchorRefs = view.anchor_refs;
+  // 「思考中…」占位锚：dev 可选（settings.thinkingTag·默认关）。默认不挂——避免 fold 笔记被 place→clear 闪一下、
+  // 电纸屏多刷一发；想要"抬笔即反馈"的在 dev 开。真答案流式 onDelta 的 anchor:place（下面）不受此开关影响。
+  if (alive() && settings.thinkingTag) {
+    bus.emit('anchor:place', { id: discId, pageId, anchorRefs, bbox: view.anchor_bbox, text: '思考中...', kind: 'note' });
+  }
   // handwriting 路：上下文分类器判 respond/fold（带同源 inference-view + 对话历史）。
   // fold = 写给自己的笔记 → 静默、不落 overlay、mark 留 session（计入下次综合）。
   let classifyDiag: { respond: boolean; reason: string } | null = null; // 存进账本 diag，供会话页"分类展示"
   let classifyConvoLen = 0; // 分类器看到的对话历史条数（流水线展示用）
   let classifyMs = 0;
-  if (reason === 'handwriting') {
+  if (reason === 'handwriting' && !alwaysRespond) { // alwaysRespond=AI 笔触 → 跳过分类器、直奔回应（上面上下文已装配完）
     classifyConvoLen = bookMessages(bookId).length;
     const tCls0 = performance.now();
     // dev：上下文分类器选「端侧规则」时，respond/fold 直接由徐 IntentClassifier 的 TS 移植驱动（不调云）。
@@ -535,6 +594,7 @@ export async function commitSessionDiscussion(
     mirrorClassify({ respond: decision.respond, reason: decision.reason, question: view.question ?? '', discId });
     if (!useLocalRules) void emitIntentAb(view.question || view.marked || '', decision, discId); // 云端驱动时才做影子对照
     if (!decision.respond) {
+      if (alive()) bus.emit('anchor:clear', discId);
       // fold = 写给自己的笔记 → 静默、不落 reader overlay、marks 留 session（计入下次综合）。
       // 仍把这一轮作为「折叠」条目落账本——否则 AI 会话 dev 页（只读 ai_turns）完全看不到判否的流程。
       // overlay_state='folded'：restore 不恢复其 overlay、不回放进 buffer（见 main.restoreFromLedger）；
@@ -564,8 +624,6 @@ export async function commitSessionDiscussion(
   }
   openBook(bookId);
   const userContent = renderUserTurn(view);
-  const pageId = view.page_id || anchorMark.event.page_id;
-  const anchorRefs = view.anchor_refs;
 
   let result: InferenceResult;
   let thinking = '';
@@ -624,9 +682,10 @@ export async function commitSessionDiscussion(
   ownerCtx.overlays.push(overlay);
   if (alive()) bus.emit('overlay:add', overlay);
 
-  // 处理流水线（DEV）：把这一轮经手的每个组件「收到什么 → 产出什么」按执行顺序串起来，供会话页逐步复盘。
+  // 处理流水线：把这一轮经手的每个组件「收到什么 → 产出什么」按执行顺序串起来，供会话页逐步复盘。
+  // DEV（preview）总记；板上生产构建靠 settings.recordPipeline 运行时旋钮开（否则 dev 页下钻全空）。
   let pipeline: PipelineStage[] | undefined;
-  if (DEV) {
+  if (DEV || settings.recordPipeline) {
     const pl: PipelineStage[] = [];
     // ① 逐 mark 的落笔取证阶段（识别 / OCR 兜底 / HMP）——落笔当时已记，这里拼起并标注是第几笔
     marks.forEach((m, i) => {

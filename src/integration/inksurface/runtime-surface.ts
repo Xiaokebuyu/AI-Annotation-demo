@@ -13,10 +13,19 @@ import { getFoldedMarks } from '../../local/store';
 import { koId } from '../../knowledge/builder';
 import type { PersistedMark, PersistedStroke } from '../../core/store-format';
 import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
+import type { DocumentProjectionBlock as ProjectionBlock } from 'ink-surface-sdk/knowledge-schema';
 import {
-  type ProjectionBlock, type RuntimeSurfaceBlock, type RuntimeAnnotation, type RuntimeVisualStroke,
-  type InkLoopVisualModel, type VisualModelBlock, type VisualModelAnnotation, SURFACE_OBJECT_SCHEMA_VERSION,
-} from './contract';
+  RUNTIME_SURFACE_OBJECT_SCHEMA_VERSION,
+  type RuntimeAnnotation,
+  type RuntimeSurfaceBlock,
+  type RuntimeSurfaceStroke,
+  type RuntimeVisualStroke,
+} from 'ink-surface-sdk/runtime-schema';
+import type {
+  InkLoopAnnotation as VisualModelAnnotation,
+  InkLoopVisualBlock as VisualModelBlock,
+  InkLoopVisualModel,
+} from 'ink-surface-sdk/surface-model';
 import { pageBBoxToBlock, pagePointToBlock } from './coordinates';
 
 const pageIdxOf = (pageId: string): number => { const m = pageId.match(/_(\d+)$/); return m ? Number(m[1]) : -1; };
@@ -64,11 +73,33 @@ function resolveKoBlock(ko: KnowledgeObject, samePage: ProjectionBlock[]): Proje
   return best ?? samePage[0];
 }
 
+const visualToolOf = (tool: PersistedStroke['tool']): 'pen' | 'highlighter' =>
+  tool === 'highlighter' ? 'highlighter' : 'pen';
+
 function strokesToVisual(strokes: PersistedStroke[], color: string, blockBBox: NormBBox): RuntimeVisualStroke[] {
   return strokes
-    .filter((s) => s.tool === 'pen' || s.tool === 'highlighter') // eraser/hand 非可视笔
-    .map((s) => ({ tool: s.tool as 'pen' | 'highlighter', color, points: s.points.map((p) => pagePointToBlock(p, blockBBox)) }))
+    .filter((s) => s.tool === 'pen' || s.tool === 'aipen' || s.tool === 'highlighter') // eraser/hand 非可视笔
+    .map((s) => ({
+      tool: visualToolOf(s.tool),
+      color,
+      coord_space: 'block_norm' as const,
+      capture_surface: s.capture_surface ?? 'page',
+      points: s.points.map((p) => pagePointToBlock(p, blockBBox)),
+    }))
     .filter((s) => s.points.length > 0);
+}
+
+function strokesToSurface(strokes: PersistedStroke[], color: string): RuntimeSurfaceStroke[] {
+  return strokes
+    .filter((s) => (s.tool === 'pen' || s.tool === 'aipen' || s.tool === 'highlighter') && s.surface_points?.length)
+    .map((s) => ({
+      tool: visualToolOf(s.tool),
+      color,
+      capture_surface: s.capture_surface ?? 'page',
+      coord_space: s.surface_coord_space ?? s.coord_space ?? 'page_norm',
+      bbox: s.surface_bbox,
+      points: (s.surface_points ?? []).map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure })),
+    }));
 }
 
 export interface RuntimeResult { surfaceBlocks: RuntimeSurfaceBlock[]; visualModel: InkLoopVisualModel; warnings: string[]; orphanInk: number; unplacedInk: number }
@@ -100,6 +131,7 @@ export async function buildRuntimeAndVisual(
   const marks = (await getFoldedMarks(documentId)).filter((m) => !m.is_tombstone);
   let orphanInk = 0;
   let unplaced = 0;
+  let surfaceOnlyInk = 0;
   for (const mark of marks) {
     const ko = markToKo.get(mark.mark_id);
     const samePage = byPage.get(pageIdxOf(mark.page_id)) ?? [];
@@ -120,7 +152,7 @@ export async function buildRuntimeAndVisual(
     const fallback = resolveMarkBlock(mark, samePage);
     const groups = new Map<string, PersistedStroke[]>();
     for (const s of mark.strokes) {
-      if (s.tool !== 'pen' && s.tool !== 'highlighter') continue;
+      if (s.tool !== 'pen' && s.tool !== 'aipen' && s.tool !== 'highlighter') continue;
       const blk = (s.anchor_runs?.length ? blockByRuns(s.anchor_runs, samePage) : null) ?? fallback;
       if (!blk) continue;
       (groups.get(blk.block_id) ?? groups.set(blk.block_id, []).get(blk.block_id)!).push(s);
@@ -130,15 +162,41 @@ export async function buildRuntimeAndVisual(
       const blk = blockById.get(blockId)!;
       const bb = (blk.source?.anchor_bbox ?? [0, 0, 1, 1]) as NormBBox;
       const vs = strokesToVisual(strokes, mark.color, bb);
+      const surfaceStrokes = strokesToSurface(strokes, mark.color);
       if (!vs.length) continue;
       const visual_bbox = pageBBoxToBlock(mark.bbox, bb);
-      const rt: RuntimeAnnotation = { ...meta, render_mode: 'stroke_only', visual_bbox, visual_strokes: vs, created_at: mark.created_at, updated_at: mark.created_at };
-      const vz: VisualModelAnnotation = { ...meta, render_mode: 'stroke_only', anchor_bbox: visual_bbox, page_index: blk.source?.page_index, visual_bbox, visual_strokes: vs };
+      const captureSurface = mark.capture_surface ?? vs.find((s) => s.capture_surface)?.capture_surface ?? 'page';
+      if (captureSurface !== 'page' && surfaceStrokes.length) surfaceOnlyInk++;
+      const rt: RuntimeAnnotation = {
+        ...meta,
+        render_mode: 'stroke_only',
+        visual_bbox,
+        visual_strokes: vs,
+        capture_surface: captureSurface,
+        surface_coord_space: mark.surface_coord_space ?? surfaceStrokes[0]?.coord_space,
+        surface_bbox: mark.surface_bbox,
+        ...(surfaceStrokes.length ? { surface_strokes: surfaceStrokes } : {}),
+        created_at: mark.created_at,
+        updated_at: mark.created_at,
+      };
+      const vz: VisualModelAnnotation = {
+        ...meta,
+        render_mode: 'stroke_only',
+        anchor_bbox: visual_bbox,
+        page_index: blk.source?.page_index,
+        visual_bbox,
+        visual_strokes: vs,
+        capture_surface: captureSurface,
+        surface_coord_space: mark.surface_coord_space ?? surfaceStrokes[0]?.coord_space,
+        surface_bbox: mark.surface_bbox,
+        ...(surfaceStrokes.length ? { surface_strokes: surfaceStrokes } : {}),
+      };
       push(blockId, rt, vz);
     }
   }
   if (orphanInk) warnings.push(`${orphanInk} 笔无可导出 KO·按 visual-only 笔迹导出（合成 ko_id）`);
   if (unplaced) warnings.push(`${unplaced} 笔未落到任何文档块（页未重排/无重叠·跳过）`);
+  if (surfaceOnlyInk) warnings.push(`${surfaceOnlyInk} 组非原版 surface 笔迹带 surface_strokes 导出；legacy visual_strokes 仍为 canonical page 近似投影`);
 
   // ── AI 笔记/手写注：每个 KO 一条 margin_note（带正文·只一次）；excerpt(高亮)只靠墨迹不另出旁注 ──
   let koNoteOrphan = 0;
@@ -159,7 +217,7 @@ export async function buildRuntimeAndVisual(
   if (koNoteOrphan) warnings.push(`${koNoteOrphan} 条 KO 笔记无锚块（页未重排·旁注略）`);
 
   const surfaceBlocks: RuntimeSurfaceBlock[] = blocks.map((b) => ({
-    schema_version: SURFACE_OBJECT_SCHEMA_VERSION,
+    schema_version: RUNTIME_SURFACE_OBJECT_SCHEMA_VERSION,
     object_id: b.block_id,
     doc_id: documentId,
     text: b.text_md,

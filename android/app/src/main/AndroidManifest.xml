@@ -19,6 +19,11 @@
             android:name="com.inkloop.app.MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout">
+
+            <!-- 显示模式：auto=ONYX/BOOX 直显(WebView 填满+可横屏)、其余设备走 IT8951 PixelCopy 竖框。
+                 可改 direct / it8951 强制指定（见 MainActivity.resolveDisplayMode）。 -->
+            <meta-data android:name="com.inkloop.DISPLAY_MODE" android:value="auto" />
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -81,6 +81,18 @@ describe('buildSegments（分段对轴）', () => {
     expect(allCueIdx(segs)).toHaveLength(14);
   });
 
+  it('会前落笔（相对会议 t0 为负）→ 独立 active 段·startMs/endMs 保留负值（M6）', () => {
+    const segs = buildSegments({ cues, marks: [mark('pre', -600), mark('pre2', -598)] }); // 会前 10 分钟写的两笔
+    const active = segs.filter((s) => s.kind === 'active');
+    expect(active).toHaveLength(1);
+    expect(active[0].startMs).toBeLessThan(0);
+    expect(active[0].marks.map((m) => m.mark_id)).toEqual(['pre', 'pre2']);
+    // 会前段前没有转写可裹（cue 全在 t0 之后）→ 段内 cues 应为空
+    expect(active[0].cues).toHaveLength(0);
+    // 全部 cue 仍不丢
+    expect(allCueIdx(segs)).toHaveLength(14);
+  });
+
   it('启发式摘要取段内最长 cue 截断', () => {
     const segs = buildSegments({ cues: [cue(1, 0, 5, '短'), cue(2, 6, 10, '这是一段更长的讨论内容主体')], marks: [mark('m', 3)] });
     expect(segs[0].heuristicSummary).toContain('更长的讨论');
@@ -107,9 +119,9 @@ describe('buildSegmentMarks（relMs 换算）', () => {
     expect(out[0].relMs).toBe(10_000);
   });
 
-  it('负相对时间（笔早于 t0）clamp 到 0', () => {
+  it('负相对时间（笔早于 t0＝会前记录）保留负值·不再 clamp 到 0（M6）', () => {
     const out = buildSegmentMarks([{ mark_id: 'x', abs_timestamp: t0 - 5_000 }], t0, 0);
-    expect(out[0].relMs).toBe(0);
+    expect(out[0].relMs).toBe(-5_000);
   });
 
   it('offset 平移', () => {
