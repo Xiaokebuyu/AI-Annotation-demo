@@ -60,6 +60,7 @@ function nodeOf(mark: Mark, hmp: HMP | null): MarkNode {
     target_object_refs: hmp?.target_object_refs ?? [],
     text_hint: hmp?.text_hint,
     text: mark.markedText, // 落笔当时解析好（跨页提交不再依赖 live index）
+    manner: mark.manner,   // 运笔方式（Slice A）→ phraseFor 据此加副词/重描后缀
   };
 }
 

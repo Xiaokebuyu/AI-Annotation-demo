@@ -1,0 +1,286 @@
+/**
+ * ③ Runtime 表面块 + 标注 + visual_strokes，以及对方 renderer 直接吃的 ④ InkLoopVisualModel。
+ *
+ * 渲染模型（codex review 后定）：
+ *  · 墨迹 = 逐笔按**它自己的 anchor_runs** 落到对应块的 `stroke_only` 标注（多笔跨段不塌缩·恒等），坐标转块内局部。
+ *  · AI 笔记/手写注 = 每个 KO 一条 `margin_note` 标注（带 KO 正文·只出一次·excerpt 高亮除外），落在 KO 锚块上。
+ *  标注的 kind/title/status 一律取**所属 KO**（不是 mark 的 feature_type）——annotation 忠实代表它 ko_id 指向的 KO。
+ *  块解析全程**按 mark/KO 所在页过滤**（run id 跨页会重名·必须先收窄到同页）。
+ *
+ * 扩展点（不在 L1）：会议 context_id / 妙记相对时刻将来挂在 annotation 上；基岩 raw_ref 走另谈的 raw-ink 契约。
+ */
+import { getFoldedMarks, getReaderLayouts } from '../../local/store';
+import { koId, markSourceObjectRefs } from '../../knowledge/builder';
+import type { PersistedMark, PersistedStroke } from '../../core/store-format';
+import type { KnowledgeObject, NormBBox } from '../../knowledge/knowledge-object';
+import type { DocumentProjectionBlock as ProjectionBlock } from 'ink-surface-sdk/knowledge-schema';
+import {
+  RUNTIME_SURFACE_OBJECT_SCHEMA_VERSION,
+  type RuntimeAnnotation,
+  type RuntimeSurfaceBlock,
+  type RuntimeSurfaceStroke,
+  type RuntimeVisualStroke,
+} from 'ink-surface-sdk/runtime-schema';
+import type {
+  InkLoopAnnotation as VisualModelAnnotation,
+  InkLoopReaderLayout,
+  InkLoopVisualBlock as VisualModelBlock,
+  InkLoopVisualModel,
+} from 'ink-surface-sdk/surface-model';
+import { pageBBoxToBlock, pagePointToBlock } from './coordinates';
+
+const pageIdxOf = (pageId: string): number => { const m = pageId.match(/_(\d+)$/); return m ? Number(m[1]) : -1; };
+/** 字符级 ref（`tl_3_12`）削到 run 级（`tl_3`）；已是 run 级（`tl_58`）原样返回——
+ *  否则会被削成裸前缀 `tl`，blockByRuns 双向归一后任何 mark 都"匹配"该页第一个块（真机实锤：摊手。误活跃）。 */
+const runIdOf = (ref: string): string => { const s = ref.replace(/_\d+$/, ''); return s.includes('_') ? s : ref; };
+
+function overlapRatio(a?: readonly number[], b?: readonly number[]): number {
+  if (!a || !b) return 0;
+  const ix = Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0]));
+  const iy = Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1]));
+  const minArea = Math.max(1e-9, Math.min(a[2] * a[3], b[2] * b[3]));
+  return (ix * iy) / minArea;
+}
+
+/** 在**同页**候选块里按 run ids 命中（run 级或字符级归一后）。 */
+function blockByRuns(runs: string[] | undefined, samePage: ProjectionBlock[]): ProjectionBlock | null {
+  if (!runs?.length) return null;
+  const set = new Set(runs);
+  const norm = new Set(runs.map(runIdOf));
+  return samePage.find((b) => (b.source?.object_refs ?? []).some((r) => set.has(r) || norm.has(r) || norm.has(runIdOf(r)))) ?? null;
+}
+/** mark 级块解析（同页）：源 run 恒等锚（reflow_anchor_runs∪各笔 anchor_runs∪HMP refs）→ bbox 重叠最大。
+ *  reader 笔有恒等锚但没匹配上时**不退几何**——它的 canonical bbox 是近似投影（可越界），兜底只会挂错块。 */
+function resolveMarkBlock(mark: PersistedMark, samePage: ProjectionBlock[]): ProjectionBlock | null {
+  const runs = markSourceObjectRefs(mark);
+  const byRun = blockByRuns(runs, samePage);
+  if (byRun) return byRun;
+  if (runs.length && ((mark.capture_surface ?? 'page') === 'reader' || mark.surface_coord_space === 'reader_px')) return null;
+  let best: ProjectionBlock | null = null;
+  let bestOv = 0.02;
+  for (const b of samePage) {
+    const ov = overlapRatio(mark.bbox, b.source?.anchor_bbox);
+    if (ov > bestOv) { bestOv = ov; best = b; }
+  }
+  return best;
+}
+/** KO 锚块（同页）：provenance marks 的源 run 恒等锚 → KO 自身 object_refs → anchor_bbox 重叠。
+ *  定不了就返回 null（调用方计 orphan）——不再默认挂该页首块（静默错位比诚实缺席更糟）。 */
+function resolveKoBlock(ko: KnowledgeObject, samePage: ProjectionBlock[], markById: ReadonlyMap<string, PersistedMark>): ProjectionBlock | null {
+  if (!samePage.length) return null;
+  const markRuns = [...new Set((ko.provenance.mark_ids ?? [])
+    .map((id) => markById.get(id))
+    .filter((m): m is PersistedMark => !!m && m.page_index === (ko.source.page_index ?? -1))
+    .flatMap(markSourceObjectRefs))];
+  const byMarkRun = blockByRuns(markRuns, samePage);
+  if (byMarkRun) return byMarkRun;
+  const byRun = blockByRuns(ko.source.object_refs, samePage);
+  if (byRun) return byRun;
+  if (markRuns.length) return null; // 有恒等锚没匹配上：别让烂 bbox 几何兜底抢段
+  let best: ProjectionBlock | null = null;
+  let bestOv = 0.02;
+  for (const b of samePage) {
+    const ov = overlapRatio(ko.source.anchor_bbox, b.source?.anchor_bbox);
+    if (ov > bestOv) { bestOv = ov; best = b; }
+  }
+  return best;
+}
+
+const visualToolOf = (tool: PersistedStroke['tool']): 'pen' | 'highlighter' =>
+  tool === 'highlighter' ? 'highlighter' : 'pen';
+
+function strokesToVisual(strokes: PersistedStroke[], color: string, blockBBox: NormBBox): RuntimeVisualStroke[] {
+  return strokes
+    .filter((s) => s.tool === 'pen' || s.tool === 'aipen' || s.tool === 'highlighter') // eraser/hand 非可视笔
+    .map((s) => ({
+      tool: visualToolOf(s.tool),
+      color,
+      coord_space: 'block_norm' as const,
+      capture_surface: s.capture_surface ?? 'page',
+      points: s.points.map((p) => pagePointToBlock(p, blockBBox)),
+    }))
+    .filter((s) => s.points.length > 0);
+}
+
+const isVisibleStroke = (s: PersistedStroke): boolean =>
+  s.tool === 'pen' || s.tool === 'aipen' || s.tool === 'highlighter';
+
+function bboxOfPoints(points: readonly { x: number; y: number }[]): NormBBox | undefined {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+  }
+  if (!Number.isFinite(minX)) return undefined;
+  return [minX, minY, Math.max(1e-6, maxX - minX), Math.max(1e-6, maxY - minY)];
+}
+
+// surface_strokes 永远输出（整页复现的地基）：有真实 surface_points 就用它（reader 等非原版面），否则退回
+// canonical points/page_norm——否则原版页/老数据的笔到了 SDK 只剩 block_norm 碎片，整页无法复原。
+function strokesToSurface(strokes: PersistedStroke[], color: string): RuntimeSurfaceStroke[] {
+  return strokes
+    .filter(isVisibleStroke)
+    .map((s): RuntimeSurfaceStroke | null => {
+      const hasSurface = (s.surface_points?.length ?? 0) > 0;
+      const points = hasSurface ? s.surface_points! : s.points;
+      if (!points.length) return null;
+      return {
+        tool: visualToolOf(s.tool),
+        color,
+        capture_surface: s.capture_surface ?? 'page',
+        coord_space: hasSurface ? (s.surface_coord_space ?? s.coord_space ?? 'page_norm') : (s.coord_space ?? 'page_norm'),
+        ...(s.reader_layout_id ? { layout_id: s.reader_layout_id } : {}),
+        bbox: hasSurface ? s.surface_bbox : bboxOfPoints(points),
+        points: points.map((p) => ({ x: p.x, y: p.y, t: p.t, pressure: p.pressure })),
+      };
+    })
+    .filter((s): s is RuntimeSurfaceStroke => !!s);
+}
+
+export interface RuntimeResult { surfaceBlocks: RuntimeSurfaceBlock[]; visualModel: InkLoopVisualModel; warnings: string[]; orphanInk: number; unplacedInk: number }
+
+export async function buildRuntimeAndVisual(
+  documentId: string,
+  documentTitle: string,
+  blocks: ProjectionBlock[],
+  exportableKos: KnowledgeObject[],
+): Promise<RuntimeResult> {
+  const warnings: string[] = [];
+  const blockById = new Map(blocks.map((b) => [b.block_id, b]));
+  const byPage = new Map<number, ProjectionBlock[]>();
+  for (const b of blocks) { const pi = b.source?.page_index ?? -1; (byPage.get(pi) ?? byPage.set(pi, []).get(pi)!).push(b); }
+
+  const markToKo = new Map<string, KnowledgeObject>();
+  for (const ko of exportableKos) for (const mid of ko.provenance.mark_ids ?? []) if (!markToKo.has(mid)) markToKo.set(mid, ko);
+
+  const runtimeByBlock = new Map<string, RuntimeAnnotation[]>();
+  const visualByBlock = new Map<string, VisualModelAnnotation[]>();
+  const push = (blockId: string, rt: RuntimeAnnotation, vz: VisualModelAnnotation): void => {
+    (runtimeByBlock.get(blockId) ?? runtimeByBlock.set(blockId, []).get(blockId)!).push(rt);
+    (visualByBlock.get(blockId) ?? visualByBlock.set(blockId, []).get(blockId)!).push(vz);
+  };
+
+  // ── 墨迹：逐笔按各自块落 stroke_only 标注 ──
+  // KO-backed 笔取所属 KO 的 kind/title/status；无 KO 的可见笔（纯图形/识别失败手写/被 dismiss 的笔）
+  // 也产 stroke_only（合成确定性 ko_id·visual-only），不再静默丢——否则 InkLoop 里看得到、导出后消失。
+  const [allMarks, readerLayoutsByPage] = await Promise.all([getFoldedMarks(documentId), getReaderLayouts(documentId)]);
+  const readerLayoutById = new Map<string, InkLoopReaderLayout>();
+  for (const snapshots of Object.values(readerLayoutsByPage)) {
+    for (const layout of snapshots) readerLayoutById.set(layout.layout_id, { width: layout.width, height: layout.height, text_runs: layout.text_runs });
+  }
+  const usedReaderLayoutIds = new Set<string>();
+  const marks = allMarks.filter((m) => !m.is_tombstone);
+  const markById = new Map(marks.map((m) => [m.mark_id, m] as const));
+  let orphanInk = 0;
+  let unplaced = 0;
+  let surfaceOnlyInk = 0;
+  for (const mark of marks) {
+    const ko = markToKo.get(mark.mark_id);
+    const samePage = byPage.get(pageIdxOf(mark.page_id)) ?? [];
+    if (!samePage.length) { unplaced++; continue; }
+    // 标注元信息：有 KO 用 KO 的；无 KO 合成 visual-only
+    let meta: { ko_id: string; kind: string; title: string; status: string };
+    if (ko) {
+      meta = { ko_id: ko.ko_id, kind: ko.kind, title: ko.title, status: ko.status };
+    } else {
+      orphanInk++;
+      meta = {
+        ko_id: await koId(`visual-only|${mark.mark_id}`),
+        kind: mark.feature_type || 'stroke',
+        title: (mark.marked_text || '').trim().slice(0, 40) || '（手写/图形）',
+        status: 'export_ready',
+      };
+    }
+    const fallback = resolveMarkBlock(mark, samePage);
+    const groups = new Map<string, PersistedStroke[]>();
+    for (const s of mark.strokes) {
+      if (s.tool !== 'pen' && s.tool !== 'aipen' && s.tool !== 'highlighter') continue;
+      const blk = (s.anchor_runs?.length ? blockByRuns(s.anchor_runs, samePage) : null) ?? fallback;
+      if (!blk) continue;
+      (groups.get(blk.block_id) ?? groups.set(blk.block_id, []).get(blk.block_id)!).push(s);
+    }
+    if (!groups.size) { unplaced++; continue; }
+    for (const [blockId, strokes] of groups) {
+      const blk = blockById.get(blockId)!;
+      const bb = (blk.source?.anchor_bbox ?? [0, 0, 1, 1]) as NormBBox;
+      const vs = strokesToVisual(strokes, mark.color, bb);
+      const surfaceStrokes = strokesToSurface(strokes, mark.color);
+      for (const ss of surfaceStrokes) if (ss.layout_id) usedReaderLayoutIds.add(ss.layout_id);
+      if (!vs.length) continue;
+      const visual_bbox = pageBBoxToBlock(mark.bbox, bb);
+      const captureSurface = mark.capture_surface ?? vs.find((s) => s.capture_surface)?.capture_surface ?? 'page';
+      if (captureSurface !== 'page' && surfaceStrokes.length) surfaceOnlyInk++;
+      const rt: RuntimeAnnotation = {
+        ...meta,
+        render_mode: 'stroke_only',
+        visual_bbox,
+        visual_strokes: vs,
+        capture_surface: captureSurface,
+        surface_coord_space: mark.surface_coord_space ?? surfaceStrokes[0]?.coord_space,
+        surface_bbox: mark.surface_bbox,
+        ...(surfaceStrokes.length ? { surface_strokes: surfaceStrokes } : {}),
+        created_at: mark.created_at,
+        updated_at: mark.created_at,
+      };
+      const vz: VisualModelAnnotation = {
+        ...meta,
+        render_mode: 'stroke_only',
+        anchor_bbox: visual_bbox,
+        page_index: blk.source?.page_index,
+        visual_bbox,
+        visual_strokes: vs,
+        capture_surface: captureSurface,
+        surface_coord_space: mark.surface_coord_space ?? surfaceStrokes[0]?.coord_space,
+        surface_bbox: mark.surface_bbox,
+        ...(surfaceStrokes.length ? { surface_strokes: surfaceStrokes } : {}),
+      };
+      push(blockId, rt, vz);
+    }
+  }
+  if (orphanInk) warnings.push(`${orphanInk} 笔无可导出 KO·按 visual-only 笔迹导出（合成 ko_id）`);
+  if (unplaced) warnings.push(`${unplaced} 笔未落到任何文档块（页未重排/无重叠·跳过）`);
+  if (surfaceOnlyInk) warnings.push(`${surfaceOnlyInk} 组非原版 surface 笔迹带 surface_strokes 导出；legacy visual_strokes 仍为 canonical page 近似投影`);
+
+  // ── AI 笔记/手写注：每个 KO 一条 margin_note（带正文·只一次）；excerpt(高亮)只靠墨迹不另出旁注 ──
+  let koNoteOrphan = 0;
+  for (const ko of exportableKos) {
+    if (ko.kind === 'excerpt' || ko.kind === 'source_document') continue;
+    const body = ko.body_md.trim();
+    if (!body) continue;
+    const pi = ko.source.page_index;
+    if (pi == null) { koNoteOrphan++; continue; }
+    const blk = resolveKoBlock(ko, byPage.get(pi) ?? [], markById);
+    if (!blk) { koNoteOrphan++; continue; }
+    const bb = (blk.source?.anchor_bbox ?? [0, 0, 1, 1]) as NormBBox;
+    const anchor = ko.source.anchor_bbox ? pageBBoxToBlock(ko.source.anchor_bbox, bb) : undefined;
+    const rt: RuntimeAnnotation = { ko_id: ko.ko_id, kind: ko.kind, title: ko.title, body_md: body, status: ko.status, render_mode: 'margin_note', visual_bbox: anchor, created_at: ko.created_at, updated_at: ko.updated_at };
+    const vz: VisualModelAnnotation = { ko_id: ko.ko_id, kind: ko.kind, title: ko.title, body_md: body, status: ko.status, render_mode: 'margin_note', anchor_bbox: anchor, page_index: blk.source?.page_index, visual_bbox: anchor };
+    push(blk.block_id, rt, vz);
+  }
+  if (koNoteOrphan) warnings.push(`${koNoteOrphan} 条 KO 笔记无锚块（页未重排·旁注略）`);
+
+  const surfaceBlocks: RuntimeSurfaceBlock[] = blocks.map((b) => ({
+    schema_version: RUNTIME_SURFACE_OBJECT_SCHEMA_VERSION,
+    object_id: b.block_id,
+    doc_id: documentId,
+    text: b.text_md,
+    source_anchor: { object_refs: b.source?.object_refs ?? [] },
+    projection: { block_id: b.block_id, kind: b.kind, region: b.region, page_index: b.source?.page_index, page_id: b.source?.page_id, knowledge_object_ids: b.knowledge_object_ids },
+    annotations: runtimeByBlock.get(b.block_id) ?? [],
+  }));
+
+  const visualBlocks: VisualModelBlock[] = blocks.map((b) => ({
+    id: b.block_id,
+    kind: b.kind,
+    region: b.region,
+    page: b.source?.page_index != null ? String(b.source.page_index) : undefined, // 对方 renderer 把 page 当页号（Number(page)）；给页索引字符串，别给 page_id（否则 Page NaN）
+    content: b.text_md,
+    annotations: visualByBlock.get(b.block_id) ?? [],
+  }));
+
+  const readerLayouts: Record<string, InkLoopReaderLayout> = {};
+  for (const id of [...usedReaderLayoutIds].sort()) { const layout = readerLayoutById.get(id); if (layout) readerLayouts[id] = layout; }
+  const visualModel: InkLoopVisualModel = { documentTitle, blocks: visualBlocks, ...(Object.keys(readerLayouts).length ? { reader_layouts: readerLayouts } : {}) };
+  return { surfaceBlocks, visualModel, warnings, orphanInk, unplacedInk: unplaced };
+}

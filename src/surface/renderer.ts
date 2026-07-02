@@ -1,7 +1,10 @@
-import * as pdfjsLib from 'pdfjs-dist';
-import type { PDFPageProxy, PageViewport } from 'pdfjs-dist';
+// legacy build：电纸屏 WebView=Chrome 109，modern worker 用了未 polyfill 的 Promise.withResolvers
+// （主线程被别的依赖 polyfill 了、但 worker 是独立 realm 没有）→ worker 一调即抛 → 79 页 PDF 只解出 2 页 + 整页空白。
+// legacy build 把 core-js 的 Promise.withResolvers 等 polyfill 打进 worker realm，Chrome 109 上可正常解析渲染。
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import type { PDFPageProxy, PageViewport } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api';
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import type { NormBBox, OcrTextBlock } from '../core/contracts';
 import { SCHEMA_VERSION } from '../core/contracts';
 import { sha256Hex, pageIdFor } from '../core/ids';
@@ -14,6 +17,8 @@ import { wrapSurfaceIndex } from '../evidence/target';
 import { ensureScannedPageLayer } from '../evidence/page-ocr';
 import { bus, getActiveContext, settings, state } from '../app/state';
 import { getReflow, openDoc, putReflow, storePdfBlob, loadPdfBlob, lastReadPage, activeDoc, setActiveDoc } from '../local/store';
+import { apiUrl } from '../core/api';
+import { authHeaders } from '../core/auth';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -21,6 +26,52 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 // dev（页面在根）→ /cmaps/；安卓 WebView（页面在 /assets/index.html）→ /assets/cmaps/。绝对 '/cmaps/' 在后者会错。
 const publicAssetUrl = (path: string): string =>
   new URL(`${import.meta.env.BASE_URL || './'}${path}`, window.location.href).toString();
+
+// ── PDF 加载防 hang（P0）：转换服务/网络/pdfjs worker 任一不响应都不让上层永久卡住 ──
+const PDF_FETCH_TIMEOUT_MS = 45_000;   // 下载/导入 PDF 字节（含 convert-service 转换）
+const PDF_DECODE_TIMEOUT_MS = 45_000;  // pdfjs 解码（worker 加载/坏 PDF 可能永不结算）
+const PDF_META_TIMEOUT_MS = 8_000;     // 元信息/目录（非关键，超时即退空）
+/** 给 promise 加超时：到点 reject + 可选清理（abort/destroy）。底层不一定真停，但上层不再卡。 */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string, onTimeout?: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let done = false;
+    const timer = window.setTimeout(() => { if (!done) { done = true; try { onTimeout?.(); } catch { /* noop */ } reject(new Error(`${label}超时`)); } }, ms);
+    p.then(
+      (v) => { if (!done) { done = true; window.clearTimeout(timer); resolve(v); } },
+      (e) => { if (!done) { done = true; window.clearTimeout(timer); reject(e); } },
+    );
+  });
+}
+/** 阶段E：只有走 /api/convert/* 才需要设备 session（票据机制在这条路径上生效）——其它目标（如已经是
+ *  PDF 的 feishu-svc 直链）不带这个头，维持原样。用解析后的绝对 URL 判断，避免相对/绝对写法误判。 */
+function shouldSendConvertAuth(raw: string): boolean {
+  try {
+    const u = new URL(apiUrl(raw), window.location.href);
+    const b = new URL(apiUrl('/api/convert/'), window.location.href);
+    const p = b.pathname.replace(/\/+$/, '');
+    return u.origin === b.origin && (u.pathname === p || u.pathname.startsWith(p + '/'));
+  } catch { return /^\/api\/convert(?:\/|$)/.test(raw); }
+}
+
+/** 带超时 + AbortController 的 PDF 字节下载：转换服务挂起时主动 abort，不泄漏连接。 */
+async function fetchPdfBytes(url: string, label: string): Promise<ArrayBuffer> {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), PDF_FETCH_TIMEOUT_MS);
+  try {
+    // codex 扫描出的真 bug：调用方传相对路径(/api/feishu-svc/... 或 /api/convert/...)时，安卓静态包(WebView appassets 源)
+    // 下裸 fetch 不会走 VITE_API_BASE_URL；apiUrl() 对已是绝对 URL 的入参是空操作，这里包一层不影响其它调用方。
+    // 阶段E：/api/convert/* 现在可能要求设备 session（docx 私有资源走票据）——精准只给这条路径带认证头。
+    const headers = shouldSendConvertAuth(url) ? authHeaders() : undefined;
+    const r = await fetch(apiUrl(url), { signal: ctrl.signal, headers });
+    if (!r.ok) throw new Error(`${label} HTTP ${r.status}`);
+    return await r.arrayBuffer();
+  } catch (e) {
+    if ((e as { name?: string })?.name === 'AbortError') throw new Error(`${label}超时`);
+    throw e;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 
 // pdf（当前 PDFDocumentProxy）已迁入 SurfaceContext（方案 B Stage 1）：读写走 getActiveContext().pdf，
 // 切回主阅读/已开会议资料免重新 fetch/decode。renderTask 是单 DOM 渲染锁，留模块级（单激活不双渲）。
@@ -121,19 +172,20 @@ async function loadIntoState(buf: ArrayBuffer, filename: string, persist: Blob |
   sctx.fileName = filename;
   sctx.surfaceType = 'article';
   // cMapUrl/standardFontDataUrl：救老中文 PDF（非嵌入 CID 字体 + 预定义 CJK CMap），否则中文渲染/取文出空白。资产在 public/。
-  const pdf = await pdfjsLib.getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     data: buf,
     cMapUrl: publicAssetUrl('cmaps/'),
     cMapPacked: true,
     standardFontDataUrl: publicAssetUrl('standard_fonts/'),
-  }).promise;
+  });
+  const pdf = await withTimeout(loadingTask.promise, PDF_DECODE_TIMEOUT_MS, `解析 PDF ${filename}`, () => { void loadingTask.destroy(); });
   if (!fresh()) { try { void pdf.destroy(); } catch { /* noop */ } return; } // 被抢占：销毁这份没人要的 PDF，免泄漏
   sctx.pdf = pdf; // 迁入归属实例（切回免重新 fetch/decode）
   sctx.pageCount = pdf.numPages;
   sctx.strokesByPage.clear();
   // 文档级元信息：Info 字典 + 大纲目录（真书常有，喂重排/AI 排版）。
-  const docMeta = await pdf.getMetadata().then((m) => (m && m.info ? (m.info as Record<string, unknown>) : null)).catch(() => null);
-  const outline = await pdf.getOutline().catch(() => null);
+  const docMeta = await withTimeout(pdf.getMetadata(), PDF_META_TIMEOUT_MS, '读取 PDF 元信息').then((m) => (m && m.info ? (m.info as Record<string, unknown>) : null)).catch(() => null);
+  const outline = await withTimeout(pdf.getOutline(), PDF_META_TIMEOUT_MS, '读取 PDF 目录').catch(() => null);
   if (!fresh()) return;
   sctx.docMeta = docMeta;
   sctx.outline = outline;
@@ -187,11 +239,34 @@ export async function reopenBook(documentId: string, filename: string): Promise<
  */
 export async function openPdfFromUrl(documentId: string, filename: string, pdfUrl: string): Promise<void> {
   if (await reopenBook(documentId, filename)) return; // 之前转过 → 库里有，直接重开（免重转）
-  const r = await fetch(pdfUrl);
-  if (!r.ok) throw new Error('open pdf ' + r.status);
-  const buf = await r.arrayBuffer();
+  const buf = await fetchPdfBytes(pdfUrl, '下载会议资料');
   const blob = new Blob([buf.slice(0)], { type: 'application/pdf' }); // 拷贝：getDocument 可能 detach
   await loadIntoState(buf, filename, blob, documentId);
+}
+
+/**
+ * 后台导入一份 PDF（建 PersistedDoc + 落字节）但**不打开阅读器/不切视图**——群文件自动抓取用。
+ * 资料据此进 listBooks / 会议 material_doc_ids 列表；点开时走 reopenBook 才真渲染。已存库直接 'cached'。
+ * openDoc 会改模块 current（P0-4），故导入后恢复，避免静默串写到当前阅读态。
+ */
+export async function importPdfFromUrl(documentId: string, filename: string, pdfUrl: string): Promise<'cached' | 'imported'> {
+  if (await loadPdfBlob(documentId)) return 'cached'; // 去重：稳定 docId 已导入
+  const buf = await fetchPdfBytes(pdfUrl, '导入资料');
+  const fileHash = await sha256Hex(buf.slice(0));
+  const loadingTask = pdfjsLib.getDocument({
+    data: buf.slice(0),
+    cMapUrl: publicAssetUrl('cmaps/'),
+    cMapPacked: true,
+    standardFontDataUrl: publicAssetUrl('standard_fonts/'),
+  });
+  const pdf = await withTimeout(loadingTask.promise, PDF_DECODE_TIMEOUT_MS, `解析 PDF ${filename}`, () => { void loadingTask.destroy(); });
+  const pageCount = pdf.numPages;
+  try { void pdf.destroy(); } catch { /* noop */ }
+  const prevDoc = activeDoc(); // openDoc 改 current → 导入后还原回原活跃文档
+  await openDoc({ document_id: documentId, file_hash: fileHash, filename, page_count: pageCount });
+  setActiveDoc(prevDoc);
+  await storePdfBlob(documentId, new Blob([buf.slice(0)], { type: 'application/pdf' }));
+  return 'imported';
 }
 
 /**
@@ -205,7 +280,7 @@ export async function openPdfFromUrl(documentId: string, filename: string, pdfUr
  * context（主阅读的书/态）来达到「独立实例」的体验。**方案 B**=把阅读器重构成可实例化的「可标注 surface
  * 组件」（底座层，阅读+每会议各持独立实例）记为后面做，别在阅读上板前动引擎结构。
  */
-export function renderBlankSurface(documentId: string, title = '空白页'): void {
+export function renderBlankSurface(documentId: string, title = '空白页', opts: { ruledLines?: boolean; width?: number; height?: number } = {}): void {
   cancelActiveRender(); // 先取消在途 PDF 渲染：否则旧页像素会继续写进下面要画白纸的同一 pageCv（B3）
   getActiveContext().pdf = null; // 脱离上一份 PDF（防 zoom/翻页误渲旧页）
   getActiveContext().storeDoc = null; setActiveDoc(null); // 白板无持久化文档：store.current 置空，页缓存/阅读位置写操作变 no-op（P0-4）
@@ -220,8 +295,10 @@ export function renderBlankSurface(documentId: string, title = '空白页'): voi
   state.outline = null;
 
   const dpr = window.devicePixelRatio || 1;
-  const { fit: W, gutter: gut } = pageMetrics();
-  const H = Math.round(W * 1.32); // 一张竖向「纸」
+  const pm = pageMetrics();
+  const W = opts.width ?? pm.fit;                 // 移动版日记传可写区实宽（满铺到边）；否则按页面 fit
+  const gut = opts.width != null ? 0 : pm.gutter; // 满铺时无右侧留白
+  const H = opts.height ?? Math.round(W * 1.32); // 移动版传可写区实高（填满）；否则一张竖向「纸」
   for (const cv of [pageCv, inkCv]) {
     cv.width = W * dpr; cv.height = H * dpr;
     cv.style.width = W + 'px'; cv.style.height = H + 'px';
@@ -234,8 +311,10 @@ export function renderBlankSurface(documentId: string, title = '空白页'): voi
   const ctx = pageCv.getContext('2d')!;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1; // 极淡稿纸线（纯装饰，不进 SurfaceIndex）
-  for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+  if (opts.ruledLines !== false) { // 极淡稿纸线（纯装饰，不进 SurfaceIndex）；移动版日记把线格交给可开关的 CSS 叠层、故传 false
+    ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1;
+    for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+  }
 
   const pageId = pageIdFor(documentId, 0); // 全 id 哈希，与 PDF 页一致、免会议白板 id 碰撞（B5）
   state.pageId = pageId;
@@ -246,6 +325,32 @@ export function renderBlankSurface(documentId: string, title = '空白页'): voi
   state.surfaceIndex = blankSurfaceIndex(pageId);
 
   bus.emit('document:loaded'); // → restoreFromLedger() 自动重绘本白板已存的笔
+  bus.emit('page:rendered');
+  bus.emit('surface:indexed', state.surfaceIndex);
+}
+
+/**
+ * 空白文档内翻到某页（日记多页）：换 pageId/surfaceIndex、按现画布尺寸重画白底，**不清其它页内存笔迹**。
+ * 翻页后调用方应调 redrawInk() 把该页笔迹画回 #ink-layer。同步执行、无 await，无账本竞态。
+ */
+export function renderBlankPage(pageIndex: number, opts: { ruledLines?: boolean } = {}): void {
+  if (!state.documentId) return;
+  cancelActiveRender(); // 取消在途 PDF 渲染（防旧像素写进白底）
+  state.pageIndex = pageIndex;
+  const pageId = pageIdFor(state.documentId, pageIndex);
+  state.pageId = pageId;
+  if (state.pageRecord) state.pageRecord = { ...state.pageRecord, page_id: pageId, page_index: pageIndex };
+  state.overlays = [];
+  state.surfaceIndex = blankSurfaceIndex(pageId);
+  const dpr = window.devicePixelRatio || 1;
+  const W = pageCv.width / dpr, H = pageCv.height / dpr; // 复用当前画布尺寸（满铺写区）
+  const ctx = pageCv.getContext('2d')!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  if (opts.ruledLines !== false) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.05)'; ctx.lineWidth = 1;
+    for (let y = 36; y < H; y += 30) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+  }
   bus.emit('page:rendered');
   bus.emit('surface:indexed', state.surfaceIndex);
 }
@@ -324,7 +429,9 @@ export async function preprocess(reflowCap: number): Promise<void> {
  * 铺满可用宽、无 gutter、下限降到 300，让正文页填满竖向面板（消除 480 桌面下限造成的横向溢出）。
  */
 function pageMetrics(): { fit: number; gutter: number } {
-  const narrow = window.matchMedia('(max-width: 640px)').matches;
+  // 窄屏=满铺无 gutter。移动版/电纸屏壳（body.eink-shell）恒走窄屏：设备 WebView 视口可能 >640（如 684），
+  // 不靠 media query 否则被当桌面渲成「窄页+300 留白」溢出视口。
+  const narrow = window.matchMedia('(max-width: 640px)').matches || document.body.classList.contains('eink-shell');
   if (narrow) {
     const avail = stageWrap.clientWidth - 24;            // 竖屏 stage-wrap padding 较小
     return { fit: Math.min(900, Math.max(300, avail)), gutter: 0 };

@@ -31,10 +31,17 @@ class Bus {
  */
 export const bus = new Bus();
 
-export type Tool = 'pen' | 'highlighter' | 'eraser' | 'hand';
+export type Tool = 'pen' | 'aipen' | 'highlighter' | 'eraser' | 'hand';
 
 /** AI 输出落点：右侧留白 / 贴正文浮动。 */
 export type Placement = 'margin' | 'inline';
+
+/**
+ * AI 触发模式（笔触划分 = AI 门控）：
+ *  · 'pen'  —— AI 笔触（显式·默认）：只有「AI 笔」画的笔进 AI 管线；普通笔/荧光 = 纯内容（不识别/不答问/不生叠层）。
+ *  · 'auto' —— 自动判意（实验）：每笔都进管线（旧行为：手写定向 + 长停顿综合 + 分类阈值）。降级成 dev 开关、代码全留。
+ */
+export type AiTrigger = 'pen' | 'auto';
 
 /** 阅读面：原版 PDF / 重排 reader。 */
 export type ViewMode = 'page' | 'reader';
@@ -54,6 +61,15 @@ export interface Settings {
   //   enabled: 手势响应总开关；idleSeconds: 长停顿(无新笔)多少秒触发整段 session 综合回复
   //   （v3 主线，默认 90=~1.5min；可在 __inkloop.settings 调小做冒烟测试）
   gesture: { enabled: boolean; idleSeconds?: number };
+  // AI 触发模式（笔触划分）：'pen'=只 AI 笔进 AI（默认·普通笔=纯内容）；'auto'=每笔都判（旧自动判意·实验）。
+  // 默认 'pen'：AI 笔=激活意图识别的开关（选中它写→走 recognize+fold/respond 分类器）；普通笔不进 AI。
+  aiTrigger: AiTrigger;
+  // 手写收口等待（ms）：停笔多久把这团笔收口送识别/AI。调短=反馈快，但句中思考停顿会把一段字拆成多个标注
+  //（session 图会把它们串回一段叙事，语义不丢，只是账本条目变碎+分类调用变多）。dev 页可调。
+  regionQuietMs: number;
+  // AI 笔"原功能"（圈选 P2 识别被圈内容 + 它画的必回应·跳分类器）。默认 false=停用·AI 笔走普通意图识别即可；
+  // dev 开 → 恢复原显式行为（待把重排圈选锚定重做后再启用·见 codex 重排漂移调查）。
+  aiPenExplicit: boolean;
   // 推理模型：按前缀路由渠道——kimi*→moonshot；claude/gpt/gemini*→DMX。默认 sonnet-4-6。
   // （无状态端点：识别/答问/重排走各 /api/* 端点；跨标注连贯交 chat/ 每本书 buffer。）
   inferModel: string;
@@ -70,6 +86,17 @@ export interface Settings {
   showRegion: boolean;
   // dev：会话提交后，把"内容关联的标注"（标注图里空间/语义相连的一组）用紫色虚框圈起来。看哪些标注被当成一组。
   showRelations: boolean;
+  // dev：基岩录制（Tier 1 原始笔迹流·影子）。开后死区前的运动逐帧录进 ink_samples；不碰标注/AI。默认关。
+  bedrock: boolean;
+  // dev：记录整轮 AI pipeline 快照进 ai_turn.pipeline（dev 页逐组件复盘）。原仅 import.meta.env.DEV（preview）
+  // 才记 → 板上生产构建永远空。本运行时旋钮让板上也能开（默认关·开后每轮多存缩略图/阶段）。
+  recordPipeline: boolean;
+  // dev：设备遥测（板上）。开后 devEmit 把每条事实流事件推进 window.__devtel 环形缓冲 + console.log('[devtel] …')，
+  // 让开发者侧（我）经 CDP 直读板上 gesture/recognize/classify/inference/reflow 全套事实流。默认关。
+  devtel: boolean;
+  // dev：「思考中…」占位锚（抬笔后、回答流式前在锚点显示占位）。默认关——避免 fold 笔记被 place→clear 闪一下、
+  // 电纸屏多刷一发；想要"抬笔即反馈"的在 dev 开。真答案流式 anchor:place 不受此开关影响。
+  thinkingTag: boolean;
 }
 
 export const settings: Settings = {
@@ -80,14 +107,21 @@ export const settings: Settings = {
   reflowEager: false,   // 默认关：现在不为 AI 上下文烧 token；端侧重排模型上了再默认开 = 真"重排前置"。
   preprocess: { reflowEnabled: false, reflowPages: 5 },
   gesture: { enabled: true, idleSeconds: 90 },
+  aiTrigger: 'pen', // 默认：只有选中 AI 笔写的才进 AI（走识别→fold/respond 意图分类器）；普通笔=纯内容。dev 可切 'auto'=每笔都判（实验）。
+  regionQuietMs: 1000, // 手写收口等待默认 1s（用户拍板·原 6s 反馈太慢）；写长句常被句中停顿拆碎的话在 dev 调回 2-3s。
+  aiPenExplicit: false, // AI 笔"原功能"（圈选识别 P2 + 总是回应·跳分类器）默认停用·走意图识别即可；dev 开（重排漂移待重做后再启用）。
   inferModel: 'claude-sonnet-4-6', // 默认推理+识别模型：sonnet-4.6（DMX，中文手写实测准）。recognizeInk/chat 都随它。
   //   注：旧用户 localStorage 里存了别的会覆盖此默认——要用 sonnet 需在 dev 面板「推理模型」选一次或清 inkloop.settings.v1。
   interpretModel: '', // 识别分类器(/api/interpret)模型；空=继承 inferModel。
   classifyModel: '',  // 上下文分类器(/api/classify-context)模型；空=继承 inferModel。
   sendMarkImage: false, // 默认不送合成图：纯验证徐智强的取证路线（AI 只吃 HMP 事实+整页上下文）。
   devOverlay: false,    // dev bbox 叠层默认关。
-  showRegion: true,     // dev 组装区域实时可视：默认开（手写时看受影响区域）。
-  showRelations: true,  // dev 关联框：默认开（提交后看哪些标注被判为内容关联的一组）。
+  showRegion: false,    // dev 组装区域实时可视：**默认关**（开着会在手写时画 #region-overlay 调试框、被电纸屏 MutationObserver 抓成整屏 GC16；要看就 dev 里开）。
+  showRelations: false, // dev 关联框：**默认关**（同上·调试用）。
+  bedrock: false,       // 基岩录制默认关（影子·实验）。
+  recordPipeline: false, // pipeline 快照默认关；板上要看 dev 页逐组件复盘时手动开。
+  devtel: false,         // 设备遥测默认关；板上要让我直读事实流时手动开。
+  thinkingTag: false,    // 「思考中…」占位锚默认关（fold 不闪/电纸屏不多刷）；dev 可开。
 };
 
 /**
@@ -102,7 +136,7 @@ const PRODUCT_KEY = 'inkloop.prefs.v1';
 const DEV_KEY = 'inkloop.devflags.v1';
 const LEGACY_KEY = 'inkloop.settings.v1';
 const PRODUCT_FIELDS = ['placement', 'viewMode', 'reflowProvider', 'gesture'] as const;
-export const DEV_FIELDS = ['reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations'] as const;
+export const DEV_FIELDS = ['aiTrigger', 'aiPenExplicit', 'regionQuietMs', 'reflowModel', 'reflowEager', 'preprocess', 'inferModel', 'interpretModel', 'classifyModel', 'sendMarkImage', 'devOverlay', 'showRegion', 'showRelations', 'bedrock', 'recordPipeline', 'devtel', 'thinkingTag'] as const;
 
 type SettingsRec = Record<string, unknown>;
 

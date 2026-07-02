@@ -24,9 +24,10 @@ import { listBooks, getBookAiTurns, getFoldedMarks } from '../local/store';
 import { icon } from '../surface/icons';
 import { renderMeeting, rerenderMeeting, syncMtgChrome, initMeeting } from '../features/meeting/meeting';
 import { esc } from '../core/escape';
+import { pipelineSection, legacySection } from './pipeline-view'; // dev 流水线/旧轮渲染（web+mobile 共用·原 console.ts 抽出）
 import './console.css'; // 导航壳 + dev 页样式（会议样式已随 features/meeting/meeting.css 迁出）
 import type { PersistedAiTurn, PersistedMark } from '../core/store-format';
-import type { HMP, PipelineStage, PipelineStageIO, SurfaceObject } from '../core/contracts';
+import type { HMP, SurfaceObject } from '../core/contracts';
 import { downloadTrace, traceCount } from '../core/trace';
 import { snapshot } from '../core/metrics';
 import { selfTest } from '../core/transform';
@@ -236,80 +237,6 @@ async function renderConversation(): Promise<void> {
   }).sort((a, b) => b.latestSeq - a.latestSeq); // 最近活动的页在最上
   renderGroupList(inner, groups, '轮');
   if (thread) thread.scrollTop = 0; // 最新页在最上、默认展开 → 滚顶即见最新
-}
-
-const SHAPE_CN: Record<string, string> = { circle: '圈', underline: '划线', highlight: '高亮', arrow: '箭头', margin_note: '手写', stroke: '标记', tap_region: '点选' };
-/** 一个 mark 的"识别结果"标签：手写/画/markup + 识别出的文字（识别分类器的产物）。 */
-function featureLabel(m: PersistedMark): string {
-  const txt = (m.marked_text || '').replace(/\s+/g, ' ').slice(0, 18);
-  if (m.feature_type === 'handwriting') return `手写「${txt || '…'}」`;
-  if (m.feature_type === 'drawing') return `画${txt ? `「${txt}」` : '（无字）'}`;
-  return `${SHAPE_CN[m.scored_type] || '标记'}「${txt || '—'}」`;
-}
-
-/* ── 处理流水线渲染（逐组件「收到什么 → 产出什么」时间线）─────────────────────── */
-
-function ioRows(rows?: PipelineStageIO[]): string {
-  if (!rows?.length) return '';
-  return rows.map((r) => {
-    const val = r.v || '';
-    const long = val.length > 64 || val.includes('\n');
-    return `<div class="cns-pl-kv"><span class="k">${esc(r.k)}：</span><span class="v${long ? ' long' : ''}">${esc(val || '—')}</span></div>`;
-  }).join('');
-}
-function imgRow(imgs?: Array<{ role: string; thumb: string }>): string {
-  if (!imgs?.length) return '';
-  return `<div class="cns-pl-imgs">`
-    + imgs.map((im) => {
-      const safeThumb = /^data:image\//.test(im.thumb) ? esc(im.thumb) : ''; // 只放行本地截图 data:image/ URL + esc，杜绝 src 属性逃逸
-      return `<div class="cns-pl-img"><img class="cns-zoom" src="${safeThumb}" alt=""><span>${esc(im.role)}</span></div>`;
-    }).join('')
-    + `</div>`;
-}
-/** 一个组件阶段卡：summary（mark 标 + 名 + 状态 + note）+ body（收到 → 图 → 产出）。 */
-function stageCard(st: PipelineStage): string {
-  const open = (st.stage === 'model' || st.stage === 'inferview') ? ' open' : ''; // 末两步默认展开
-  const tag = st.status === 'skipped' ? '<span class="cns-pl-tag skipped">跳过</span>'
-    : st.status === 'error' ? '<span class="cns-pl-tag error">出错</span>' : '';
-  const markChip = st.mark_ord ? `<span class="cns-pl-mark">mark ${st.mark_ord}·${esc(st.mark_label || '')}</span>` : '';
-  return `<details class="cns-pl-stage ${st.status ?? ''}"${open}>`
-    + `<summary class="cns-pl-sum">${markChip}<span class="cns-pl-name">${esc(st.label)}</span>${tag}<span class="cns-pl-note">${esc(st.note || '')}</span></summary>`
-    + `<div class="cns-pl-body">`
-    + (st.input?.length ? `<div class="cns-pl-io"><div class="cns-pl-io-h">↓ 收到（输入）</div>${ioRows(st.input)}</div>` : '')
-    + imgRow(st.images)
-    + (st.output?.length ? `<div class="cns-pl-io"><div class="cns-pl-io-h out">↑ 产出（输出）</div>${ioRows(st.output)}</div>` : '')
-    + `</div></details>`;
-}
-function pipelineSection(stages: PipelineStage[]): string {
-  return `<div class="cns-sec">处理流水线（逐组件：收到什么 → 产出什么 · ${stages.length} 步）</div>`
-    + `<div class="cns-pl">` + stages.map(stageCard).join('') + `</div>`;
-}
-
-/** 旧轮（无 pipeline 快照）的兜底展示：保留分类器判定 + 蒸馏字段 + 正文/prompt 折叠块。 */
-function legacySection(t: PersistedAiTurn, markMap: Map<string, PersistedMark>): string {
-  const v = t.inference_view;
-  const diag = t.diag ?? {};
-  const classify = diag.classify
-    ? `<div class="cns-kv"><span class="k">上下文分类器：</span>${diag.classify.respond ? '<span class="cns-yes">回应 ✓</span>' : '<span class="cns-no">折叠 ✗</span>'} — ${esc(diag.classify.reason || '')}</div>`
-    : `<div class="cns-kv"><span class="k">上下文分类器：</span>未触发（长停顿综合走 idle，无需判定）</div>`;
-  const chips = (t.anchor?.mark_ids ?? []).map((id) => markMap.get(id)).filter((m): m is PersistedMark => !!m)
-    .map((m) => `<span class="cns-chip">${esc(featureLabel(m))}</span>`).join('');
-  const markRow = `<div class="cns-kv"><span class="k">识别（逐 mark）：</span>${chips || '<span class="cns-chip" style="color:var(--hint)">（无 mark 记录）</span>'}</div>`;
-  const q = v?.question ? `<div class="cns-kv"><span class="k">手写问：</span>${esc(v.question)}</div>` : '';
-  const sentImg = diag.sent_image ? '<span class="cns-yes">有</span>' : '无';
-  const ctx = v?.page_context || '';
-  const ctxBlock = ctx
-    ? `<details class="cns-ctx"><summary><span class="cns-ctx-h">📄 正文块（滑动窗 ${ctx.length} 字）</span><span class="cns-ctx-prev">${esc(ctx.slice(0, 150))}…</span></summary><div class="cns-ctx-body">${esc(ctx)}</div></details>`
-    : `<div class="cns-kv"><span class="k">正文块：</span>（无）</div>`;
-  const prompt = t.prompt_snapshot || '';
-  const promptBlock = `<details class="cns-ctx"><summary><span class="cns-ctx-h">🧾 完整 prompt（${prompt.length} 字）</span><span class="cns-ctx-prev">${esc(prompt.slice(0, 130))}…</span></summary><div class="cns-ctx-body">${esc(prompt || '—')}</div></details>`;
-  return `<div class="cns-sec">分类器判定</div>` + classify + markRow
-    + `<div class="cns-sec">蒸馏后喂入（inference-view）</div>`
-    + `<div class="cns-kv"><span class="k">关系叙事：</span>${esc(v?.narrative || '—')}</div>`
-    + `<div class="cns-kv"><span class="k">所标内容：</span>${esc(v?.marked || '—')}</div>`
-    + q
-    + `<div class="cns-kv"><span class="k">锚点：</span>${t.anchor?.object_refs?.length ?? 0} 对象 / ${t.anchor?.mark_ids?.length ?? 0} 笔 · 随发图：${sentImg}</div>`
-    + ctxBlock + promptBlock;
 }
 
 /**
@@ -567,6 +494,7 @@ function setSections(): SetSection[] {
   const g = settings.gesture, p = settings.preprocess;
   return [
     { title: '核心 · 影响真实行为', rows: [
+      { kind: 'select', label: 'AI 触发模式（笔触划分）', hint: 'AI 笔触=只「AI 笔」进 AI、普通笔=纯内容（默认）；自动判意=每笔都判（旧行为·实验）', badge: B_LIVE, opts: [['pen', 'AI 笔触（显式·默认）'], ['auto', '自动判意（实验）']], get: () => settings.aiTrigger, set: (v) => { settings.aiTrigger = v as typeof settings.aiTrigger; }, effect: 'changed' },
       { kind: 'select', label: '推理模型（答问 · 分类器默认）', badge: B_LIVE, opts: [['kimi-k2.6', 'kimi-k2.6（中文笔迹稳）'], ['claude-opus-4-8', 'claude-opus-4-8（最新·慢）'], ['claude-opus-4-7', 'claude-opus-4-7（质量·慢）'], ['claude-sonnet-4-6', 'claude-sonnet-4-6（快·能回思考）'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite（快）']], get: () => settings.inferModel, set: (v) => { settings.inferModel = v; }, effect: 'changed' },
       { kind: 'select', label: '识别分类器模型 · /api/interpret（空=继承推理模型）', badge: B_LIVE, opts: [['', '继承推理模型'], ['__local_hwr__', '端侧手写·OpenVINO 英文(徐方案·走本地端点)'], ['kimi-k2.6', 'kimi-k2.6'], ['claude-opus-4-8', 'claude-opus-4-8'], ['claude-sonnet-4-6', 'claude-sonnet-4-6'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite']], get: () => settings.interpretModel, set: (v) => { settings.interpretModel = v; }, effect: 'changed' },
       { kind: 'select', label: '上下文分类器模型 · /api/classify-context（空=继承推理模型）', badge: B_LIVE, opts: [['', '继承推理模型'], ['__local_rules__', '端侧规则·徐 IntentClassifier（驱动 respond/fold·不调云）'], ['kimi-k2.6', 'kimi-k2.6'], ['claude-opus-4-8', 'claude-opus-4-8'], ['claude-sonnet-4-6', 'claude-sonnet-4-6'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite']], get: () => settings.classifyModel, set: (v) => { settings.classifyModel = v; }, effect: 'changed' },
@@ -577,6 +505,7 @@ function setSections(): SetSection[] {
       { kind: 'select', label: '重排引擎', badge: B_LIVE, opts: [['ai', 'AI 结构重建（主线·保 bbox）'], ['local', '仅启发式'], ['hybrid', '启发式+模型精修'], ['vision', '启发式+视觉重排'], ['rewrite', 'VLM 看图重写']], get: () => settings.reflowProvider, set: (v) => { settings.reflowProvider = v; }, effect: 'changed' },
       { kind: 'select', label: '重排模型', badge: B_LIVE, opts: [['gemini-3.1-flash-lite', 'gemini-3.1-flash-lite（默认·快）'], ['gemini-3.5-flash', 'gemini-3.5-flash'], ['kimi-k2.6', 'kimi-k2.6（慢·对照）'], ['claude-sonnet-4-6', 'claude-sonnet-4-6（准·对照）']], get: () => settings.reflowModel, set: (v) => { settings.reflowModel = v; }, effect: 'changed' },
       { kind: 'check', label: '重排前置（渲染即后台急算）', hint: '每次翻页后台预排当前页·烧 token；默认关', badge: B_LIVE, get: () => settings.reflowEager, set: (v) => { settings.reflowEager = v; }, effect: 'save' },
+      { kind: 'check', label: '基岩录制（原始笔迹流 · 影子）', hint: '把死区前的原始运动逐帧录进独立库 ink_samples；影子运行·不碰标注/AI/老功能；默认关。开后画几笔即录，查 IndexedDB 的 ink_samples', badge: B_LIVE, get: () => settings.bedrock, set: (v) => { settings.bedrock = v; }, effect: 'save' },
     ] },
     { title: '调试叠层 · 只影响可视化、不碰推理', rows: [
       { kind: 'check', label: '显示 bbox 叠层（对象框+命中高亮+HMP 浮窗）', badge: B_DEV, get: () => settings.devOverlay, set: (v) => { settings.devOverlay = v; }, effect: 'changed' },

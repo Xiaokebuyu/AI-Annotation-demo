@@ -9,7 +9,7 @@
  *
  * 本模块只管数据与累积；计时/触发在 main.ts，建图在 evidence/mark-graph.ts。
  */
-import type { AnnotationEvent, HMP, PipelineStage } from '../core/contracts';
+import type { AnnotationEvent, HMP, MarkManner, PipelineStage } from '../core/contracts';
 import type { ScoredGesture, StrokeFeature } from './classify';
 
 /** 1.2s 笔迹组装窗（沿用旧 SESSION_WINDOW，产一个 mark）。 */
@@ -29,6 +29,7 @@ export interface Mark {
   hmp: HMP | null;        // 落笔当时建好+取证（含 crop/转写）；跨页 session 不能在提交时重取
   markedText: string;     // 落笔当时解析好的"所标内容"（结构原文+转写）
   trace?: PipelineStage[]; // 落笔当时这笔经手的组件阶段（识别/OCR兜底/取证），提交时拼进整轮流水线（仅 DEV）
+  manner?: MarkManner;     // 运笔方式（Slice A）：落笔当时从构成笔算好，提交时随节点进叙事
 }
 
 /** 一段会话 = 本书自上次回复以来累积的 mark（可跨页）。 */

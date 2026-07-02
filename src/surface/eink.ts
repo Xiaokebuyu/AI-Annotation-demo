@@ -64,16 +64,16 @@ function pageBoxToViewport(bx: number, by: number, bw: number, bh: number):
 
 let inkPending: { x0: number; y0: number; x1: number; y1: number } | null = null;
 let inkTimer = 0;
-/** 抬笔即调：合并该笔的视口矩形，短窗(150ms)后推一帧 A2 局部快刷。bbox=页归一化[x,y,w,h]。 */
-export function signalInkArea(bbox: [number, number, number, number]): void {
+/** 通用 A2 脏区核心：并集视口归一化矩形[0,1]，短窗(150ms)后推一帧 A2 局部快刷。夹值 + 丢空矩形。 */
+function pushDirty(x0: number, y0: number, x1: number, y1: number): void {
   if (!enabled || !channel()) return;
-  const vp = pageBoxToViewport(bbox[0], bbox[1], bbox[2], bbox[3]);
-  if (!vp) return;
-  const x0 = vp.x, y0 = vp.y, x1 = vp.x + vp.w, y1 = vp.y + vp.h;
+  x0 = Math.max(0, Math.min(1, x0)); y0 = Math.max(0, Math.min(1, y0));
+  x1 = Math.max(0, Math.min(1, x1)); y1 = Math.max(0, Math.min(1, y1));
+  if (x1 - x0 <= 0 || y1 - y0 <= 0) return;
   inkPending = inkPending
     ? { x0: Math.min(inkPending.x0, x0), y0: Math.min(inkPending.y0, y0), x1: Math.max(inkPending.x1, x1), y1: Math.max(inkPending.y1, y1) }
     : { x0, y0, x1, y1 };
-  if (inkTimer) return;   // 窗口内已排程 → 并集等它一起发（不重置计时，落笔延迟有上界）
+  if (inkTimer) return;   // 窗口内已排程 → 并集等它一起发（不重置计时，延迟有上界）
   inkTimer = window.setTimeout(() => {
     inkTimer = 0;
     const p = inkPending; inkPending = null;
@@ -82,6 +82,57 @@ export function signalInkArea(bbox: [number, number, number, number]): void {
     try { ch.postMessage(JSON.stringify({ method: 'inkArea', x: p.x0, y: p.y0, w: p.x1 - p.x0, h: p.y1 - p.y0, mode: MODE_A2 })); }
     catch { /* no-op */ }
   }, 150);
+}
+/** 抬笔即调：页归一化 bbox → 视口矩形 → A2 局部快刷（原版画布·经 #ink-layer）。 */
+export function signalInkArea(bbox: [number, number, number, number]): void {
+  const min = 8 / Math.max(window.innerWidth || 1, window.innerHeight || 1);
+  const bw = bbox[2] || min, bh = bbox[3] || min;
+  const vp = pageBoxToViewport(bbox[0] - (bw - bbox[2]) / 2, bbox[1] - (bh - bbox[3]) / 2, bw, bh);
+  if (vp) pushDirty(vp.x, vp.y, vp.x + vp.w, vp.y + vp.h);
+}
+/** 通用 A2 脏区：直接给视口归一化矩形[0,1]（不经 #ink-layer）。重排面手写/橡皮/AI 标记/小反馈用。 */
+export function signalViewportArea(rect: { x: number; y: number; w: number; h: number }): void {
+  pushDirty(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
+}
+/** 通用 A2 脏区：给一个元素，按其当前视口位置刷 A2（抽屉/sheet/旁注块/小反馈用）。 */
+export function signalElementArea(node: Element): void {
+  const r = node.getBoundingClientRect();
+  const vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+  pushDirty(r.left / vw, r.top / vh, (r.left + r.width) / vw, (r.top + r.height) / vh);
+}
+
+// ── 通用 UI 变化刷新（电纸屏：点按钮/切工具/开菜单/AI 标记/时钟也要看到反馈）──
+// 语义事件(翻页/视图/文档)走整屏 GC16；其余 DOM 变动由 MutationObserver 兜底，按【变更区域大小】决定：
+// 小改 → A2 局部快刷（工具高亮/AI 标记/时钟/列表小改）；大改(>60% 视口) / body 级(视图切换 data-* / 模态 append) → 整屏 GC16。
+// 这把原来「任何 UI 变动都整屏 GC16」换成「按区域局部刷」，工具/抽屉/时钟/AI 标记不再整屏闪。
+let uiDirty: { l: number; t: number; r: number; b: number } | null = null;
+let uiPageLevel = false;
+let uiTimer = 0;
+function flushUi(): void {
+  uiTimer = 0;
+  const d = uiDirty, pl = uiPageLevel;
+  uiDirty = null; uiPageLevel = false;
+  if (pl) { signalPageReady(); return; }
+  if (!d) return;
+  const vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+  const w = d.r - d.l, h = d.b - d.t;
+  if (w <= 0 || h <= 0) return;
+  if ((w * h) / (vw * vh) > 0.6) signalPageReady();                            // 大改 → 整屏 GC16（清残影）
+  else signalViewportArea({ x: d.l / vw, y: d.t / vh, w: w / vw, h: h / vh });  // 小改 → A2 局部
+}
+function noteUiChange(target: Node): void {
+  if (!enabled || !channel()) return;
+  if (target === document.body) { uiPageLevel = true; }   // body 级（视图切换 data-* / 模态 append）→ 整屏
+  else {
+    const el = target instanceof Element ? target : target.parentElement;
+    const b = el?.getBoundingClientRect();
+    if (b && b.width > 0 && b.height > 0) {
+      uiDirty = uiDirty
+        ? { l: Math.min(uiDirty.l, b.left), t: Math.min(uiDirty.t, b.top), r: Math.max(uiDirty.r, b.right), b: Math.max(uiDirty.b, b.bottom) }
+        : { l: b.left, t: b.top, r: b.right, b: b.bottom };
+    }
+  }
+  if (!uiTimer) uiTimer = window.setTimeout(flushUi, 120); // 合并 120ms 内多批变动，统一决策
 }
 
 let installed = false;
@@ -93,8 +144,39 @@ export function initEinkMirror(): void {
   bus.on('page:rendered', () => signalPageReady());   // PDF 页/白板渲染完成
   bus.on('view:changed', () => signalPageReady());     // 原版 ⇄ 重排切换
   bus.on('document:loaded', () => signalPageReady());  // 文档载入
-  bus.on('overlay:add', () => signalPageReady());      // AI 旁注出现
-  bus.on('overlay:remove', () => signalPageReady());   // AI 旁注移除
+  // AI 旁注/标记 出现/消失 不再整屏 GC16——它们是局部 DOM 变动，由下面 MutationObserver 兜底按区域 A2 局部刷。
+  // 通用兜底：任何 UI DOM 变动（工具高亮/菜单/按钮态…）→ 去抖整屏刷，保证触摸反馈可见。
+  // 排除「不该牵动整屏」的子树：笔迹画布(走 A2 局部)、重排笔迹画布、dev 调试叠层(region/bbox/relation/hmp·
+  // 开着会在手写时画框→被这里抓成整屏 GC16·已默认关·这里再兜一层)、虚拟翻页引擎自插的垫白 spacer。
+  const EINK_IGNORE = '#ink-layer,.reader-ink,#region-overlay,#bbox-overlay,#relation-overlay,#hmp-float,.vpager-spacer,[data-eink-ignore]';
+  const einkIgnored = (node: Node | null): boolean => {
+    const el = node instanceof Element ? node : node?.parentElement ?? null;
+    return !!el?.closest(EINK_IGNORE);
+  };
+  try {
+    const mo = new MutationObserver((records) => {
+      for (const r of records) {
+        if (einkIgnored(r.target)) continue;
+        noteUiChange(r.target);   // 不 early-return：遍历全批取并集区域，flushUi 统一决策 A2/GC16
+      }
+    });
+    mo.observe(document.body, {
+      childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ['class', 'style', 'hidden', 'disabled', 'aria-pressed', 'aria-expanded', 'aria-selected', 'data-active', 'data-state', 'data-mode', 'data-read', 'data-mtg', 'data-dev', 'data-surface', 'open', 'value'],
+    });
+  } catch { /* 老 WebView 无 MutationObserver 时静默 */ }
+  // 原生表单控件（select/checkbox/radio/number）改值是改 property、**不产生 DOM 变动** → MutationObserver 抓不到 →
+  // 电纸屏不刷（"改了看不见"）。补一条：change 冒泡到 document 时按目标元素局部 A2 刷一发。
+  // 用 change（离散提交）不用 input（文本逐字太频）；range 拖动结束才 change，够用。
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t instanceof Element && !einkIgnored(t)) signalElementArea(t);
+  }, true);
+  // 仅 range/number 补 input（实时可见）；不给文本框补 input——逐字会过刷。
+  document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t instanceof HTMLInputElement && (t.type === 'range' || t.type === 'number') && !einkIgnored(t)) signalElementArea(t);
+  }, true);
   // 首帧：首屏渲染稳定后镜像一次当前 UI（含导航壳空态）
   setTimeout(() => signalPageReady(), 600);
 }

@@ -460,8 +460,10 @@ export async function* chatStream(payload: any): AsyncGenerator<string> {
   const system = SYSTEM_PROMPTS[role] ?? SYSTEM_PROMPTS.annotator;
   const model = payload?.model || cfg().model;
   const maxTokens = typeof payload?.maxTokens === 'number' ? payload.maxTokens : 800;
+  // thinking 默认开（保持 annotator 伴读行为不变）；调用方可显式 thinking:false 关掉（如概念抽取这类轻分类·省 token/不抬 maxTokens）。
+  const thinking = payload?.thinking !== false;
   // NDJSON 帧：每行 {"k":"t"|"r","d":"<增量>"}——t=回复正文、r=思考过程（reasoning）。客户端 chatTurn 分流。
-  for await (const e of gatewayEventStream({ system, messages, maxTokens, model, thinking: true })) {
+  for await (const e of gatewayEventStream({ system, messages, maxTokens, model, thinking })) {
     yield JSON.stringify({ k: e.type === 'thinking' ? 'r' : 't', d: e.delta }) + '\n';
   }
 }

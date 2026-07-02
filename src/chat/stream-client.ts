@@ -27,17 +27,22 @@ export async function chatTurn(
     }).filter(Boolean);
     if (blocks.length) messages[messages.length - 1] = { role: 'user', content: [...blocks, { type: 'text', text: userContent }] };
   }
-  let text = '', thinking = '';
-  // NDJSON 帧 {k:'t'|'r',d} 分流——t=正文(onDelta)、r=思考(onThinking)。分帧/容错/收尾在 postNdjson 内。
+  let text = '', thinking = '', streamError = '';
+  let streamDone = false;
+  // NDJSON 帧 {k:'t'|'r'|'done'|'e',d} 分流——t=正文、r=思考、done=完成哨兵、e=中途出错（防把半截当成功）。
   await postNdjson<{ k?: string; d?: string }>(
     '/api/chat',
     { messages, role: opts.role, model: opts.model, maxTokens: opts.maxTokens ?? 500 },
     (ev) => {
-      if (ev.k === 'r') { thinking += ev.d ?? ''; opts.onThinking?.(thinking); }
-      else { text += ev.d ?? ''; opts.onDelta?.(text); }
+      if (ev.k === 'e') streamError = ev.d || 'AI 回复中断';
+      else if (ev.k === 'done') streamDone = true;
+      else if (ev.k === 'r') { thinking += ev.d ?? ''; opts.onThinking?.(thinking); }
+      else if (ev.k === 't') { text += ev.d ?? ''; opts.onDelta?.(text); }
     },
     { signal: opts.signal },
   );
+  if (streamError) throw new Error(streamError);
+  if (!streamDone) throw new Error('AI 回复流提前结束');
   text = text.trim(); thinking = thinking.trim();
   appendMsg(bookId, { role: 'user', content: userContent }); // 成功才提交本轮（user + assistant 一起入 buffer）
   appendMsg(bookId, { role: 'assistant', content: text });

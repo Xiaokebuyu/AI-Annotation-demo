@@ -12,6 +12,8 @@ export type EventType =
 
 /** [x, y, w, h]，页面归一化坐标 */
 export type NormBBox = [number, number, number, number];
+/** [x, y, w, h]，surface-local 坐标；可能是 px，也可能是该 surface 的归一化坐标。 */
+export type SurfaceBBox = [number, number, number, number];
 
 export interface StrokePoint {
   x: number;
@@ -19,6 +21,12 @@ export interface StrokePoint {
   t: number;        // ms，相对落笔时刻
   pressure: number; // 0–1，无损保留（决策 D3）
 }
+
+/** 用户实际落笔的 surface。canonical page anchor 仍用 page_id/page_index/source refs 互通。 */
+export type CaptureSurface = 'page' | 'reader' | 'whiteboard' | 'chat';
+
+/** stroke_points 的坐标系。page_norm 是 PDF/page 归一化；reader_px 是 #reader 内容坐标。 */
+export type StrokeCoordSpace = 'page_norm' | 'reader_px' | 'surface_norm';
 
 export interface PDFDocumentRecord {
   document_id: string;
@@ -58,6 +66,17 @@ export interface AnnotationEvent {
   session_id: string;
   pointer_type: string;
   version: string;
+  capture_surface?: CaptureSurface;  // 用户实际在哪个 surface 落笔；缺省按老数据视为 page。
+  coord_space?: StrokeCoordSpace;    // stroke_points/geometry 的坐标系；缺省 page_norm。
+  reader_layout_id?: string;          // 仅重排面落笔：该笔对应的阅读页视觉行布局快照 id（导出复现文字背景）；老事件缺=undefined
+  anchor_runs?: string[];           // 仅重排面落笔：命中重排块的 source run ids（位置真相锚=锚在哪一段）；原版落笔/老事件缺=undefined
+  near_bbox?: NormBBox;              // 仅重排面落笔：屏幕空间 bbox（按内容列宽归一化）——专给组装近邻判定用（视觉相邻即 near，跨块不被按块映射的 PDF 坐标判 far）。原版页缺=用 geometry.bbox（=屏幕）。
+  near_pad?: number;                 // near_bbox 同坐标单位的组装外扩半径（按 DOM 行高算）；缺省用 annotation-loop 的 REGION_NEAR。仅 reader 面按视觉行高放宽，治"连续写字被按字切碎"。
+  reflow_ink_points?: StrokePoint[]; // 仅重排面落笔：该笔在 #reader 内容坐标(px)里的原始点。仅作临时取证，不落账本；x/y 此处不是页面归一化。
+  reflow_ink_ref?: string;           // 仅重排面落笔：按重排内容坐标直接栅格化的白底笔迹图。self_content 识别优先用它，避免从隐藏 #ink-layer/PDF 坐标裁错。
+  ink_ref?: string;                  // 通用离屏白底笔迹图（从账本点串栅格化·不抓可见画布）。M103 日记白板零画布写字时，captureMark 优先用它当 layers.ink，保证 AI 有非空笔迹图（点串云端不消费·#ink-layer 空会 AI 抓白图=大忌）。
+  coord_px_per_norm?: number;        // 仅重排面块本地投影：1 归一化单位 = 多少 reader px（=块rect宽/块source宽）。有值=stroke_points 用块本地 uniform scale 映的（在界·可信）；缺=老 pageCss 除数（reader 笔可越界·近似）。重投影逆运算与分类器 dims 都认它。
+  reader_line_h?: number;            // 仅重排面落笔：命中块的视觉行高（reader px）。特征分类的"字高标尺"必须同空间——canonical 墨迹高 vs 源 PDF 字高的跨系比值曾让 reader 下划线永远被判"太高"降级 drawing。
 }
 
 export interface OcrTextBlock {
@@ -209,6 +228,8 @@ export type HmpObjectHint = 'text' | 'image_region' | 'ui_region' | 'blank' | 'd
 export interface HMP {
   hmp_id: string;
   surface_id: string;
+  capture_surface?: CaptureSurface;  // HMP 取证使用的 surface；缺省 page。
+  coord_space?: StrokeCoordSpace;    // target_region/target_object_refs 所在坐标系；缺省 page_norm。
   mode: HmpMode;
   action: MarkShape;
   target_region: NormBBox;       // 多笔 union bbox
@@ -239,6 +260,14 @@ export type MarkEdgeKind = 'spatial' | 'temporal' | 'semantic';
 /** 时间×空间四象限：近/近=一口气、近时远空=扫读、远时近空=回访、远/远=另起。 */
 export type QuadrantLabel = 'one_action' | 'sweep' | 'revisit' | 'separate';
 
+/** 运笔方式（Slice A）：从笔迹点确定性提取的"怎么画的"。只在信号明显时带 adverb；retraced 仅 markup。 */
+export interface MarkManner {
+  adverb?: 'hesitant' | 'decisive' | 'careful'; // 主导语气：迟疑/果断/仔细
+  retraced?: boolean;                            // 在同一处来回叠（重描）
+  hesitationMs?: number;                         // DEV/trace：落笔迟疑
+  speed?: number;                                // DEV/trace：归一化速度（对角线/秒）
+}
+
 /** 标注图节点 = 一个 mark（1.2s 组装出的一次手势）的取证摘要。 */
 export interface MarkNode {
   mark_id: string;
@@ -253,6 +282,7 @@ export interface MarkNode {
   target_object_refs: string[];
   text_hint?: string;
   text?: string;                    // 落笔当时解析好的"所标内容"（结构原文+转写）；跨页 session 提交时不再依赖 live index
+  manner?: MarkManner;              // 运笔方式（Slice A）：果断/迟疑/仔细/重描，喂进 inference-view 叙事
 }
 
 /** 标注图的边：两 mark 之间的关联（语义边可带方向）。 */

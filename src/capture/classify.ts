@@ -1,6 +1,10 @@
 import type { EventType, MarkShape, NormBBox, StrokePoint } from '../core/contracts';
 import { pageCss } from '../core/transform';
 
+/** 原生 px 直接喂分类器时的配平基准：点÷基准归一、dims=基准 → 分类器内恢复出真实 px（阈值是像素语义）。
+ *  取 10000 保证 reader 长页内容坐标（可达数千 px）归一后必 <1——bboxOf 的初始值假定点在 [0,1]。 */
+export const CLS_BASIS = 10000;
+
 export function bboxOf(points: StrokePoint[]): NormBBox {
   let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
   for (const p of points) {

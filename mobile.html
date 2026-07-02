@@ -3,117 +3,309 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>InkLoop · 移动版布局原型</title>
-<style>
-  :root{
-    --page:#ffffff;         /* 纸面：纯白满幅 */
-    --ink:#111111;          /* 墨 / 图标：近黑 */
-    --mut:#8a8a8a;          /* 次要 */
-    --hair:#e6e6e6;         /* 发丝分隔 */
-    --grid:#efefef;         /* 极淡点阵（书写参考） */
-    --sel:#111111;          /* 选中反色块 */
-    --sans:-apple-system,"PingFang SC","Noto Sans SC","Helvetica Neue",sans-serif;
-    --mono:ui-monospace,"SF Mono",Menlo,"Roboto Mono",monospace;
-    --serif:"Noto Serif SC","Songti SC","Source Han Serif SC",Georgia,serif;
-  }
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
-  html,body{height:100%;margin:0;}
-  body{font:14px/1.5 var(--sans);color:var(--ink);background:var(--page);overflow:hidden;}
-
-  #m-app{height:100%;display:flex;}
-
-  /* ── 左缘竖条工具栏 ── */
-  #m-rail{
-    flex:0 0 auto;width:48px;display:flex;flex-direction:column;align-items:center;
-    padding:6px 0;border-right:1px solid var(--hair);background:var(--page);
-    transition:transform .12s ease;z-index:5;
-  }
-  .rl-btn{width:38px;height:38px;display:grid;place-items:center;border:none;background:transparent;color:var(--ink);border-radius:10px;cursor:pointer;margin:2px 0;}
-  .rl-btn:active{background:#f1f1f1;}
-  .rl-btn.on{background:var(--sel);color:#fff;}
-  .rl-btn svg{width:21px;height:21px;}
-  .rl-btn.dim{color:var(--mut);}
-  .rl-sep{width:22px;height:1px;background:var(--hair);margin:6px 0;}
-  .rl-spacer{flex:1;}
-
-  /* 收起态：栏滑出，左缘留一个细把手 */
-  body.rail-off #m-rail{transform:translateX(-48px);}
-  #m-tab{
-    position:fixed;left:6px;top:8px;width:30px;height:30px;display:none;place-items:center;
-    border:1px solid var(--hair);border-radius:9px;background:var(--page);color:var(--ink);cursor:pointer;z-index:6;
-  }
-  body.rail-off #m-tab{display:grid;}
-  #m-tab svg{width:18px;height:18px;}
-
-  /* ── 满幅可写页面 ── */
-  #m-canvas{flex:1;min-height:0;position:relative;overflow:hidden;}
-  #m-page{
-    position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--page);
-    background-image:radial-gradient(var(--grid) 1.1px, transparent 1.1px);
-    background-size:22px 22px;background-position:10px 12px;
-  }
-  /* 底部居中、极轻的页码（空白页隐去；PDF 才显） */
-  #m-pageind{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);font:11px var(--mono);color:var(--mut);opacity:.0;}
-
-  /* AI 旁注：页边的等宽声音（无竖线、贴行下方）—— 示意位 */
-  .m-whisper{position:absolute;font:12px/1.6 var(--mono);color:#555;width:min(72%,240px);}
-</style>
+<title>InkLoop · 移动版</title>
 </head>
-<body>
+<body class="eink-shell" data-mode="read" data-read="diary" data-mtg="home" data-meet="schedule" data-dev="chat">
+<section id="auth-gate" hidden>
+  <div class="auth-panel">
+    <div class="auth-head">
+      <h1>InkLoop 登录</h1>
+      <button class="hbtn" id="auth-refresh" type="button">刷新</button>
+    </div>
+    <div class="auth-body">
+      <img id="auth-qr" width="240" height="240" alt="" />
+      <div class="auth-code" id="auth-code">----</div>
+      <div class="auth-status" id="auth-status">待生成二维码</div>
+      <div class="auth-expire" id="auth-expire"></div>
+      <a class="auth-link" id="auth-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+    </div>
+    <div class="auth-foot">
+      <button class="hbtn" id="auth-logout" type="button">清除登录态</button>
+    </div>
+  </div>
+</section>
 <div id="m-app">
 
+  <!-- ════ 导航脊 ════ -->
   <nav id="m-rail">
-    <button class="rl-btn dim" id="rl-menu" aria-label="菜单 / 模式 / 笔记本">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-    </button>
-    <div class="rl-sep"></div>
-
-    <button class="rl-btn on" data-tool aria-label="钢笔">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg>
-    </button>
-    <button class="rl-btn" data-tool aria-label="高亮">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l-1 4h8M8.5 14.5l7-7 3 3-7 7h-3v-3z"/><path d="M3 21h18" opacity=".4"/></svg>
-    </button>
-    <button class="rl-btn" data-tool aria-label="橡皮">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16l8.5-8.5a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8L12 18H8l-2-2z"/><path d="M5 21h14" opacity=".4"/></svg>
-    </button>
-    <button class="rl-btn" data-tool aria-label="手型 / 拖动">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-1.5a4 4 0 0 1-3-1.4L5 16.5a1.5 1.5 0 0 1 2.3-2L8 15.3"/></svg>
-    </button>
+    <div class="nav">
+      <div class="rl-item cur"><button class="rl-btn on" data-mode="read" aria-label="阅读"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.6C10.4 5.6 7.8 5 4 5v13c3.8 0 6.4.6 8 1.6 1.6-1 4.2-1.6 8-1.6V5c-3.8 0-6.4.6-8 1.6z"/><path d="M12 6.6V19.6"/></svg></button><span class="rl-lab">阅读</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-mode="meet" aria-label="会议"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.1"/><path d="M3.5 19v-1a4 4 0 0 1 4-4H10"/><path d="M15.2 5.3a3.1 3.1 0 0 1 0 5.4"/><path d="M14 14h.5a4 4 0 0 1 4 4v1"/></svg><span class="rl-badge" id="rl-meet-badge" hidden></span></button><span class="rl-lab">会议</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-mode="dev" aria-label="dev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 8.5 5 12l3.5 3.5"/><path d="M15.5 8.5 19 12l-3.5 3.5"/><path d="M13.5 6l-3 12"/></svg></button><span class="rl-lab">dev</span></div>
+    </div>
 
     <div class="rl-sep"></div>
-    <button class="rl-btn dim" aria-label="撤销">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 6L3 10l4 4"/><path d="M3 10h11a6 6 0 1 1 0 12h-4"/></svg>
-    </button>
+
+    <!-- 阅读子导航 -->
+    <div class="sub" id="read-sub">
+      <div class="rl-item"><button class="rl-btn dim" data-read="new" aria-label="新日记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h9l5 5v11H5z"/><path d="M14 4v5h5"/><path d="M11.5 12.5v4M9.5 14.5h4"/></svg></button><span class="rl-lab">新日记</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-read="books" aria-label="书籍"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H18a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H6.5A1.5 1.5 0 0 1 5 18.5z"/><path d="M5 17.5A1.5 1.5 0 0 1 6.5 16H19"/></svg></button><span class="rl-lab">书籍</span></div>
+      <div class="rl-item cur"><button class="rl-btn on" data-read="diary" aria-label="日记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></button><span class="rl-lab">日记</span></div>
+    </div>
+
+    <!-- dev 子导航 -->
+    <div class="sub" id="dev-sub">
+      <div class="rl-item cur"><button class="rl-btn on" data-dev="chat" aria-label="AI会话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-4 3z"/></svg></button><span class="rl-lab">会话</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-dev="hmp" aria-label="采集取证"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg></button><span class="rl-lab">取证</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-dev="set" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/></svg></button><span class="rl-lab">设置</span></div>
+    </div>
+
+    <!-- 会议首页子导航已删（单页面收敛·阶段①）：home 直接是会议列表，无日程/群聊双子页。
+         这个是会后记录页专属子导航（时间脊/思路总结/panel总结三页互为平级·点即切） -->
+    <div class="sub" id="recap-sub">
+      <div class="rl-item cur"><button class="rl-btn on" data-rc="overview" aria-label="时间脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/><path d="M12 7v3M12 14v3"/></svg></button><span class="rl-lab">时间脊</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-rc="summary" aria-label="思路总结"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg></button><span class="rl-lab">思路总结</span></div>
+      <div class="rl-item"><button class="rl-btn dim" data-rc="panel" aria-label="panel 总结"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></button><span class="rl-lab">panel 总结</span></div>
+    </div>
+
+    <!-- 工具收纳格子 -->
+    <div id="tools">
+      <button class="rl-btn on" id="tools-toggle" aria-label="工具">
+        <svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <div id="tools-list">
+        <button class="rl-btn on" data-tool="pen" aria-label="钢笔"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l.8-3.2L16.2 5.4a2 2 0 0 1 2.8 0l-.4-.4a2 2 0 0 1 0 2.8L7.2 19.2 4 20z"/></svg></button>
+        <button class="rl-btn" data-tool="ai" aria-label="AI 笔（写给 AI · 圈点提问）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21l.7-2.8L12 9.9l2.1 2.1L5.8 20.3 3 21z"/><path d="M17.5 2.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg></button>
+        <button class="rl-btn" data-tool="hi" aria-label="高亮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l-1 4h8M8.5 14.5l7-7 3 3-7 7h-3v-3z"/><path d="M3 21h18" opacity=".4"/></svg></button>
+        <button class="rl-btn" data-tool="er" aria-label="橡皮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16l8.5-8.5a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8L12 18H8l-2-2z"/><path d="M5 21h14" opacity=".4"/></svg></button>
+        <button class="rl-btn" data-tool="hand" aria-label="手型"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-1.5a4 4 0 0 1-3-1.4L5 16.5a1.5 1.5 0 0 1 2.3-2L8 15.3"/></svg></button>
+        <div class="rl-sep"></div>
+        <button class="rl-btn dim" data-act="undo" aria-label="撤销"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 6L3 10l4 4"/><path d="M3 10h11a6 6 0 1 1 0 12h-4"/></svg></button>
+      </div>
+    </div>
 
     <div class="rl-spacer"></div>
-
-    <button class="rl-btn dim" aria-label="AI 洞察">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>
-    </button>
-    <button class="rl-btn dim" id="rl-collapse" aria-label="收起工具栏">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
-    </button>
+    <button class="rl-btn dim" id="rl-ai" aria-label="AI 洞察"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg></button>
+    <button class="rl-btn dim" id="rl-collapse" aria-label="收起导航脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
   </nav>
+  <div id="m-tab" aria-label="展开导航脊"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg><span class="rl-tab-badge" id="rl-meet-tab-badge" hidden></span></div>
 
-  <div id="m-tab" aria-label="展开工具栏">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
-  </div>
+  <!-- 全局提示（会议开始等跨屏幕提醒）：固定容器预置，运行时只改 hidden/innerHTML，避免 append 到 body 触发整屏 e-ink 刷新 -->
+  <div id="m-toast-root" hidden aria-live="polite"></div>
 
+  <!-- ════ 内容区 ════ -->
   <main id="m-canvas">
-    <div id="m-page"></div>
-    <div id="m-pageind">1 / 1</div>
-  </main>
 
+    <!-- 阅读 -->
+    <section class="surf" id="surf-read">
+      <div class="rv" id="rv-new">
+        <div id="diary-bar">
+          <span id="diary-title" contenteditable="true" spellcheck="false">未命名</span>
+          <span class="dsp"></span>
+          <button id="view-toggle" class="vt" aria-label="重排/原版">重排</button>
+          <button id="pg-prev" class="pgbtn" aria-label="上一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+          <span id="pg-ind">1/1</span>
+          <button id="pg-next" class="pgbtn" aria-label="下一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+        </div>
+        <div id="stage-wrap"><div id="stage"><canvas id="page-layer"></canvas><div id="diary-lines"></div><canvas id="ink-layer"></canvas></div></div>
+        <div id="whisper-layer"></div>
+        <div id="reader" hidden></div>
+      </div>
+
+      <div class="rv" id="rv-books">
+        <div class="vhead"><h1>书籍</h1><span class="cnt">4 本</span></div>
+        <div class="vbody"><div class="grid">
+          <div class="bcard"><span class="spine"></span><div class="bt">注意力与工作记忆</div><div class="bm">PDF · 248 页<br/>读到 62 页</div></div>
+          <div class="bcard"><span class="spine"></span><div class="bt">RK3588 技术手册</div><div class="bm">PDF · 1140 页<br/>读到 30 页</div></div>
+          <div class="bcard"><span class="spine"></span><div class="bt">端云协同 v3</div><span class="tag">HTML→PDF</span><div class="bm">9 页 · 未开始</div></div>
+          <div class="bcard"><span class="spine"></span><div class="bt">深度工作</div><div class="bm">PDF · 302 页<br/>读完</div></div>
+          <div class="bcard imp" id="imp-card"><div class="pl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg></div><div class="il">导入文件</div><div class="is">PDF · HTML · 图片</div></div>
+        </div></div>
+      </div>
+
+      <div class="rv" id="rv-diary">
+        <div class="vhead"><h1>日记</h1><span class="cnt">5 篇</span></div>
+        <div class="vbody">
+          <div class="drow" data-open><div class="dd">6.26<span class="wk">周四</span></div><div class="dc"><div class="dt">Why does attention collapse under load? — 注意力 ≈ 带宽，不是开关</div><div class="dm">3 段 · 12 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>3</div></div>
+          <div class="drow" data-open><div class="dd">6.25<span class="wk">周三</span></div><div class="dc"><div class="dt">把识别当"手写 vs 画"的类型分类器，几何只判 markup</div><div class="dm">2 段 · 7 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>2</div></div>
+          <div class="drow" data-open><div class="dd">6.24<span class="wk">周二</span></div><div class="dc"><div class="dt">chunk before you try to hold. 先分块，再去记。</div><div class="dm">1 段 · 4 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>1</div></div>
+          <div class="drow" data-open><div class="dd">6.22<span class="wk">周日</span></div><div class="dc"><div class="dt">时间脊几乎白捡——每笔本就带 abs_timestamp</div><div class="dm">2 段 · 9 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>2</div></div>
+          <div class="drow" data-open><div class="dd">6.20<span class="wk">周五</span></div><div class="dc"><div class="dt">surface 要从 "PDF 页" 上抬成 "可标注的表面"</div><div class="dm">1 段 · 5 笔</div></div><div class="ins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 1 4 10.5c-.6.6-1 1.2-1 2.5H9c0-1.3-.4-1.9-1-2.5A6 6 0 0 1 12 3z"/></svg>1</div></div>
+        </div>
+      </div>
+
+      <div class="rv" id="rv-open"><div class="paper"><div class="pg">
+        <div class="backbar" id="open-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>日记</div>
+        <div class="blk" style="margin-top:18px"><div class="hw">Why does attention</div><div class="hw">collapse under load?</div><div class="whisper">A working-memory limit — when items exceed ~4 chunks, retrieval competes and accuracy drops. You circled <span class="wq">"load"</span> twice; want the Cowan vs. Miller framing?</div></div>
+        <div class="blk"><div class="hw cn">注意力 ≈ 带宽，不是开关</div><div class="whisper">把它当一条会被占满的通道，而不是"集中/不集中"。下一页可以试 dual-task 那张图。</div></div>
+        <div class="blk"><div class="hw">— so: chunk before you</div><div class="hw">try to hold.</div></div>
+      </div><div class="foot">日记 · 6.26　·　第 3 页</div></div></div>
+    </section>
+
+    <!-- ════ 会议 ════ -->
+    <section class="surf" id="surf-meet">
+
+      <!-- home -->
+      <div class="mview" id="mv-home"></div><!-- renderHome 全量填充（清掉静态假数据占位·阶段②） -->
+
+      <!-- ws 群页已删（单页面收敛·阶段②）：群成员/动态/三桶对「参加会议」价值低 → 会议统一走 home 列表 -->
+
+      <div class="mview" id="mv-detail"></div><!-- renderDetail 全量填充（清掉静态假数据占位·阶段②） -->
+
+      <!-- WS2-C 会后记录（转写句列 + 手写档案·纯文本·JS 填充 #recap-body） -->
+      <div class="mview" id="mv-recap">
+        <div class="mtop"><span class="bk" id="recap-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti" id="recap-title">会后记录</span><span class="sp"></span><button class="hbtn" id="recap-export-btn" hidden>导出到 Obsidian</button></div>
+        <div id="recap-body"></div>
+      </div>
+
+      <!-- 会中工作台（白板=可写画布搬进 #mtg-stage-host；时间脊=点底部 chip 切显隐；右缘半掩群资料栏）-->
+      <div class="mview" id="mv-live">
+        <div class="mtop"><span class="bk" id="mlive-back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></span><span class="ti" id="mlive-title">会议</span><span id="mtg-clk"><span class="dot"></span>00:00</span></div>
+        <div id="mtg-note-bar">
+          <span id="mtg-note-title" contenteditable="true" spellcheck="false">会议手记</span>
+          <span class="dsp"></span>
+          <button id="mtg-note-prev" class="pgbtn" aria-label="上一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+          <span id="mtg-note-ind">1/1</span>
+          <button id="mtg-note-next" class="pgbtn" aria-label="下一页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+        </div>
+        <div id="mtg-stage-host"></div>
+        <div id="mtg-spine" hidden></div>
+        <div id="mtg-chip"><span id="mtg-chip-n">0 笔</span> · 按会议时刻记录（点开看时间脊）</div>
+        <aside id="mtg-side">
+          <div class="tab" id="mtg-side-tab">资料 0</div>
+          <div class="shd">可能有用的文件</div>
+          <div class="sls" id="mtg-side-list"></div>
+        </aside>
+      </div>
+
+    </section>
+
+    <!-- ════ dev 三页 ════ -->
+    <section class="surf" id="surf-dev">
+
+      <!-- AI 会话 -->
+      <div class="dv" id="dv-chat">
+        <div class="dhead"><h1>AI 会话</h1><span class="sp"></span>
+          <span class="dsel">注意力与工作记忆 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+          <button class="dic" aria-label="刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-1 5"/><path d="M20 5v6h-6"/></svg></button>
+          <button class="dic" aria-label="清空"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9 7V5h6v2M7 7l1 13h8l1-13"/></svg></button>
+        </div>
+        <div class="dbody">
+          <details class="grp" open>
+            <summary><span class="gc">第 62 页</span><span class="gm">2 轮 · 14:32</span><span class="gp">工作记忆容量为什么是 4±1…</span></summary>
+            <div class="gbody">
+              <div class="turn">
+                <div class="tlab">发送给 AI 的内容 · 第 62 页 <span class="trg">长停顿综合</span><span class="tt">14:32</span></div>
+                <div class="ucard">圈了「工作记忆容量」+ 手写「为什么是 4±1 而不是 7±2?」</div>
+                <div class="abub">Miller 的 7±2 是 1956 年的估计；Cowan(2001) 用排除复述/组块的实验把纯容量收到约 4。你圈的这处正是 Cowan 的下界——两套范式测的不是同一个东西。
+                  <details class="think"><summary>思考过程</summary><div>用户在质疑经典数字，要分清 Miller（信息量·含组块）与 Cowan（纯存储·排除复述）两套范式，别混着答。</div></details>
+                  <div class="ameta">#1 · claude-sonnet-4-6</div>
+                </div>
+              </div>
+              <div class="turn">
+                <div class="tlab">发送给 AI 的内容 · 第 62 页 <span class="trg hw">手写定向</span><span class="tt">14:28</span></div>
+                <div class="ucard">手写「组块能不能突破这个上限?」</div>
+                <div class="abub">能——组块把多个项打包成一个单位，容量按"块"算。所以"4"是块数不是项数，熟练度越高每块装得越多。<div class="ameta">#2 · claude-sonnet-4-6</div></div>
+              </div>
+            </div>
+          </details>
+          <details class="grp">
+            <summary><span class="gc">第 58 页</span><span class="gm">1 轮 · 14:10</span><span class="gp">（折叠为自我笔记）</span></summary>
+            <div class="gbody"><div class="turn folded">🚫 折叠为「写给自己的笔记」——这处手写没有指向性、不触发回复，留作下次综合。</div></div>
+          </details>
+        </div>
+      </div>
+
+      <!-- 采集取证 -->
+      <div class="dv" id="dv-hmp">
+        <div class="dhead"><h1>采集取证</h1>
+          <div class="seg"><button class="on" data-seg="hmp">HMP 取证</button><button data-seg="obj">对象</button></div>
+          <span class="sp"></span>
+          <span class="dsel">注意力与工作记忆 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
+        </div>
+        <div class="dbody">
+          <div id="seg-hmp">
+            <p class="dnote">逐笔 HMP 取证——按页分组，最新页默认展开。共 12 笔。</p>
+            <div class="hcard">
+              <div class="hch"><span class="mode anchor">锚定原文</span><span class="act">圈</span><span class="feat">markup</span><span class="hm">命中区 · 0.92 · v3 · 第62页</span></div>
+              <div class="hcb"><div class="himg">合成图</div><div class="hf"><div><b>所标内容</b>工作记忆容量</div><div><b>命中对象</b><span class="lk">obj_12</span></div><div><b>读出</b>为什么是 4±1?</div><div><b>区域</b>[0.12, 0.34, 0.56, 0.41]</div></div></div>
+            </div>
+            <div class="hcard">
+              <div class="hch"><span class="mode">自身内容</span><span class="act">手写</span><span class="feat">handwriting</span><span class="hm">空 · 0.88 · v3 · 第62页</span></div>
+              <div class="hcb"><div class="himg">合成图</div><div class="hf"><div><b>所标内容</b>—</div><div><b>命中对象</b>空（自身内容）</div><div><b>读出</b>组块能不能突破上限?</div><div><b>区域</b>[0.18, 0.52, 0.70, 0.59]</div></div></div>
+            </div>
+          </div>
+          <div id="seg-obj" hidden>
+            <p class="dnote">本页 SurfaceIndex 对象表 · surface=article · 共 38 个 · text 34 · image 4</p>
+            <table class="otbl"><thead><tr><th>id</th><th>type</th><th>bbox</th><th>text</th><th>命中</th></tr></thead><tbody>
+              <tr><td>obj_12</td><td>text</td><td>.12,.34</td><td>工作记忆容量…</td><td><span class="mc">圈</span></td></tr>
+              <tr><td>obj_13</td><td>text</td><td>.12,.42</td><td>Cowan(2001)…</td><td></td></tr>
+              <tr><td>obj_27</td><td>text</td><td>.12,.66</td><td>组块（chunk）…</td><td><span class="mc">写</span></td></tr>
+              <tr><td>obj_30</td><td>image</td><td>.55,.20</td><td>—</td><td></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 设置 -->
+      <div class="dv" id="dv-set">
+        <div class="dhead"><h1>设置</h1><span class="sp"></span><button class="hbtn" id="reset-btn">恢复默认设置</button></div>
+        <div class="dbody">
+          <div class="sgrp-h">界面</div>
+          <div class="srow"><div class="sl"><div class="sn">日记稿纸线 <span class="sbadge eff">生效</span></div><div class="sd">空白页横线</div></div><input type="checkbox" class="sck" id="set-lines" checked></div>
+          <div class="sgrp-h">核心 · 影响真实行为</div>
+          <div class="srow"><div class="sl"><div class="sn">推理模型 <span class="sbadge eff">生效</span></div><div class="sd">答问 · 分类器默认</div></div><select class="sctl"><option>kimi-k2.6</option><option>claude-opus-4-8</option><option>claude-sonnet-4-6</option><option>gemini-3.5-flash</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">识别分类器模型 <span class="sbadge eff">生效</span></div><div class="sd">/api/interpret</div></div><select class="sctl"><option>继承</option><option>端侧手写·OpenVINO</option><option>claude-sonnet-4-6</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">上下文分类器模型 <span class="sbadge eff">生效</span></div><div class="sd">/api/classify-context</div></div><select class="sctl"><option>端侧规则·徐</option><option>继承</option><option>kimi-k2.6</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">送合成图给模型 <span class="sbadge eff">生效</span></div></div><input type="checkbox" class="sck"></div>
+          <div class="srow"><div class="sl"><div class="sn">输出落点 <span class="sbadge eff">生效</span></div></div><select class="sctl"><option>右侧留白</option><option>贴正文浮动</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">手势响应（总开关）<span class="sbadge eff">生效</span></div></div><input type="checkbox" class="sck" checked></div>
+          <div class="srow"><div class="sl"><div class="sn">长停顿综合阈值 <span class="sbadge eff">生效</span></div><div class="sd">10–600 秒</div></div><input type="number" class="sctl" value="90"></div>
+          <div class="srow"><div class="sl"><div class="sn">重排引擎 <span class="sbadge eff">生效</span></div></div><select class="sctl"><option>启发式+模型精修</option><option>AI 结构重建</option><option>仅启发式</option><option>VLM 看图重写</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">重排模型 <span class="sbadge eff">生效</span></div></div><select class="sctl"><option>gemini-3.1-flash-lite</option><option>kimi-k2.6</option><option>claude-sonnet-4-6</option></select></div>
+          <div class="srow"><div class="sl"><div class="sn">重排前置（渲染即急算）<span class="sbadge eff">生效</span></div></div><input type="checkbox" class="sck"></div>
+
+          <div class="sgrp-h">调试叠层</div>
+          <div class="srow"><div class="sl"><div class="sn">显示 bbox 叠层 <span class="sbadge">调试</span></div><div class="sd">对象框 + 命中高亮 + HMP 浮窗</div></div><input type="checkbox" class="sck"></div>
+          <div class="srow"><div class="sl"><div class="sn">显示组装区域 <span class="sbadge">调试</span></div><div class="sd">手写实时框</div></div><input type="checkbox" class="sck"></div>
+          <div class="srow"><div class="sl"><div class="sn">显示关联框 <span class="sbadge">调试</span></div><div class="sd">综合后虚框</div></div><input type="checkbox" class="sck"></div>
+
+          <details class="sfold"><summary>历史 / 弱效</summary>
+            <div class="srow"><div class="sl"><div class="sn">预排版前 N 页 <span class="sbadge weak">弱效</span></div><div class="sd">仅下次导入生效</div></div><input type="checkbox" class="sck"></div>
+            <div class="srow" style="border-bottom:none"><div class="sl"><div class="sn">预排版页数 <span class="sbadge weak">弱效</span></div></div><input type="number" class="sctl" value="3"></div>
+          </details>
+          <details class="sfold"><summary>诊断</summary>
+            <div class="diag">
+              <div class="dl"><b>坐标自测</b><span>✓ 5 点 · maxErr 0.3 · zoom 100%</span></div>
+              <div class="dl"><b>预处理</b><span>完成</span></div>
+              <div class="dl"><b>识别延迟 P50</b><span>last 412ms · P50 380ms</span></div>
+              <div class="dl"><b>Trace</b><span>本会话 142 条 · <a>下载 JSONL</a></span></div>
+            </div>
+          </details>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
 </div>
 
-<script>
-  document.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => {
-    document.querySelectorAll('[data-tool]').forEach(x => x.classList.remove('on'));
-    b.classList.add('on');
-  }));
-  document.getElementById('rl-collapse').addEventListener('click', () => document.body.classList.add('rail-off'));
-  document.getElementById('m-tab').addEventListener('click', () => document.body.classList.remove('rail-off'));
-</script>
+<!-- 文件浏览器 -->
+<div class="scrim" id="scrim-files"></div>
+<div id="files">
+  <div class="fh"><span class="ti">导入文件</span><span class="x" id="files-x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></div>
+  <div class="crumb">/sdcard/Download</div>
+  <div class="fls">
+    <div class="frow dir"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span><div><div class="nm">书籍</div><div class="mt">12 项</div></div><span class="go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">注意力与工作记忆.pdf</div><div class="mt">2.4 MB · 6.24</div></div></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">端云协同_v3.html</div><div class="mt">82 KB · 可转 PDF · 6.25</div></div></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/></svg></span><div><div class="nm">RK3588_datasheet.pdf</div><div class="mt">9.1 MB · 6.20</div></div></div>
+    <div class="frow"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 14l4-3 4 3 4-4 4 3"/></svg></span><div><div class="nm">扫描笔记_0612.jpg</div><div class="mt">1.8 MB · 单页转 PDF</div></div></div>
+  </div>
+</div>
+
+<!-- AI 洞察抽屉（#rl-ai 拉出·复用 surface/insight-panel.ts）-->
+<div class="scrim" id="scrim-insight"></div>
+<aside id="m-insight">
+  <div class="ih"><h2>本页洞察</h2><span class="c" id="m-insight-count"></span><span class="x" id="insight-x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></div>
+  <div id="m-cards"><div class="empty-hint">这一页还没有 AI 洞察。圈划 + 手写问题后，AI 的旁注会在这里留存（收下 / 散去率）。</div></div>
+  <div id="m-panel-foot"></div>
+</aside>
+
+<!-- 导入用隐藏文件选择器（dev/preview 走它；电纸屏设备需 WebView 内文件浏览器=InkLoopFiles 原生桥，见 mobile-main） -->
+<input type="file" id="m-file-in" accept="application/pdf,.pdf" style="display:none">
+
+<script type="module" src="/src/mobile-main.ts"></script>
 </body>
 </html>

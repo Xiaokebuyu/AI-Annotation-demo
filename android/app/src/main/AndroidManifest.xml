@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 无线同步链路桥（InkLoopNetBridge）：dev 页读 WiFi 状态（IP/开关）。 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- WebView 内文件浏览器（InkLoopFilesBridge）枚举/读 /sdcard 下的书：Android 11+ 需「所有文件访问」，旧系统用 READ_EXTERNAL_STORAGE。 -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="false"
@@ -16,9 +21,23 @@
             android:name="com.inkloop.app.MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout">
+
+            <!-- 显示模式：auto=ONYX/BOOX 直显(WebView 填满+可横屏)、其余设备走 IT8951 PixelCopy 竖框。
+                 可改 direct / it8951 强制指定（见 MainActivity.resolveDisplayMode）。 -->
+            <meta-data android:name="com.inkloop.DISPLAY_MODE" android:value="auto" />
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- 电纸屏设备形态：可作为 HOME 启动器（应用即桌面）。开机自启 + 按 home 回到 InkLoop，
+                 别的 app 难以长期占前台。启用方式（主机侧，可逆）：
+                   cmd package set-home-activity com.inkloop.app/.MainActivity   # 设为默认桌面
+                   cmd package set-home-activity com.android.launcher3/.uioverrides.QuickstepLauncher  # 改回 -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>
