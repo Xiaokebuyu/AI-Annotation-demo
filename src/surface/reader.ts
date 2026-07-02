@@ -280,10 +280,23 @@ function blockContentOrigin(ref: BlockRef): { left: number; top: number } {
   return { left: rr.left - er.left, top: rr.top - er.top + el.scrollTop };
 }
 
+/** 布局未变时的显示真相：直接用落笔时存的 surface_points（#reader 内容 px·零投影·像素级恒等）。
+ *  老笔的 canonical 是"当时 pageCss 除数"的近似——除数随原版视图变（真机实测同页两笔除数 61 vs 285），
+ *  重开后用新 pageCss 反乘 → 整体偏上/偏移、个别飞出画布=「重开丢墨迹/定位偏上」的病根。
+ *  surface_points + reader_layout_id 相同 ⇒ 文字布局像素级一致 ⇒ 原点串就是真相，完全绕开 canonical。 */
+function bySurfacePoints(ps: PersistedStroke): ReaderStroke | null {
+  if (!ps.surface_points?.length || ps.surface_coord_space !== 'reader_px') return null;
+  if (!ps.reader_layout_id || ps.reader_layout_id !== ensureReaderLayoutId()) return null;
+  return { tool: persistedTool(ps), points: ps.surface_points.map((p) => ({ x: p.x, y: p.y, pressure: p.pressure, t: p.t })) };
+}
+
 /** 把一条持久笔（页归一化点串）反投影回所属重排块的当前屏幕位置——onPenUp 映射的逆。
  *  等比：用 pageCss 这个稳定页尺度做除数（**不**按块宽高分别拉伸）→ 圈仍是圈、不畸变；
- *  位置锚到块左上、随文本换行近似（不保证精准套原字，但保形）。 */
+ *  位置锚到块左上、随文本换行近似（不保证精准套原字，但保形）。
+ *  ⭐同布局优先走 bySurfacePoints（零投影恒等）；这里只服务"布局已变"的跨布局近似。 */
 function projectPersistedStroke(ps: PersistedStroke, ref: BlockRef): ReaderStroke {
+  const bySurf = bySurfacePoints(ps);
+  if (bySurf) return bySurf;
   const o = blockContentOrigin(ref);
   const tool = persistedTool(ps);
   // 等比回投(reader 同面·老数据 / 无块rect兜底)：用全局 pageCss——与老采集端除数一致、round-trip 自洽、保形(圈仍是圈)。
@@ -708,7 +721,7 @@ function projectPersistedMark(m: PersistedMark, fallback: BlockRef | null): Read
     // refs 首行(那会把 reader 原笔搬位/拉伸=用户实测"重排笔记比例失真")。page 捕获的仍走 projectSpan(跨面无原 reader 点·锚首行)。
     if (strokes.length && strokes.every((ps) => (ps.capture_surface ?? 'page') === 'reader')) {
       return strokes
-        .map((ps) => { const blk = (ps.anchor_runs?.length ? resolveBlockByRuns(ps.anchor_runs) : null) ?? fallback; return blk ? projectPersistedStroke(ps, blk) : null; })
+        .map((ps) => { const blk = (ps.anchor_runs?.length ? resolveBlockByRuns(ps.anchor_runs) : null) ?? fallback; return blk ? projectPersistedStroke(ps, blk) : bySurfacePoints(ps); })
         .filter((s): s is ReaderStroke => !!s);
     }
     return projectSpan(strokes, located); // page 捕获的圈/箭头/手写：整笔锚首行并集
@@ -722,7 +735,7 @@ function projectPersistedMark(m: PersistedMark, fallback: BlockRef | null): Read
   return strokes
     .map((ps) => {
       const blk = (ps.anchor_runs?.length ? resolveBlockByRuns(ps.anchor_runs) : null) ?? fallback;
-      return blk ? projectPersistedStroke(ps, blk) : null;
+      return blk ? projectPersistedStroke(ps, blk) : bySurfacePoints(ps); // 块解析失败不再静默丢笔：同布局仍有 surface 恒等可画
     })
     .filter((s): s is ReaderStroke => !!s);
 }
