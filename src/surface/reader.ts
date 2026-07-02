@@ -1143,12 +1143,19 @@ function contentPoint(e: PointerEvent): { x: number; y: number } {
 function hitBlock(pts: { x: number; y: number }[]): { ref: BlockRef; left: number; top: number } | null {
   const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
   const er = el.getBoundingClientRect();
+  let best: { ref: BlockRef; left: number; top: number } | null = null;
+  let bestD = Infinity;
   for (const ref of blockRefs) {
     const r = ref.el.getBoundingClientRect();
     const a = r.top - er.top + el.scrollTop;
     if (cy >= a - 6 && cy <= a + r.height + 6) return { ref, left: r.left - er.left, top: a };
+    const d = cy < a ? a - cy : cy - (a + r.height); // 到块竖直区间的距离
+    if (d < bestD) { bestD = d; best = { ref, left: r.left - er.left, top: a }; }
   }
-  return null;
+  // 没压中任何块（段落间隙/页边/末段之下）→ 就近锚最近的块，**绝不丢笔**。旧行为返回 null 让 onPenUp
+  // 整笔静默扔掉——「写在行间/页边的字 live 看得见（OSD 画的）、重开后消失一半」的病根（真机实锤：
+  // "为什么不流行了？"约 30 笔只存活 15 笔、识别成乱码"少，流行。"）。行间/页边笔记语义上本就属于最近的段落。
+  return best;
 }
 
 // 组装近邻外扩半径（near_bbox 同坐标=按 #reader 列宽归一）：按命中块的 DOM 行高折算，让"连续写一行字"的相邻字
