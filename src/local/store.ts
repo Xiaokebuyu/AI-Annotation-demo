@@ -409,9 +409,12 @@ function entriesByContext<T extends { seq: number }>(storeName: string, contextI
 
 /** 追加一条 mark 条目（含 tombstone）。store 填 entry_id/seq/created_at。 */
 export function appendMarkEntry(m: Omit<PersistedMark, 'entry_id' | 'seq' | 'created_at'>): Promise<void> {
-  const rec: PersistedMark = { schema_version: MARK_ENTRY_SCHEMA_VERSION, ...m, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
+  // schema_version 放 spread 之后：条目版本戳=写入时刻的当前版本。折叠 revision（复制旧 base 改字段再 append）
+  // 若把 base 的旧版本带进来，不该盖过当前版本。
+  const rec: PersistedMark = { ...m, schema_version: MARK_ENTRY_SCHEMA_VERSION, entry_id: shortId('ent'), seq: nextSeq(), created_at: new Date().toISOString() };
   // C6：标注落账本同时排入向量库 seam（今 no-op）——真向量库接上时历史数据已在库，免冷启动 backfill。
-  if (!rec.is_tombstone && rec.marked_text) {
+  // ai_eligible:false 的内容笔（含普通笔圈画识别补的 marked_text）不进：向量召回是 AI 面，普通笔=纯内容不进 AI。
+  if (!rec.is_tombstone && rec.marked_text && rec.ai_eligible !== false) {
     void vectorStore.upsert({ id: rec.entry_id, bookId: rec.document_id, pageIndex: rec.page_index, text: rec.marked_text, anchorRefs: rec.hmp?.target_object_refs });
   }
   return appendEntry(MARKS, rec);

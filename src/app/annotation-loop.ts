@@ -165,6 +165,9 @@ function persistContentStroke(evt: AnnotationEvent, stroke: Stroke): void {
     raw_ref: settings.bedrock ? bedrockMarkBoundary(bookId) : undefined,
     ...(evt.anchor_runs?.length ? { reflow_anchor_runs: evt.anchor_runs } : {}),
   });
+  // 圈画识别（导出增强·不接入 AI）：异步判定这笔是不是"圈选"，是则追加折叠 revision 补 marked_text。
+  // 失败/不命中静默——内容 mark 本体上面已落库，这里只做增强。
+  void maybeResolveContentMarkup(evt, stroke, markId).catch(() => undefined);
 }
 
 /** 区域收口的原因（进 dev 通道，定位"连续书写被切到新区"）。 */
@@ -365,9 +368,21 @@ export async function findContentEnclosureIndex(
   const content = marks.filter((m) => m.page_id === pid && m.ai_eligible === false && m.bbox[2] > 0 && m.bbox[3] > 0);
   if (!content.length) return -1;
   for (const { e, i } of cand) {
-    if (content.some((m) => pointInPolygon(m.bbox[0] + m.bbox[2] / 2, m.bbox[1] + m.bbox[3] / 2, e.stroke_points))) return i;
+    const cutoff = cutoffOf(e);
+    if (content.some((m) => beforeCutoff(m, cutoff)
+      && pointInPolygon(m.bbox[0] + m.bbox[2] / 2, m.bbox[1] + m.bbox[3] / 2, e.stroke_points))) return i;
   }
   return -1;
+}
+
+/** 内容 mark 是否落在某时间截点之前（含无时间戳的老条目·宽进）。圈选类判定用：圈只选"画圈当时"已有的内容。 */
+function beforeCutoff(m: { abs_timestamp: number }, cutoff?: number): boolean {
+  return cutoff == null || !Number.isFinite(m.abs_timestamp) || m.abs_timestamp <= cutoff;
+}
+/** 事件的墙钟时刻（ms）：作圈选判定的时间截点。 */
+function cutoffOf(e: AnnotationEvent): number | undefined {
+  const t = Date.parse(e.created_at);
+  return Number.isFinite(t) ? t : undefined;
 }
 
 function bboxCorners(b: NormBBox): Pt[] {
@@ -409,11 +424,16 @@ function bboxIntersectsPolygon(b: NormBBox, poly: AnnotationEvent['stroke_points
  * 命中不再只看 bbox 中心：中心/角点/圈线相交/圈在 bbox 内都算，避免用户圈到普通墨边缘却漏掉。
  * 识别空也保留被圈墨迹图，提交阶段会把图交给主模型兜底理解。
  */
-async function recognizeEnclosedInk(polygon: AnnotationEvent['stroke_points'], pid: string, bookId: string): Promise<EnclosedInk | null> {
+async function recognizeEnclosedInk(
+  polygon: AnnotationEvent['stroke_points'], pid: string, bookId: string,
+  opts: { excludeMarkId?: string; maxAbsTimestamp?: number } = {},
+): Promise<EnclosedInk | null> {
   await waitContentMarks(); // 等刚写的普通墨真落库（否则"写完就圈"读到旧账本·圈不到）
   let marks;
   try { marks = await getFoldedMarks(bookId); } catch { return null; }
   const enc = marks.filter((m) => m.page_id === pid && m.ai_eligible === false && m.bbox[2] > 0 && m.bbox[3] > 0
+    && m.mark_id !== opts.excludeMarkId // 普通笔圈画识别：圈这笔自己也是 ai_eligible:false 内容 mark，别把圈自身当被圈内容
+    && beforeCutoff(m, opts.maxAbsTimestamp) // 圈选=选择**画圈当时**已有的内容：识别在途时圈内新写的字不算（否则行为随云端延迟不确定）
     && bboxIntersectsPolygon(m.bbox, polygon))
     .sort((a, b) => (a.abs_timestamp - b.abs_timestamp) || (a.seq - b.seq));
   if (!enc.length) return null;
@@ -435,6 +455,75 @@ async function recognizeEnclosedInk(polygon: AnnotationEvent['stroke_points'], p
   } catch {
     return { text: '', bbox: [x0, y0, x1 - x0, y1 - y0], ink, points, count: enc.length };
   }
+}
+
+/**
+ * 普通笔「圈画识别」（导出增强·不接入 AI）：内容笔的单笔强圈若真圈住了东西——正文文字（captureMark→resolveTarget
+ * 命中·纯本地零调用）或本页已落库的普通墨迹（recognizeEnclosedInk 识别成文字）——就给这条内容 mark 追加一条
+ * 折叠 revision，补上 marked_text/feature markup。导出侧（builder：带文本的内容 mark 不聚簇、单独成 KO，
+ * markup→excerpt·正文=所标文字）即可渲出「圈了『xxx』」，而不是一段无字笔迹 SVG。
+ * ai_eligible 保持 false：不进 session、不触发 AI 回应——只是给账本补语义，与 AI 管线无关。
+ * 防误伤（普通书写里圈形笔画很常见）：deliberateCircleSize 尺寸门滤掉字级小圈（口/回/O——
+ * classifyStrokeFeature 对圈**没有**字级尺寸门，字级小圈也判 markup/circle·合成测试实测），
+ * 「必须真圈住内容」的语义前提兜底——汉字包围结构外框先画、圈不住"之前"的笔（与 findContentEnclosureIndex 同理）。
+ * 会议手记同一条白板路径，会议场景零改动复用。
+ */
+/** 刻意圈选的最小尺寸门（与 charH 同空间·canonical/页归一化）：字形笔画（口/日/O）近似方形≈1 字高，
+ *  刻意的圈要么宽（圈一个词 ≥2.5 字高）要么高（圈多行 ≥2 字高）。挡「行间写包围结构字→误当圈选、
+ *  把印刷字误产成 excerpt」。白板无字高（localCharHeight=0）→ 按页 2% 兜底。 */
+export function deliberateCircleSize(bbox: NormBBox, charH: number): boolean {
+  const h = charH > 0 ? charH : 0.02;
+  return bbox[2] >= h * 2.5 || bbox[3] >= h * 2;
+}
+async function maybeResolveContentMarkup(evt: AnnotationEvent, stroke: Stroke, markId: string): Promise<void> {
+  const s = scoredOfEvent(evt);
+  if (s.type !== 'circle' || s.score < 0.45 || evt.stroke_points.length < 8) return; // 与 AI 笔圈选同格（手绘椭圆常在 0.5 上下）
+  const pid = evt.page_id;
+  const bookId = state.documentId ?? 'book';
+  // 尺寸门与 resolveRegion 同一套标尺：reader 笔用命中块行高换算进 canonical，其余用页字高。
+  const clsDim = readerClsDim([evt]);
+  const charH = clsDim && evt.reader_line_h ? evt.reader_line_h / clsDim : localCharHeight(state.surfaceIndex);
+  if (!deliberateCircleSize(evt.geometry.bbox, charH)) return; // 字级小圈（口/日/O）：是书写不是圈选
+  const geom = classifyStrokeFeature([s], [evt.geometry.bbox], evt.stroke_points, evt.geometry.bbox, charH, clsDim, clsDim);
+  if (geom.type !== 'markup' || geom.raw.templateType !== 'circle') return; // 非圈模板（并批降级等）：不是圈选手势
+  if (state.pageId !== pid) return; // 已翻页：取证上下文不在了，放弃（内容 mark 本体已完好落库）
+  const repr: AnnotationEvent = {
+    ...evt, event_type: s.type,
+    // 白板(日记)零画布：从点串离屏栅格化（与 resolveRegion 同款门控）；原版/PDF 照常 grabLayers。
+    ...(state.surfaceType === 'whiteboard' ? { ink_ref: pageInkRefOf([stroke]) } : {}),
+    reflow_ink_ref: reflowInkRefOf([evt], [stroke]),
+  };
+  // markup 路径不送手写识别；resolveTarget 命中正文=纯本地。圈到扫描页/图区（结构层无字）时 captureMark
+  // 内部的 enrichHmp 会走 OCR 兜底（端侧优先、否则 /api/ocr-vlm）——读出的 text_hint 也当识别结果收下，
+  // 扫描版圈选照样出文本；白板（self_content+blank_region）不触发 OCR，成本与 AI 笔圈选同级。
+  const cap = await captureMark(repr, geom, s.score);
+  const hmp = cap.hmp;
+  let markedText = cap.markedText.trim() || (hmp?.text_hint ?? '').trim();
+  if (!markedText) {
+    const enc = await recognizeEnclosedInk(evt.stroke_points, pid, bookId, { excludeMarkId: markId, maxAbsTimestamp: cutoffOf(evt) });
+    if (!enc?.text) return; // 没圈住正文也没圈住墨迹（或识别不出）：保持纯内容笔原样，不折腾账本
+    markedText = enc.text;
+    if (hmp) {
+      hmp.text_hint = enc.text;
+      hmp.confidence = Math.max(hmp.confidence, 0.75);
+    }
+  }
+  await waitContentMarks(); // 基础条目先落队，再追加折叠 revision
+  let folded;
+  try { folded = await getFoldedMarks(bookId); } catch { return; }
+  const base = folded.find((m) => m.mark_id === markId);
+  if (!base) return; // 识别期间被擦除（tombstone）→ 别复活
+  const { entry_id, seq, created_at, ...rest } = base;
+  void appendMarkEntry({
+    ...rest,
+    feature_type: cap.feature.type, feature_confidence: cap.feature.confidence,
+    kind: cap.kind, kind_source: cap.kindSource,
+    scored_type: s.type, scored_score: s.score,
+    hmp: hmp ? { ...hmp, crop_ref: undefined, vector_ref: undefined } : null,
+    marked_text: markedText,
+    source_created_at: base.source_created_at ?? created_at, // 补写 revision 不让导出 created_at（进 content_hash）漂移
+  });
+  gtrace({ page_id: pid, contentMarkup: { mark: markId, score: +s.score.toFixed(2), text: markedText.slice(0, 40) } });
 }
 
 /**
@@ -522,7 +611,7 @@ async function resolveRegion(batch: AnnotationEvent[], strokes: Stroke[], flushI
   // 分类器把关，这里只是让"圈了内容"这件事不再零证据，不会导致乱回应。
   // AI 笔"必回应、跳过分类器"（下面 462 行附近）是另一个功能点，仍按原样保持默认关闭，不受这处影响。
   if (markScored.type === 'circle' && !mark.markedText.trim()) {
-    const enc = await recognizeEnclosedInk(repr.stroke_points, pid, bookId);
+    const enc = await recognizeEnclosedInk(repr.stroke_points, pid, bookId, { maxAbsTimestamp: cutoffOf(repr) });
     if (enc) {
       if (enc.text) mark.markedText = enc.text;
       if (mark.hmp) {
