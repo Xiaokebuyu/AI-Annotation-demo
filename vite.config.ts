@@ -45,10 +45,18 @@ function panelFeishuProxy(env: Record<string, string>): Plugin {
           // 阶段C：与生产 standalone.ts 的 handlePanelFeishu 对齐，dev 也要求有效设备 session。
           const session = await requireDeviceSessionDev(req, res);
           if (!session) return;
+          // 阶段F：会议/妙记数据默认仅自己可见——转发身份头，panel 侧按身份过滤查询结果。
+          const openId = session.feishu_open_id;
+          if (!session.tenant_id || !session.user_id || !openId) return send(409, { error: 'reauth_required' });
+          const userContextHeaders: Record<string, string> = {
+            'x-inkloop-tenant-id': session.tenant_id,
+            'x-inkloop-user-id': session.user_id,
+            'x-inkloop-feishu-open-id': openId,
+          };
           // req.url 是去掉 '/api/panel-feishu' 前缀后的剩余路径（含 query）→ 拼到 panel 的 /api/feishu
           const target = `${BASE}/api/feishu${req.url}`;
           const fwd = (body?: string): void => {
-            const headers: Record<string, string> = { 'x-inkloop-secret': SECRET };
+            const headers: Record<string, string> = { 'x-inkloop-secret': SECRET, ...userContextHeaders };
             if (body !== undefined) headers['content-type'] = String(req.headers['content-type'] || 'application/json');
             fetch(target, { method, headers, body })
               .then(async (r) => { const text = await r.text(); res.statusCode = r.status; res.setHeader('content-type', r.headers.get('content-type') || 'application/json'); res.end(text); })

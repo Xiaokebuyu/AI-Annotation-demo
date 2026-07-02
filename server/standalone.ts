@@ -135,6 +135,18 @@ async function handleInkLoopAuth(req: IncomingMessage, res: ServerResponse): Pro
   } catch (e) { send(502, { error: String((e as Error)?.message || e) }); }
 }
 
+// 阶段F：与阶段D的 feishuUserContextHeaders 同款——panel-feishu 这条代理下所有端点现在都要转发身份
+// （不像阶段D只对docx等少数端点转发，这次是给全部会议/妙记数据加per-user过滤，范围是整条代理）。
+function panelFeishuUserContextHeaders(session: InkLoopSessionContext): Record<string, string> | null {
+  const openId = session.feishu_open_id;
+  if (!session.tenant_id || !session.user_id || !openId) return null;
+  return {
+    'x-inkloop-tenant-id': session.tenant_id,
+    'x-inkloop-user-id': session.user_id,
+    'x-inkloop-feishu-open-id': openId,
+  };
+}
+
 async function handlePanelFeishu(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const send = (code: number, obj: unknown): void => { res.statusCode = code; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); };
   const method = req.method || 'GET';
@@ -150,8 +162,11 @@ async function handlePanelFeishu(req: IncomingMessage, res: ServerResponse): Pro
   if (!PANEL_FEISHU_BASE || !INKLOOP_SHARED_SECRET) return send(503, { error: 'PANEL_FEISHU_BASE / INKLOOP_SHARED_SECRET 未配置' });
   const session = await requireDeviceSession(req, res);
   if (!session) return;
+  // 阶段F：会议/妙记数据默认仅自己可见——这条代理下所有端点都要转发身份，panel 侧按身份过滤查询结果。
+  const userContextHeaders = panelFeishuUserContextHeaders(session);
+  if (!userContextHeaders) return send(409, { error: 'reauth_required' });
   try {
-    const headers: Record<string, string> = { 'x-inkloop-secret': INKLOOP_SHARED_SECRET };
+    const headers: Record<string, string> = { 'x-inkloop-secret': INKLOOP_SHARED_SECRET, ...userContextHeaders };
     let body: string | undefined;
     if (method === 'POST') { body = await readBody(req); headers['content-type'] = String(req.headers['content-type'] || 'application/json'); } // readBody 一次性 decode·中文安全
     const r = await fetch(`${PANEL_FEISHU_BASE}/api/feishu${rest}`, { method, headers, body });
