@@ -196,9 +196,11 @@ export async function collectVaultBundle(
 
   // 概念层（语义跨链·可选）：收齐全部实体的 KO 后跑一遍 LLM 抽概念 → 跨文档桥成概念枢纽。
   // 失败/空不影响其余导出（buildConceptLayer 内部对每条容错·extractFn 失败返 []）。
-  const llmLayer = opts.concepts === false
-    ? undefined
-    : await buildConceptLayer(allKos, makeConceptExtractor({ model: opts.conceptModel }), createConceptKo);
+  // ⚠️默认关（显式传 concepts:true 才开）：LLM 抽取要打内网网关，设备离网时 fetch 挂死会拖垮整个导出，
+  // 而当前消费端基本用不上概念层——先减少一切可能导致导出失败的因素。存储原生拓扑层（零 LLM）不受影响。
+  const llmLayer = opts.concepts === true
+    ? await buildConceptLayer(allKos, makeConceptExtractor({ model: opts.conceptModel }), createConceptKo)
+    : undefined;
 
   const conceptLayer = mergeConceptLayers(storedLayer, llmLayer);
 
