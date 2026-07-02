@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 无线同步链路桥（InkLoopNetBridge）：dev 页读 WiFi 状态（IP/开关）。 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- WebView 内文件浏览器（InkLoopFilesBridge）枚举/读 /sdcard 下的书：Android 11+ 需「所有文件访问」，旧系统用 READ_EXTERNAL_STORAGE。 -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />

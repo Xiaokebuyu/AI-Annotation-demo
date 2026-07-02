@@ -354,6 +354,24 @@ function applyCtl(node: HTMLElement, c: SCtl): void {
   saveSettings();
 }
 
+/** 无线同步链路桥（安卓 InkLoopNetBridge 注入 window.InkLoopNet；桌面 preview/无桥 = null → dev 页整卡隐藏）。 */
+type InkLoopNetApi = { getState(): string; openWifiPanel(): void; openTetherSettings(): void };
+function inkloopNet(): InkLoopNetApi | null {
+  return (window as unknown as { InkLoopNet?: InkLoopNetApi }).InkLoopNet ?? null;
+}
+function refreshNetStatus(): void {
+  const net = inkloopNet();
+  const node = document.getElementById('dv-net-status');
+  if (!net || !node) return;
+  try {
+    const s = JSON.parse(net.getState()) as { wifiEnabled?: boolean; ip?: string; ssid?: string; error?: string };
+    node.textContent = s.error ? `读取失败: ${s.error}`
+      : !s.wifiEnabled ? 'WiFi 关（热点模式或无网络）——Mac 端 sync 不可用'
+        : s.ip ? `WiFi 开 · ${s.ip}${s.ssid ? ` · ${s.ssid}` : ''} —— Mac 端可一键 sync`
+          : 'WiFi 开 · 还没拿到 IP（未连上网络？）';
+  } catch { node.textContent = '读取失败'; }
+}
+
 function ctlHtml(c: SCtl, i: number): string {
   const badge = c.badge === 'eff' ? '<span class="sbadge eff">生效</span>' : c.badge === 'dev' ? '<span class="sbadge">调试</span>' : '<span class="sbadge weak">弱效</span>';
   const head = `<div class="sl"><div class="sn">${esc(c.label)} ${badge}</div>${c.desc ? `<div class="sd">${esc(c.desc)}</div>` : ''}</div>`;
@@ -377,6 +395,12 @@ export function renderSettings(): void {
     + `<div class="srow"><div class="sl"><div class="sn">上传到 Obsidian <span class="sbadge eff">生效</span></div><div class="sd">把本机阅读 / 日记 / 会议打包发到 panel（Obsidian 端「同步知识库」拉取）</div></div><button type="button" class="hbtn" id="dv-vault-pub"${vaultPublishBusy ? ' disabled' : ''}>${vaultPublishBusy ? '上传中…' : '上传'}</button></div>`
     + `<div class="srow"><div class="sl"><div class="sn">含概念层</div><div class="sd">跨文档概念枢纽 · 走 LLM · 较慢（默认关）</div></div><input type="checkbox" class="sck" id="dv-vault-concepts"${vaultPublishConcepts ? ' checked' : ''}${vaultPublishBusy ? ' disabled' : ''}></div>`
     + `<div class="srow"><div class="sl"><div class="sd" id="dv-vault-status">${esc(vaultPublishStatus)}</div></div></div>`
+    + (inkloopNet() ? (
+      `<div class="sgrp-h">同步链路 · 无线</div>`
+      + `<div class="srow"><div class="sl"><div class="sn">链路状态 <span class="sbadge eff">生效</span></div><div class="sd" id="dv-net-status">读取中…</div></div><button type="button" class="hbtn" id="dv-net-refresh">刷新</button></div>`
+      + `<div class="srow"><div class="sl"><div class="sn">WiFi 直连（主路）</div><div class="sd">与 Mac 同一 WiFi · Mac 端 sync-wifi.sh 一键拉取 Obsidian</div></div><button type="button" class="hbtn" id="dv-net-wifi">WiFi 面板</button></div>`
+      + `<div class="srow"><div class="sl"><div class="sn">热点（应急路）</div><div class="sd">现场没有共同 WiFi 时开热点让 Mac 加入（WiFi 与热点互斥）</div></div><button type="button" class="hbtn" id="dv-net-tether">热点设置</button></div>`
+    ) : '')
     + `<div class="sgrp-h">调试 · 会议</div>`
     + `<div class="srow"><div class="sl"><div class="sn">最近 panel 同步</div><div class="sd">${panelSyncStatusHtml()}</div></div></div>`
     + `<div class="srow"><div class="sl"><div class="sn">手动结束会议</div><div class="sd">仅测试用——正常流程结束只应由云端事件驱动，别拿这个替代真实结束</div></div><button type="button" class="hbtn" id="dv-force-end">选会议</button></div>`
@@ -392,6 +416,13 @@ export function renderSettings(): void {
     if (c.type === 'select') node.addEventListener('click', () => void openSelectCtl(node as HTMLButtonElement, c)); // 点开黑白选择浮层
     node.addEventListener('change', () => applyCtl(node, c)); // select 由 openSelectCtl 派发 change；check/number 原生 change
   });
+  // 同步链路卡：状态即时读一次；按钮跳系统面板（开关本身在系统页上点，app 无权限程序化切）。
+  if (inkloopNet()) {
+    refreshNetStatus();
+    el<HTMLButtonElement>('dv-net-refresh')?.addEventListener('click', refreshNetStatus);
+    el<HTMLButtonElement>('dv-net-wifi')?.addEventListener('click', () => inkloopNet()?.openWifiPanel());
+    el<HTMLButtonElement>('dv-net-tether')?.addEventListener('click', () => inkloopNet()?.openTetherSettings());
+  }
   // 调试·手动结束会议（C11：普通用户界面撤掉了这个入口，只留在这里给测试用；真实结束只该由云端/panel 事件驱动）。
   el<HTMLButtonElement>('dv-force-end')?.addEventListener('click', async () => {
     const meetings = (await listAllMeetings()).filter((m) => m.status !== 'ended');

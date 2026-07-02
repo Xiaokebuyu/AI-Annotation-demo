@@ -136,6 +136,9 @@ class MainActivity : ComponentActivity() {
         com.example.hmpocrpoc.InkLoopFilesBridge.attach(webView, this)
         ensureAllFilesAccess() // Android 11+ 读 /sdcard 任意文件需「所有文件访问」，启动时尝试请求一次
 
+        // 无线同步链路桥：window.InkLoopNet（dev 页读 WiFi 状态 + 跳系统面板切 WiFi/热点）。
+        com.example.hmpocrpoc.InkLoopNetBridge.attach(webView, this)
+
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (webView.canGoBack()) webView.goBack()
