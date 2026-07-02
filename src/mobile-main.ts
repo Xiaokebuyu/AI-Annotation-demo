@@ -423,7 +423,37 @@ async function renderDiaryList(): Promise<void> {
     row.innerHTML = `<div class="dd">${dateStr}<span class="wk">${wk}</span></div>`
       + `<div class="dc"><div class="dt"></div><div class="dm">${doc.page_count || 1} 页</div></div>`
       + `<button class="drow-del" aria-label="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg></button>`;
-    (row.querySelector('.dt') as HTMLElement).textContent = doc.filename || '未命名';
+    const titleNode = row.querySelector('.dt') as HTMLElement;
+    titleNode.textContent = doc.filename || '未命名';
+    titleNode.contentEditable = 'false';
+    titleNode.spellcheck = false;
+    // 单击标题=跟行内其余位置一样打开日记（延后一拍等，好判定是不是双击）；双击标题=就地改名。
+    let clickTimer: number | undefined;
+    titleNode.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (clickTimer !== undefined) { clearTimeout(clickTimer); clickTimer = undefined; return; } // 双击的第二下——交给 dblclick，这里不再重复打开
+      clickTimer = window.setTimeout(() => { clickTimer = undefined; openDiary(doc); }, 300);
+    });
+    titleNode.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      if (clickTimer !== undefined) { clearTimeout(clickTimer); clickTimer = undefined; }
+      titleNode.contentEditable = 'true';
+      titleNode.focus();
+      const range = document.createRange();
+      range.selectNodeContents(titleNode); // 全选现有标题，直接打字即可覆盖
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    });
+    titleNode.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); titleNode.blur(); } });
+    titleNode.addEventListener('blur', () => {
+      titleNode.contentEditable = 'false';
+      const t = (titleNode.textContent || '').trim() || '未命名';
+      titleNode.textContent = t;
+      if (t === (doc.filename || '未命名')) return;
+      doc.filename = t; // 同步闭包里的 doc，避免改名后立刻点开该行仍用旧标题渲染写区
+      void renameDiary(doc.document_id, t);
+    });
     row.addEventListener('click', () => openDiary(doc));
     row.querySelector('.drow-del')?.addEventListener('click', async (e) => {
       e.stopPropagation(); // 别触发 openDiary

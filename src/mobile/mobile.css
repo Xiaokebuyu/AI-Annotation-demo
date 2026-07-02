@@ -217,7 +217,7 @@
   .drow .dd{flex:0 0 46px;font:11px var(--mono);color:var(--mut);padding-top:3px;line-height:1.5;}
   .drow .dd .wk{display:block;color:var(--mut2);font-size:10px;}
   .drow .dc{flex:1;min-width:0;}
-  .drow .dc .dt{font:14.5px/1.45 var(--sans);color:var(--ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  .drow .dc .dt{font:14.5px/1.45 var(--sans);color:var(--ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;outline:none;}
   .drow .dc .dm{margin-top:5px;font:11px var(--mono);color:var(--mut);}
   .drow .ins{flex:0 0 auto;align-self:center;font:11px var(--mono);color:var(--mut);display:flex;align-items:center;gap:3px;}
   .drow .ins svg{width:12px;height:12px;}
